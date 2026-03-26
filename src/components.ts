@@ -10,6 +10,7 @@ import { createLogComponent } from '@well-known-components/logger'
 import { createMetricsComponent } from '@well-known-components/metrics'
 import { createTracerComponent } from '@well-known-components/tracer-component'
 import { createTracedFetcherComponent } from '@dcl/traced-fetch-component'
+import { createPresentationManager } from './adapters/presentation-manager'
 import { metricDeclarations } from './metrics'
 import type { AppComponents, GlobalContext } from './types'
 
@@ -20,7 +21,29 @@ export async function initComponents(): Promise<AppComponents> {
   const tracer = await createTracerComponent()
   const fetcher = await createTracedFetcherComponent({ tracer })
   const logs = await createLogComponent({ metrics, tracer })
-  const server = await createServerComponent<GlobalContext>({ config, logs }, {})
+  const server = await createServerComponent<GlobalContext>(
+    { config, logs },
+    {
+      cors: {
+        maxAge: 36000
+      }
+    }
+  )
+
+  // Security headers middleware
+  const securityHeaders: Record<string, string> = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains'
+  }
+  server.use(async (_ctx, next) => {
+    const res = await next()
+    return {
+      ...res,
+      headers: { ...securityHeaders, ...(res.headers as Record<string, string> || {}) }
+    }
+  })
+
   const statusChecks = await createStatusCheckComponent({ server, config })
   createHttpTracerComponent({ server, tracer })
   instrumentHttpServerWithRequestLogger({ server, logger: logs }, { verbosity: Verbosity.INFO })
@@ -31,12 +54,15 @@ export async function initComponents(): Promise<AppComponents> {
 
   await instrumentHttpServerWithPromClientRegistry({ metrics, server, config, registry: metrics.registry })
 
+  const presentationManager = createPresentationManager({ config, logs })
+
   return {
     fetcher,
     config,
     logs,
     server,
     statusChecks,
-    metrics
+    metrics,
+    presentationManager
   }
 }

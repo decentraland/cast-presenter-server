@@ -1,11 +1,9 @@
-ARG RUN
-
 FROM node:24-alpine as builderenv
 
 WORKDIR /app
 
-# some packages require a build step
-RUN apk add --no-cache build-base
+# build deps for node-canvas and other native modules
+RUN apk add --no-cache build-base cairo-dev jpeg-dev pango-dev giflib-dev librsvg-dev pixman-dev python3
 
 # install dependencies
 COPY package.json /app/package.json
@@ -27,11 +25,16 @@ FROM node:24-alpine
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
 
-# We use Tini to handle signals and PID1 (https://github.com/krallin/tini, read why here https://github.com/krallin/tini/issues/8)
-RUN apk add --no-cache tini
+# Runtime deps: tini, ffmpeg, and node-canvas shared libs
+RUN apk add --no-cache tini ffmpeg cairo pango giflib librsvg pixman jpeg
+
+RUN addgroup -g 1001 -S appuser && adduser -S appuser -u 1001
 
 WORKDIR /app
 COPY --from=builderenv /app /app
+RUN chown -R appuser:appuser /app
+
+USER appuser
 
 # Please _DO NOT_ use a custom ENTRYPOINT because it may prevent signals
 # (i.e. SIGTERM) to reach the service
