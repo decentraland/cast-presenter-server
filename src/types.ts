@@ -7,6 +7,7 @@ import type {
   IMetricsComponent
 } from '@well-known-components/interfaces'
 import type { metricDeclarations } from './metrics'
+import type { IPresentationManager } from './logic/types'
 
 export interface GlobalContext {
   components: BaseComponents
@@ -19,6 +20,7 @@ export interface BaseComponents {
   server: IHttpServerComponent<GlobalContext>
   metrics: IMetricsComponent<keyof typeof metricDeclarations>
   fetcher: IFetchComponent
+  presentationManager: IPresentationManager
 }
 
 // components used in runtime
