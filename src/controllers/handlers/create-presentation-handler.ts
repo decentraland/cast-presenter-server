@@ -1,10 +1,13 @@
+import * as dns from 'dns/promises'
 import * as path from 'path'
 import { Readable } from 'stream'
 import Busboy = require('busboy')
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
+import { isPrivateIP } from '../../adapters/video-compositor'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
+const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
 
 // PDF starts with %PDF, PPTX is a ZIP starting with PK\x03\x04
 const PDF_MAGIC = Buffer.from('%PDF')
@@ -18,9 +21,15 @@ export function validateMagicBytes(buffer: Buffer, fileType: 'pdf' | 'pptx'): bo
 }
 
 export function sanitizeFilename(filename: string): string {
-  // Extract basename to prevent path traversal, strip non-safe characters
   const base = path.basename(filename)
   return base.replace(/[^a-zA-Z0-9._-]/g, '_')
+}
+
+function getFileTypeFromName(filename: string): 'pdf' | 'pptx' | null {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith('.pdf')) return 'pdf'
+  if (lower.endsWith('.pptx')) return 'pptx'
+  return null
 }
 
 interface ParsedFormData {
@@ -69,6 +78,79 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
   })
 }
 
+/**
+ * Download a file from a public HTTPS URL with size limit and timeout.
+ * Blocks private IPs to prevent SSRF.
+ */
+async function downloadFromUrl(url: string): Promise<{ buffer: Buffer; filename: string }> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`Invalid URL: ${url}`)
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('URL must use HTTPS')
+  }
+
+  // Block private IPs
+  try {
+    const addresses = await dns.resolve4(parsed.hostname)
+    for (const addr of addresses) {
+      if (isPrivateIP(addr)) {
+        throw new Error(`URL resolves to private IP: ${parsed.hostname}`)
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('private IP')) throw err
+    // DNS failure — let fetch fail naturally
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
+
+  let response: Response
+  try {
+    response = await fetch(url, { redirect: 'follow', signal: controller.signal })
+  } catch (err) {
+    clearTimeout(timeout)
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)
+    }
+    throw err
+  }
+
+  if (!response.ok || !response.body) {
+    clearTimeout(timeout)
+    throw new Error(`HTTP ${response.status} downloading ${url}`)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Buffer[] = []
+  let bytesRead = 0
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      bytesRead += value.byteLength
+      if (bytesRead > MAX_FILE_SIZE) {
+        throw new Error(`Download exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)}MB`)
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  // Extract filename from URL path
+  const urlPath = parsed.pathname
+  const filename = urlPath.split('/').pop() || 'presentation'
+
+  return { buffer: Buffer.concat(chunks), filename }
+}
+
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager', '/presentations'>
 ): Promise<IHttpServerComponent.IResponse> {
@@ -82,66 +164,102 @@ export async function createPresentationHandler(
   try {
     const contentType = request.headers.get('content-type') || ''
 
-    if (!contentType.includes('multipart/form-data')) {
-      return { status: 400, body: { error: 'Content-Type must be multipart/form-data' } }
-    }
+    let fileBuffer: Buffer
+    let fileName: string
+    let livekitToken: string
+    let livekitUrl: string
 
-    // Reject oversized requests before reading the body into memory
-    const contentLength = request.headers.get('content-length')
-    if (contentLength && parseInt(contentLength, 10) > MAX_FILE_SIZE) {
-      return { status: 413, body: { error: `Request exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)}MB` } }
-    }
+    if (contentType.includes('application/json')) {
+      // URL-based creation
+      const body = (await request.json()) as Record<string, unknown>
+      const url = body.url as string | undefined
+      const token = body.livekitToken as string | undefined
+      const lkUrl = body.livekitUrl as string | undefined
 
-    let rawBody: Buffer
-    let file: ParsedFormData['file']
-    let fields: ParsedFormData['fields']
-    try {
-      rawBody = Buffer.from(await request.arrayBuffer())
-      const parsed = await parseMultipart(contentType, rawBody)
-      file = parsed.file
-      fields = parsed.fields
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('maximum size')) {
-        return { status: 413, body: { error: err.message } }
+      if (!url) {
+        return { status: 400, body: { error: 'Missing url' } }
       }
-      throw err
-    }
+      if (!token || !lkUrl) {
+        return { status: 400, body: { error: 'Missing livekitToken or livekitUrl' } }
+      }
 
-    if (!file) {
-      return { status: 400, body: { error: 'Missing file' } }
-    }
+      livekitToken = token
+      livekitUrl = lkUrl
 
-    const livekitToken = fields.livekitToken || null
-    const livekitUrl = fields.livekitUrl || null
+      try {
+        const downloaded = await downloadFromUrl(url)
+        fileBuffer = downloaded.buffer
+        fileName = downloaded.filename
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (message.includes('maximum size')) {
+          return { status: 413, body: { error: message } }
+        }
+        return { status: 400, body: { error: `Failed to download file: ${message}` } }
+      }
+    } else if (contentType.includes('multipart/form-data')) {
+      // File upload (existing)
+      const contentLength = request.headers.get('content-length')
+      if (contentLength && parseInt(contentLength, 10) > MAX_FILE_SIZE) {
+        return {
+          status: 413,
+          body: { error: `Request exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)}MB` }
+        }
+      }
 
-    if (!livekitToken || !livekitUrl) {
-      return { status: 400, body: { error: 'Missing livekitToken or livekitUrl' } }
-    }
+      let file: ParsedFormData['file']
+      let fields: ParsedFormData['fields']
+      try {
+        const rawBody = Buffer.from(await request.arrayBuffer())
+        const parsed = await parseMultipart(contentType, rawBody)
+        file = parsed.file
+        fields = parsed.fields
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('maximum size')) {
+          return { status: 413, body: { error: err.message } }
+        }
+        throw err
+      }
 
-    // Determine file type from extension
-    const rawFileName = sanitizeFilename(file.filename)
-    const fileNameLower = rawFileName.toLowerCase()
-    let fileType: 'pdf' | 'pptx'
-    if (fileNameLower.endsWith('.pdf')) {
-      fileType = 'pdf'
-    } else if (fileNameLower.endsWith('.pptx')) {
-      fileType = 'pptx'
+      if (!file) {
+        return { status: 400, body: { error: 'Missing file' } }
+      }
+
+      const token = fields.livekitToken || null
+      const lkUrl = fields.livekitUrl || null
+      if (!token || !lkUrl) {
+        return { status: 400, body: { error: 'Missing livekitToken or livekitUrl' } }
+      }
+
+      livekitToken = token
+      livekitUrl = lkUrl
+      fileBuffer = file.buffer
+      fileName = file.filename
     } else {
+      return {
+        status: 400,
+        body: { error: 'Content-Type must be multipart/form-data or application/json' }
+      }
+    }
+
+    // Common validation for both paths
+    const rawFileName = sanitizeFilename(fileName)
+    const fileType = getFileTypeFromName(rawFileName)
+    if (!fileType) {
       return { status: 400, body: { error: 'Unsupported file type. Only .pdf and .pptx files are supported.' } }
     }
 
-    // Validate file magic bytes to prevent disguised files
-    if (!validateMagicBytes(file.buffer, fileType)) {
+    if (!validateMagicBytes(fileBuffer, fileType)) {
       return { status: 400, body: { error: `File content does not match expected ${fileType.toUpperCase()} format` } }
     }
 
     logger.info(`Creating presentation from ${fileType} file`, {
       fileName: rawFileName,
-      fileSize: file.buffer.length
+      fileSize: fileBuffer.length
     })
 
     const info = await presentationManager.createPresentation(
-      file.buffer,
+      fileBuffer,
       fileType,
       livekitToken,
       livekitUrl,
