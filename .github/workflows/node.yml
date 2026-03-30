@@ -2,19 +2,21 @@ name: node
 
 on:
   push:
+    branches: [main]
+  pull_request:
 
 jobs:
-  install:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@v4
       - name: Use Node.js 24.x
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 24.x
           cache: yarn
       - name: install
-        run: yarn
+        run: yarn install --frozen-lockfile
       - name: lint
         run: yarn lint
       - name: build
