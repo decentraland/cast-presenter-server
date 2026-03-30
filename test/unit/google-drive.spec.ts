@@ -1,9 +1,9 @@
 import {
-  isValidFileId,
-  isFileAllowed,
+  PUBLIC_DRIVE_DOWNLOAD_URL,
   getAllowedFileIds,
-  isVideoMime,
-  PUBLIC_DRIVE_DOWNLOAD_URL
+  isFileAllowed,
+  isValidFileId,
+  isVideoMime
 } from '../../src/adapters/google-drive'
 
 describe('google-drive', () => {

@@ -8,13 +8,7 @@ function mockContext(overrides: {
   rangeHeader?: string | null
   fetchResponse?: { ok: boolean; status: number; headers: Record<string, string | null>; body: Readable | null }
 }) {
-  const {
-    fileId = 'valid-id',
-    allowedIds = 'valid-id',
-    corsOrigin = '',
-    rangeHeader = null,
-    fetchResponse
-  } = overrides
+  const { fileId = 'valid-id', allowedIds = 'valid-id', corsOrigin = '', rangeHeader = null, fetchResponse } = overrides
 
   const url = new URL('http://localhost/api/drive-video')
   if (fileId !== null) url.searchParams.set('fileId', fileId)

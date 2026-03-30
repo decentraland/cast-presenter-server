@@ -1,7 +1,4 @@
-import {
-  validateMagicBytes,
-  sanitizeFilename
-} from '../../src/controllers/handlers/create-presentation-handler'
+import { sanitizeFilename, validateMagicBytes } from '../../src/controllers/handlers/create-presentation-handler'
 
 describe('file-validation', () => {
   describe('validateMagicBytes', () => {

@@ -1,4 +1,4 @@
-import { isPrivateIP, validateVideoUrl, validateFilterParam } from '../../src/adapters/video-compositor'
+import { isPrivateIP, validateFilterParam, validateVideoUrl } from '../../src/adapters/video-compositor'
 
 describe('ssrf-protection', () => {
   describe('isPrivateIP', () => {
