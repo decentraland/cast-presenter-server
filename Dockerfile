@@ -2,31 +2,35 @@ FROM node:24-alpine as builderenv
 
 WORKDIR /app
 
-# build deps for native modules (@napi-rs/canvas ships prebuilt, but @livekit/rtc-node may need build tools)
-RUN apk add --no-cache build-base python3
+# some packages require a build step
+RUN apk update && apk add wget
 
 # install dependencies
 COPY package.json /app/package.json
 COPY yarn.lock /app/yarn.lock
-RUN yarn
+RUN yarn install --frozen-lockfile
 
 # build the app
 COPY . /app
 RUN yarn build
-RUN yarn test
 
 # remove devDependencies, keep only used dependencies
-RUN yarn install --frozen-lockfile --production
+RUN yarn install --prod --frozen-lockfile
 
 ########################## END OF BUILD STAGE ##########################
 
 FROM node:24-alpine
 
+RUN apk update && apk add --update wget && apk add --update tini ffmpeg
+
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
 
-# Runtime deps: tini and ffmpeg
-RUN apk add --no-cache tini ffmpeg
+ARG COMMIT_HASH=local
+ENV COMMIT_HASH=${COMMIT_HASH:-local}
+
+ARG CURRENT_VERSION=Unknown
+ENV CURRENT_VERSION=${CURRENT_VERSION:-Unknown}
 
 RUN addgroup -g 1001 -S appuser && adduser -S appuser -u 1001
 
@@ -35,6 +39,7 @@ COPY --from=builderenv /app /app
 RUN chown -R appuser:appuser /app
 
 USER appuser
+RUN echo "" > /app/.env
 
 # Please _DO NOT_ use a custom ENTRYPOINT because it may prevent signals
 # (i.e. SIGTERM) to reach the service
