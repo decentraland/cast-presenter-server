@@ -45,11 +45,7 @@ export interface IPresentationManager {
     fileName?: string
   ): Promise<PresentationInfo>
 
-  navigate(
-    id: string,
-    action: 'next' | 'prev' | 'goto',
-    slideIndex?: number
-  ): Promise<PresentationState>
+  navigate(id: string, action: 'next' | 'prev' | 'goto', slideIndex?: number): Promise<PresentationState>
 
   getState(id: string): PresentationState | null
 

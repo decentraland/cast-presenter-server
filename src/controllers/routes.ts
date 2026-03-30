@@ -1,12 +1,12 @@
 import { Router } from '@well-known-components/http-server'
-import { driveVideoHandler } from './handlers/drive-video-handler'
-import { pingHandler } from './handlers/ping-handler'
 import { createPresentationHandler } from './handlers/create-presentation-handler'
-import { navigateHandler } from './handlers/navigate-handler'
+import { driveVideoHandler } from './handlers/drive-video-handler'
 import { getStateHandler } from './handlers/get-state-handler'
-import { videoPlayHandler } from './handlers/video-play-handler'
-import { videoPauseHandler } from './handlers/video-pause-handler'
+import { navigateHandler } from './handlers/navigate-handler'
+import { pingHandler } from './handlers/ping-handler'
 import { stopPresentationHandler } from './handlers/stop-presentation-handler'
+import { videoPauseHandler } from './handlers/video-pause-handler'
+import { videoPlayHandler } from './handlers/video-play-handler'
 import { createRateLimiter } from '../logic/rate-limiter'
 import type { GlobalContext } from '../types'
 
@@ -16,7 +16,7 @@ export async function setupRouter(_: GlobalContext): Promise<Router<GlobalContex
 
   // Rate limiters per endpoint group
   const presentationLimiter = createRateLimiter(5, 60_000) // 5 per minute
-  const driveVideoLimiter = createRateLimiter(30, 60_000)  // 30 per minute
+  const driveVideoLimiter = createRateLimiter(30, 60_000) // 30 per minute
 
   router.get('/ping', pingHandler)
   router.get('/api/drive-video', async (ctx) => {

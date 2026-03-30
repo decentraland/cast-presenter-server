@@ -1,5 +1,5 @@
-import { Readable } from 'stream'
 import * as path from 'path'
+import { Readable } from 'stream'
 import Busboy = require('busboy')
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import type { HandlerContextWithPath } from '../../types'
@@ -41,7 +41,9 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
     busboy.on('file', (_fieldname: string, stream: Readable, info: { filename: string }) => {
       const chunks: Buffer[] = []
       stream.on('data', (chunk: Buffer) => chunks.push(chunk))
-      stream.on('limit', () => { fileLimitHit = true })
+      stream.on('limit', () => {
+        fileLimitHit = true
+      })
       stream.on('end', () => {
         result.file = { buffer: Buffer.concat(chunks), filename: info.filename }
       })
@@ -138,7 +140,13 @@ export async function createPresentationHandler(
       fileSize: file.buffer.length
     })
 
-    const info = await presentationManager.createPresentation(file.buffer, fileType, livekitToken, livekitUrl, rawFileName)
+    const info = await presentationManager.createPresentation(
+      file.buffer,
+      fileType,
+      livekitToken,
+      livekitUrl,
+      rawFileName
+    )
 
     return {
       status: 201,

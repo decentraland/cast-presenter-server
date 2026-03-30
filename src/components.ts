@@ -40,7 +40,7 @@ export async function initComponents(): Promise<AppComponents> {
     const res = await next()
     return {
       ...res,
-      headers: { ...securityHeaders, ...(res.headers as Record<string, string> || {}) }
+      headers: { ...securityHeaders, ...((res.headers as Record<string, string>) || {}) }
     }
   })
 

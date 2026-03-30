@@ -1,11 +1,12 @@
-import { spawn, ChildProcess } from 'child_process'
-import * as fs from 'fs'
-import * as path from 'path'
-import * as os from 'os'
+import { spawn } from 'child_process'
 import * as dns from 'dns/promises'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { LiveKitPublisher } from './livekit-publisher'
 import type { SlideVideoInfo } from '../logic/types'
+import type { ChildProcess } from 'child_process'
 
 // TODO: Implement audio track for videos
 // Current approach (fd 3 pipe from ffmpeg) causes audio track corruption
@@ -44,7 +45,7 @@ export function isPrivateIP(ip: string): boolean {
   // 169.254.0.0/16 (link-local / cloud metadata)
   if (parts[0] === 169 && parts[1] === 254) return true
   // 0.0.0.0
-  if (parts.every(p => p === 0)) return true
+  if (parts.every((p) => p === 0)) return true
   return false
 }
 
@@ -80,7 +81,7 @@ export async function validateVideoUrl(url: string): Promise<void> {
   }
 }
 
-export function validateFilterParam(value: number, name: string, max: number = 7680): void {
+export function validateFilterParam(value: number, name: string, max = 7680): void {
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new Error(`Invalid ffmpeg filter param ${name}=${value}, must be integer 0-${max}`)
   }
@@ -88,11 +89,7 @@ export function validateFilterParam(value: number, name: string, max: number = 7
 
 // Extract Google Drive file ID from various URL patterns
 function extractDriveFileId(url: string): string | null {
-  const patterns = [
-    /\/file\/d\/([a-zA-Z0-9_-]+)/,
-    /[?&]id=([a-zA-Z0-9_-]+)/,
-    /\/uc\?.*id=([a-zA-Z0-9_-]+)/
-  ]
+  const patterns = [/\/file\/d\/([a-zA-Z0-9_-]+)/, /[?&]id=([a-zA-Z0-9_-]+)/, /\/uc\?.*id=([a-zA-Z0-9_-]+)/]
   for (const pattern of patterns) {
     const match = url.match(pattern)
     if (match) return match[1]
@@ -221,17 +218,17 @@ export class VideoCompositor {
   }
 
   private probeVideo(filePath: string): Promise<boolean> {
-    return new Promise(resolve => {
-      const proc = spawn('ffprobe', [
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=codec_type',
-        '-of', 'csv=p=0',
-        filePath
-      ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    return new Promise((resolve) => {
+      const proc = spawn(
+        'ffprobe',
+        ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', filePath],
+        { stdio: ['ignore', 'pipe', 'pipe'] }
+      )
 
       let output = ''
-      proc.stdout!.on('data', (chunk: Buffer) => { output += chunk.toString() })
+      proc.stdout!.on('data', (chunk: Buffer) => {
+        output += chunk.toString()
+      })
       proc.on('close', (code) => {
         resolve(code === 0 && output.trim().includes('video'))
       })
@@ -251,19 +248,30 @@ export class VideoCompositor {
     const outputPath = path.join(this.tempDir, `transcoded-${Date.now()}-${width}x${height}.mp4`)
 
     return new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', [
-        '-i', inputPath,
-        '-map', '0:v',
-        '-vf', `scale=${width}:${height}`,
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-an', // no audio in pre-transcode
-        '-y',
-        outputPath
-      ], { stdio: ['ignore', 'ignore', 'pipe'] })
+      const proc = spawn(
+        'ffmpeg',
+        [
+          '-i',
+          inputPath,
+          '-map',
+          '0:v',
+          '-vf',
+          `scale=${width}:${height}`,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'fast',
+          '-an', // no audio in pre-transcode
+          '-y',
+          outputPath
+        ],
+        { stdio: ['ignore', 'ignore', 'pipe'] }
+      )
 
       let stderr = ''
-      proc.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      proc.stderr!.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+      })
 
       proc.on('close', (code) => {
         if (code === 0) {
@@ -301,22 +309,36 @@ export class VideoCompositor {
 
     // Single ffmpeg process: slide background + video overlay → composited RGBA
     // Video only — no audio (TODO: implement audio separately)
-    this.compositeProcess = spawn('ffmpeg', [
-      '-stream_loop', '-1',
-      '-f', 'rawvideo',
-      '-pix_fmt', 'rgba',
-      '-s', `${slideWidth}x${slideHeight}`,
-      '-r', String(FRAME_RATE),
-      '-i', slidePath,
-      '-i', videoPath,
-      '-filter_complex',
-      `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`,
-      '-an', // no audio output
-      '-f', 'rawvideo',
-      '-pix_fmt', 'rgba',
-      '-r', String(FRAME_RATE),
-      'pipe:1'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    this.compositeProcess = spawn(
+      'ffmpeg',
+      [
+        '-stream_loop',
+        '-1',
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        'rgba',
+        '-s',
+        `${slideWidth}x${slideHeight}`,
+        '-r',
+        String(FRAME_RATE),
+        '-i',
+        slidePath,
+        '-i',
+        videoPath,
+        '-filter_complex',
+        `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`,
+        '-an', // no audio output
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        'rgba',
+        '-r',
+        String(FRAME_RATE),
+        'pipe:1'
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    )
 
     // Buffer composited video data
     this.compositeProcess.stdout!.on('data', (chunk: Buffer) => {
