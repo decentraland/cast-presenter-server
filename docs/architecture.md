@@ -44,51 +44,46 @@ sequenceDiagram
 This diagram shows the internal processing flow when the server
 handles a presentation request.
 
-### Step 1: Input validation
-
 ```mermaid
 flowchart LR
-    A[POST /presentations] --> B{Rate limit OK?}
-    B -- No --> B1[429]
-    B -- Yes --> C{Content-Type?}
+    A(["POST /presentations"]):::start --> B["Rate limit"]
 
-    C -- multipart --> D1{Size ≤ 100MB?}
-    D1 -- No --> D1a[413]
-    D1 -- Yes --> D2[Parse form]
+    B --> C1["Extract file\nfrom payload"]
+    B --> C2["Download file\nfrom URL"]
 
-    C -- JSON --> E1{HTTPS + safe IP?}
-    E1 -- No --> E1a[400]
-    E1 -- Yes --> E2[Download URL]
-    E2 -- Too large --> E2a[413]
-    E2 -- Timeout --> E2b[400]
+    C1 --> D["Validate file\nextension + magic bytes"]
+    C2 --> D
 
-    D2 --> F{.pdf / .pptx?}
-    E2 -- OK --> F
-    F -- No --> F1[400]
-    F -- Yes --> G{Magic bytes?}
-    G -- No --> G1[400]
-    G -- Yes --> H[File ready]
+    D --> E["Connect to\nLiveKit"]
+    E --> F["Parse PDF"]
+    F --> G["Render\nfirst slide"]
+    G --> H["Publish\nvideo track"]
+    H --> I["Pre-download\nembedded videos"]
+    I --> J(["201 Created"]):::finish
+
+    classDef start fill:#4a9eff,color:#fff,stroke:none
+    classDef finish fill:#34d399,color:#fff,stroke:none
 ```
 
-### Step 2: Connect and publish
+Once the presentation is live, participants control it through
+data channel commands:
 
 ```mermaid
 flowchart LR
-    A[File ready] --> B[Connect to LiveKit]
-    B -- Fail --> B1[401 Invalid token]
-    B -- OK --> C[Parse PDF] --> D[Render first slide] --> E[Publish video track] --> F[Pre-download videos] --> G[201 Created]
-```
+    A(["Session active"]) --> B{"Command received"}
 
-### Step 3: Session command loop
+    B -- navigate --> C["Render target slide\n+ broadcast state"]
+    B -- "video:play" --> D["Composite video\nwith ffmpeg\n+ broadcast state"]
+    B -- "video:pause" --> E["Pause ffmpeg\n+ broadcast state"]
+    B -- get-state --> F["Broadcast\ncurrent state"]
+    B -- stop --> G["Disconnect\n+ cleanup"]
 
-```mermaid
-flowchart LR
-    N{Waiting for\ncommands} --> O[navigate] --> P[Render + broadcast] --> N
-    N --> Q[video:play] --> R[ffmpeg composite] --> N
-    N --> S[video:pause] --> T[SIGSTOP + broadcast] --> N
-    N --> U[get-state] --> V[Broadcast state] --> N
-    N --> W[stop] --> X[Disconnect + cleanup]
-    N --> Y{Idle 5 min?} -- Yes --> X
+    C --> B
+    D --> B
+    E --> B
+    F --> B
+
+    H{"No participants\nfor 5 minutes"} --> G
 ```
 
 ## Components
