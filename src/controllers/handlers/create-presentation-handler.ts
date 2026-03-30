@@ -10,14 +10,14 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const PDF_MAGIC = Buffer.from('%PDF')
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]) // PK\x03\x04
 
-function validateMagicBytes(buffer: Buffer, fileType: 'pdf' | 'pptx'): boolean {
+export function validateMagicBytes(buffer: Buffer, fileType: 'pdf' | 'pptx'): boolean {
   if (buffer.length < 4) return false
   if (fileType === 'pdf') return buffer.subarray(0, 4).equals(PDF_MAGIC)
   if (fileType === 'pptx') return buffer.subarray(0, 4).equals(ZIP_MAGIC)
   return false
 }
 
-function sanitizeFilename(filename: string): string {
+export function sanitizeFilename(filename: string): string {
   // Extract basename to prevent path traversal, strip non-safe characters
   const base = path.basename(filename)
   return base.replace(/[^a-zA-Z0-9._-]/g, '_')

@@ -30,7 +30,7 @@ const ALLOWED_VIDEO_DOMAINS = new Set([
 ])
 
 // Private IP ranges — block SSRF to internal services
-function isPrivateIP(ip: string): boolean {
+export function isPrivateIP(ip: string): boolean {
   const parts = ip.split('.').map(Number)
   if (parts.length !== 4) return false
   // 127.0.0.0/8
@@ -48,7 +48,7 @@ function isPrivateIP(ip: string): boolean {
   return false
 }
 
-async function validateVideoUrl(url: string): Promise<void> {
+export async function validateVideoUrl(url: string): Promise<void> {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -80,7 +80,7 @@ async function validateVideoUrl(url: string): Promise<void> {
   }
 }
 
-function validateFilterParam(value: number, name: string, max: number = 7680): void {
+export function validateFilterParam(value: number, name: string, max: number = 7680): void {
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new Error(`Invalid ffmpeg filter param ${name}=${value}, must be integer 0-${max}`)
   }
