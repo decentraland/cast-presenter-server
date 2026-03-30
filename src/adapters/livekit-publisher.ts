@@ -15,7 +15,7 @@ export class LiveKitPublisher {
   private videoTrack: LocalVideoTrack | null = null
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private presentationId: string
-  private dataHandler: ((data: any) => void) | null = null
+  private dataHandler: ((data: Record<string, unknown>) => void) | null = null
   private allowedRoles: Set<string>
   private logger: { info: (msg: string) => void; warn: (msg: string) => void }
 
@@ -44,41 +44,54 @@ export class LiveKitPublisher {
     // Listen for data channel messages for presentation control
     // Accept messages with topic 'presentation' OR topicless messages with 'presentation:' type prefix
     // (supports both cast2 web app and Unity clients that may not set topics)
-    this.room.on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: any, _kind?: any, topic?: string) => {
-      const identity = participant?.identity || 'unknown'
-      let senderRole = 'unknown'
-      try {
-        const meta = participant?.metadata ? JSON.parse(participant.metadata) : null
-        senderRole = meta?.role || 'none'
-      } catch {}
+    this.room.on(
+      RoomEvent.DataReceived,
+      (
+        payload: Uint8Array,
+        participant?: { identity?: string; metadata?: string },
+        _kind?: unknown,
+        topic?: string
+      ) => {
+        const identity = participant?.identity || 'unknown'
+        let senderRole = 'unknown'
+        try {
+          const meta = participant?.metadata ? JSON.parse(participant.metadata) : null
+          senderRole = meta?.role || 'none'
+        } catch {
+          /* ignored */
+        }
 
-      // Try to parse as JSON
-      let message: any
-      let isJson = false
-      try {
-        message = JSON.parse(new TextDecoder().decode(payload))
-        isJson = true
-      } catch {}
+        // Try to parse as JSON
+        let message: Record<string, unknown> | undefined
+        let isJson = false
+        try {
+          message = JSON.parse(new TextDecoder().decode(payload))
+          isJson = true
+        } catch {
+          /* ignored */
+        }
 
-      this.logger.info(
-        `[DataReceived] from=${identity} role=${senderRole} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
-      )
+        this.logger.info(
+          `[DataReceived] from=${identity} role=${senderRole} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
+        )
 
-      if (!this.dataHandler) return
-      if (!isJson) return
+        if (!this.dataHandler) return
+        if (!isJson || !message) return
 
-      // Only handle presentation commands (by topic or message type prefix)
-      if (topic !== 'presentation' && !message.type?.startsWith('presentation:')) return
+        // Only handle presentation commands (by topic or message type prefix)
+        const msgType = typeof message.type === 'string' ? message.type : ''
+        if (topic !== 'presentation' && !msgType.startsWith('presentation:')) return
 
-      // Auth: check sender's metadata.role against allowed roles
-      if (!this.allowedRoles.has(senderRole)) {
-        this.logger.warn(`[DataReceived] Role '${senderRole}' from ${identity} not authorized, ignoring`)
-        return
+        // Auth: check sender's metadata.role against allowed roles
+        if (!this.allowedRoles.has(senderRole)) {
+          this.logger.warn(`[DataReceived] Role '${senderRole}' from ${identity} not authorized, ignoring`)
+          return
+        }
+
+        this.logger.info(`[DataReceived] Processing command: ${msgType}`)
+        this.dataHandler(message)
       }
-
-      this.logger.info(`[DataReceived] Processing command: ${message.type}`)
-      this.dataHandler(message)
-    })
+    )
   }
 
   async startPublishing(width: number, height: number): Promise<void> {
@@ -94,7 +107,9 @@ export class LiveKitPublisher {
       },
       simulcast: false
     })
-    await this.room.localParticipant!.publishTrack(this.videoTrack, publishOptions)
+    const localParticipant = this.room.localParticipant
+    if (!localParticipant) throw new Error('No local participant')
+    await localParticipant.publishTrack(this.videoTrack, publishOptions)
   }
 
   pushFrame(rgbaBuffer: Buffer, width: number, height: number): void {
@@ -141,15 +156,21 @@ export class LiveKitPublisher {
   }
 
   // TODO: Implement audio track for videos
-  async startAudio(): Promise<void> {}
+  async startAudio(): Promise<void> {
+    /* noop */
+  }
 
   // TODO: Implement audio track for videos
-  async pushAudioFrame(): Promise<void> {}
+  async pushAudioFrame(): Promise<void> {
+    /* noop */
+  }
 
   // TODO: Implement audio track for videos
-  async stopAudio(): Promise<void> {}
+  async stopAudio(): Promise<void> {
+    /* noop */
+  }
 
-  setDataHandler(handler: (data: any) => void): void {
+  setDataHandler(handler: (data: Record<string, unknown>) => void): void {
     this.dataHandler = handler
   }
 
@@ -163,7 +184,9 @@ export class LiveKitPublisher {
   async publishData(message: Record<string, unknown>): Promise<void> {
     if (!this.room) return
     const data = new TextEncoder().encode(JSON.stringify(message))
-    await this.room.localParticipant!.publishData(data, {
+    const localParticipant = this.room.localParticipant
+    if (!localParticipant) return
+    await localParticipant.publishData(data, {
       topic: 'presentation',
       reliable: true
     })

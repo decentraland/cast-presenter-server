@@ -175,7 +175,7 @@ export class VideoCompositor {
     let bytesWritten = 0
 
     try {
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read()
         if (done) break
         bytesWritten += value.byteLength
@@ -226,7 +226,7 @@ export class VideoCompositor {
       )
 
       let output = ''
-      proc.stdout!.on('data', (chunk: Buffer) => {
+      proc.stdout?.on('data', (chunk: Buffer) => {
         output += chunk.toString()
       })
       proc.on('close', (code) => {
@@ -269,7 +269,7 @@ export class VideoCompositor {
       )
 
       let stderr = ''
-      proc.stderr!.on('data', (chunk: Buffer) => {
+      proc.stderr?.on('data', (chunk: Buffer) => {
         stderr += chunk.toString()
       })
 
@@ -341,11 +341,13 @@ export class VideoCompositor {
     )
 
     // Buffer composited video data
-    this.compositeProcess.stdout!.on('data', (chunk: Buffer) => {
+    this.compositeProcess.stdout?.on('data', (chunk: Buffer) => {
       this.videoBuffer = Buffer.concat([this.videoBuffer, chunk])
     })
 
-    this.compositeProcess.stderr!.on('data', () => {})
+    this.compositeProcess.stderr?.on('data', () => {
+      /* noop */
+    })
 
     // Stop heartbeat since we're pushing composited frames
     publisher.stopHeartbeat()

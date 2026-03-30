@@ -14,9 +14,9 @@ describe('rate-limiter', () => {
     limiter('1.2.3.4')
     const result = limiter('1.2.3.4')
     expect(result).not.toBeNull()
-    expect(result!.status).toBe(429)
-    expect((result!.body as any).error).toContain('Too many requests')
-    expect((result!.headers as any)['Retry-After']).toBeDefined()
+    expect(result?.status).toBe(429)
+    expect((result?.body as unknown as Record<string, string>)?.error).toContain('Too many requests')
+    expect((result?.headers as unknown as Record<string, string>)?.['Retry-After']).toBeDefined()
   })
 
   it('tracks IPs independently', () => {

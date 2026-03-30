@@ -9,7 +9,10 @@ interface RateLimitEntry {
  * Simple in-memory per-IP rate limiter.
  * Tracks request counts in a sliding window and returns 429 when exceeded.
  */
-export function createRateLimiter(maxRequests: number, windowMs: number) {
+export function createRateLimiter(
+  maxRequests: number,
+  windowMs: number
+): (ip: string) => IHttpServerComponent.IResponse | null {
   const store = new Map<string, RateLimitEntry>()
 
   // Periodically clean up expired entries to prevent memory leaks

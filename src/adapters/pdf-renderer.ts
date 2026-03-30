@@ -10,7 +10,7 @@ interface PDFDocumentProxy {
 
 interface PDFPageProxy {
   getViewport(params: { scale: number }): { width: number; height: number }
-  render(params: { canvasContext: any; viewport: any }): { promise: Promise<void> }
+  render(params: { canvasContext: unknown; viewport: { width: number; height: number } }): { promise: Promise<void> }
   getAnnotations(): Promise<PDFAnnotation[]>
 }
 
@@ -69,7 +69,7 @@ export class PDFRenderer {
     const canvas = createCanvas(width, height)
     const ctx = canvas.getContext('2d')
 
-    await page.render({ canvasContext: ctx as any, viewport }).promise
+    await page.render({ canvasContext: ctx as unknown, viewport }).promise
 
     // Draw video placeholders — black rectangle with play icon over media annotations
     const annotations = await page.getAnnotations()
@@ -120,9 +120,10 @@ export class PDFRenderer {
 
     return annotations
       .filter((a) => a.subtype === 'Link' && a.url && isMediaUrl(a.url))
+      .filter((a): a is PDFAnnotation & { url: string; rect: number[] } => !!a.url && !!a.rect)
       .map((a) => ({
-        url: a.url!,
-        geometry: pdfRectToCanvas(a.rect!, viewport, baseViewport.width)
+        url: a.url,
+        geometry: pdfRectToCanvas(a.rect, viewport, baseViewport.width)
       }))
   }
 

@@ -32,7 +32,7 @@ function mockContext(overrides: {
         }
       },
       fetcher: {
-        fetch: async (_url: string, _init?: any) => {
+        fetch: async (_url: string, _init?: RequestInit) => {
           if (fetchResponse) return fetchResponse
           const stream = new Readable()
           stream.push(Buffer.from('video-data'))
@@ -53,15 +53,25 @@ function mockContext(overrides: {
       },
       logs: {
         getLogger: () => ({
-          info: () => {},
-          warn: () => {},
-          error: () => {},
-          debug: () => {},
-          log: () => {}
+          info: () => {
+            /* noop */
+          },
+          warn: () => {
+            /* noop */
+          },
+          error: () => {
+            /* noop */
+          },
+          debug: () => {
+            /* noop */
+          },
+          log: () => {
+            /* noop */
+          }
         })
       }
     }
-  } as any
+  } as unknown as Parameters<typeof driveVideoHandler>[0]
 }
 
 describe('drive-video-handler', () => {

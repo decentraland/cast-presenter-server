@@ -6,13 +6,7 @@ import type { IConfigComponent, ILoggerComponent } from '@well-known-components/
 import { LiveKitPublisher } from './livekit-publisher'
 import { PDFRenderer } from './pdf-renderer'
 import { VideoCompositor } from './video-compositor'
-import type {
-  IPresentationManager,
-  PresentationInfo,
-  PresentationSession,
-  PresentationState,
-  SlideVideoInfo
-} from '../logic/types'
+import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from '../logic/types'
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000 // check every 60 seconds
@@ -104,16 +98,20 @@ export function createPresentationManager(components: {
     const slideCount = renderer.getSlideCount()
 
     // Handle data channel commands from participants
-    publisher.setDataHandler(async (message: any) => {
+    publisher.setDataHandler(async (message: Record<string, unknown>) => {
       const session = sessions.get(id)
       if (!session) return
       try {
         switch (message.type) {
           case 'presentation:navigate':
-            await navigateSession(session, message.action, message.slideIndex)
+            await navigateSession(
+              session,
+              message.action as 'next' | 'prev' | 'goto',
+              message.slideIndex as number | undefined
+            )
             break
           case 'presentation:video:play':
-            await playVideoSession(session, message.videoIndex)
+            await playVideoSession(session, message.videoIndex as number)
             break
           case 'presentation:video:pause':
             await pauseVideoSession(session)
@@ -173,7 +171,9 @@ export function createPresentationManager(components: {
     }
 
     sessions.set(id, session)
-    broadcastState(session).catch(() => {})
+    broadcastState(session).catch(() => {
+      /* noop */
+    })
 
     logger.info(`Presentation ${id} created with ${slideCount} slides`, {
       width,
@@ -222,7 +222,9 @@ export function createPresentationManager(components: {
         try {
           const transcodedPath = await downloader.preTranscode(rawPath, size.width, size.height)
           session.cachedVideoPaths.set(url, transcodedPath)
-          fs.unlink(rawPath, () => {})
+          fs.unlink(rawPath, () => {
+            /* noop */
+          })
           logger.info(`Pre-transcoded video to ${size.width}x${size.height}: ${url}`)
         } catch (transcodeErr) {
           logger.warn(
@@ -375,11 +377,18 @@ export function createPresentationManager(components: {
 
     session.compositor = compositor
 
+    if (!session.lastFrameBuffer) {
+      compositor.cleanup()
+      session.videoState = 'idle'
+      await broadcastState(session)
+      return
+    }
+
     // Start playback
     await compositor.startPlayback(
       videoPath,
       videoInfo,
-      session.lastFrameBuffer!,
+      session.lastFrameBuffer,
       session.lastFrameWidth,
       session.lastFrameHeight,
       session.publisher
@@ -391,7 +400,9 @@ export function createPresentationManager(components: {
     compositor.onEnd(() => {
       session.videoState = 'idle'
       session.compositor = null
-      broadcastState(session).catch(() => {})
+      broadcastState(session).catch(() => {
+        /* noop */
+      })
       logger.info(`Video ended naturally for presentation ${session.id}`)
     })
 
