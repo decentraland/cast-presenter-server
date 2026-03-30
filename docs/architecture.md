@@ -44,37 +44,49 @@ sequenceDiagram
 This diagram shows the internal processing flow when the server
 handles a presentation request.
 
-```mermaid
-flowchart TD
-    A[POST /presentations] --> B{Rate limit OK?}
-    B -- No --> B1[429 Too Many Requests]
-    B -- Yes --> C{Content-Type?}
-    C -- multipart/form-data --> D1{Content-Length ≤ 100MB?}
-    D1 -- No --> D1a[413 Payload Too Large]
-    D1 -- Yes --> D2[Parse multipart form]
-    C -- application/json --> E1{URL is HTTPS + not private IP?}
-    E1 -- No --> E1a[400 Invalid URL]
-    E1 -- Yes --> E2[Download file from URL]
-    E2 -- Exceeds 100MB --> E2a[413 Too Large]
-    E2 -- Timeout --> E2b[400 Download failed]
-    E2 -- OK --> F
-    D2 --> F{File extension .pdf/.pptx?}
-    F -- No --> F1[400 Unsupported file type]
-    F -- Yes --> G{Magic bytes match?}
-    G -- No --> G1[400 Invalid file content]
-    G -- Yes --> H[Connect to LiveKit]
-    H -- Fails --> H1[401 Invalid token]
-    H -- OK --> I[Parse PDF / extract slides]
-    I --> J[Render first slide]
-    J --> K[Publish video track to LiveKit]
-    K --> L[Start background video pre-download]
-    L --> M[Return 201 with presentation info]
+### Step 1: Input validation
 
-    M --> N{Waiting for commands}
-    N --> O[navigate] --> P[Render slide + broadcast state] --> N
-    N --> Q[video:play] --> R[Composite with ffmpeg + broadcast] --> N
-    N --> S[video:pause] --> T[SIGSTOP ffmpeg + broadcast] --> N
-    N --> U[get-state] --> V[Broadcast current state] --> N
+```mermaid
+flowchart LR
+    A[POST /presentations] --> B{Rate limit OK?}
+    B -- No --> B1[429]
+    B -- Yes --> C{Content-Type?}
+
+    C -- multipart --> D1{Size ≤ 100MB?}
+    D1 -- No --> D1a[413]
+    D1 -- Yes --> D2[Parse form]
+
+    C -- JSON --> E1{HTTPS + safe IP?}
+    E1 -- No --> E1a[400]
+    E1 -- Yes --> E2[Download URL]
+    E2 -- Too large --> E2a[413]
+    E2 -- Timeout --> E2b[400]
+
+    D2 --> F{.pdf / .pptx?}
+    E2 -- OK --> F
+    F -- No --> F1[400]
+    F -- Yes --> G{Magic bytes?}
+    G -- No --> G1[400]
+    G -- Yes --> H[File ready]
+```
+
+### Step 2: Connect and publish
+
+```mermaid
+flowchart LR
+    A[File ready] --> B[Connect to LiveKit]
+    B -- Fail --> B1[401 Invalid token]
+    B -- OK --> C[Parse PDF] --> D[Render first slide] --> E[Publish video track] --> F[Pre-download videos] --> G[201 Created]
+```
+
+### Step 3: Session command loop
+
+```mermaid
+flowchart LR
+    N{Waiting for\ncommands} --> O[navigate] --> P[Render + broadcast] --> N
+    N --> Q[video:play] --> R[ffmpeg composite] --> N
+    N --> S[video:pause] --> T[SIGSTOP + broadcast] --> N
+    N --> U[get-state] --> V[Broadcast state] --> N
     N --> W[stop] --> X[Disconnect + cleanup]
     N --> Y{Idle 5 min?} -- Yes --> X
 ```
