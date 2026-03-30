@@ -50,10 +50,12 @@ paths:
       tags: [Presentations]
       summary: Create a presentation
       description: |
-        Upload a PDF or PPTX file together with a LiveKit bot token.
-        The server connects to the LiveKit room, renders the first
-        slide, and begins publishing a video track. Rate-limited to
-        5 requests per minute per IP.
+        Create a presentation from a file upload or a public URL.
+        Accepts either `multipart/form-data` (file upload) or
+        `application/json` (URL download). The server connects to
+        the LiveKit room, renders the first slide, and begins
+        publishing a video track. Rate-limited to 5 requests per
+        minute per IP.
       requestBody:
         required: true
         content:
@@ -66,6 +68,23 @@ paths:
                   type: string
                   format: binary
                   description: PDF or PPTX file (max 100 MB)
+                livekitToken:
+                  type: string
+                  description: LiveKit JWT issued by comms-gatekeeper
+                livekitUrl:
+                  type: string
+                  description: LiveKit server WebSocket URL
+          application/json:
+            schema:
+              type: object
+              required: [url, livekitToken, livekitUrl]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  description: >
+                    Public HTTPS URL to a PDF or PPTX file (max
+                    100 MB). Private IPs are blocked.
                 livekitToken:
                   type: string
                   description: LiveKit JWT issued by comms-gatekeeper

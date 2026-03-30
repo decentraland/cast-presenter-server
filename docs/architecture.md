@@ -48,28 +48,35 @@ handles a presentation request.
 flowchart TD
     A[POST /presentations] --> B{Rate limit OK?}
     B -- No --> B1[429 Too Many Requests]
-    B -- Yes --> C{Content-Length ≤ 100MB?}
-    C -- No --> C1[413 Payload Too Large]
-    C -- Yes --> D[Parse multipart form]
-    D --> E{File extension .pdf/.pptx?}
-    E -- No --> E1[400 Unsupported file type]
-    E -- Yes --> F{Magic bytes match?}
-    F -- No --> F1[400 Invalid file content]
-    F -- Yes --> G[Connect to LiveKit]
-    G -- Fails --> G1[401 Invalid token]
-    G -- OK --> H[Parse PDF / extract slides]
-    H --> I[Render first slide]
-    I --> J[Publish video track to LiveKit]
-    J --> K[Start background video pre-download]
-    K --> L[Return 201 with presentation info]
+    B -- Yes --> C{Content-Type?}
+    C -- multipart/form-data --> D1{Content-Length ≤ 100MB?}
+    D1 -- No --> D1a[413 Payload Too Large]
+    D1 -- Yes --> D2[Parse multipart form]
+    C -- application/json --> E1{URL is HTTPS + not private IP?}
+    E1 -- No --> E1a[400 Invalid URL]
+    E1 -- Yes --> E2[Download file from URL]
+    E2 -- Exceeds 100MB --> E2a[413 Too Large]
+    E2 -- Timeout --> E2b[400 Download failed]
+    E2 -- OK --> F
+    D2 --> F{File extension .pdf/.pptx?}
+    F -- No --> F1[400 Unsupported file type]
+    F -- Yes --> G{Magic bytes match?}
+    G -- No --> G1[400 Invalid file content]
+    G -- Yes --> H[Connect to LiveKit]
+    H -- Fails --> H1[401 Invalid token]
+    H -- OK --> I[Parse PDF / extract slides]
+    I --> J[Render first slide]
+    J --> K[Publish video track to LiveKit]
+    K --> L[Start background video pre-download]
+    L --> M[Return 201 with presentation info]
 
-    L --> M{Waiting for commands}
-    M --> N[navigate] --> O[Render slide + broadcast state] --> M
-    M --> P[video:play] --> Q[Composite with ffmpeg + broadcast] --> M
-    M --> R[video:pause] --> S[SIGSTOP ffmpeg + broadcast] --> M
-    M --> T[get-state] --> U[Broadcast current state] --> M
-    M --> V[stop] --> W[Disconnect + cleanup]
-    M --> X{Idle 5 min?} -- Yes --> W
+    M --> N{Waiting for commands}
+    N --> O[navigate] --> P[Render slide + broadcast state] --> N
+    N --> Q[video:play] --> R[Composite with ffmpeg + broadcast] --> N
+    N --> S[video:pause] --> T[SIGSTOP ffmpeg + broadcast] --> N
+    N --> U[get-state] --> V[Broadcast current state] --> N
+    N --> W[stop] --> X[Disconnect + cleanup]
+    N --> Y{Idle 5 min?} -- Yes --> X
 ```
 
 ## Components
