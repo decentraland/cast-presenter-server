@@ -7,34 +7,69 @@ and security model.
 
 ## System overview
 
+The following diagram shows how a presentation is created and
+streamed to participants.
+
+```mermaid
+sequenceDiagram
+    participant Scene as Decentraland Scene
+    participant Cast2 as cast2 webapp
+    participant GK as comms-gatekeeper
+    participant PS as cast-presenter-server
+    participant LK as LiveKit SFU
+
+    Scene->>GK: 1. signed-fetch (request streaming key)
+    GK-->>Scene: 2. streaming key
+
+    Cast2->>GK: 3. validate streaming key
+    GK-->>Cast2: 4. bot-token (LiveKit JWT)
+
+    Cast2->>PS: 5. POST /presentations (file + bot-token)
+    PS->>LK: 6. connect with bot-token
+    LK-->>PS: 7. connection established (token valid)
+    PS->>PS: 8. parse PDF, render first slide
+    PS->>LK: 9. publish video track
+
+    Note over LK: Room participants see the presentation
+
+    LK-->>Scene: video track (slide frames)
+    Scene->>LK: data channel commands
+    LK-->>PS: data channel commands
+    PS->>LK: state broadcasts
+    LK-->>Scene: state broadcasts
 ```
-Decentraland Scene                    comms-gatekeeper
-      |                                     |
-      | 1. signed-fetch (request token)     |
-      |------------------------------------>|
-      |                                     |
-      | 2. streaming key                    |
-      |<------------------------------------|
-      |                                     |
-cast2 webapp                                |
-      |                                     |
-      | 3. validate streaming key           |
-      |------------------------------------>|
-      |                                     |
-      | 4. bot-token (LiveKit JWT)          |
-      |<------------------------------------|
-      |                                     |
-      | 5. POST /presentations              |
-      |   (file + bot-token)                |
-      |---------------------------> cast-presenter-server
-      |                                     |
-      |                              6. connect to LiveKit
-      |                              7. render slides
-      |                              8. publish video track
-      |                                     |
-      |       LiveKit Room                  |
-      |   [bot video track] <-------------- |
-      |   [data channel]  <--------------> |
+
+## Workflow diagram
+
+This diagram shows the internal processing flow when the server
+handles a presentation request.
+
+```mermaid
+flowchart TD
+    A[POST /presentations] --> B{Rate limit OK?}
+    B -- No --> B1[429 Too Many Requests]
+    B -- Yes --> C{Content-Length ≤ 100MB?}
+    C -- No --> C1[413 Payload Too Large]
+    C -- Yes --> D[Parse multipart form]
+    D --> E{File extension .pdf/.pptx?}
+    E -- No --> E1[400 Unsupported file type]
+    E -- Yes --> F{Magic bytes match?}
+    F -- No --> F1[400 Invalid file content]
+    F -- Yes --> G[Connect to LiveKit]
+    G -- Fails --> G1[401 Invalid token]
+    G -- OK --> H[Parse PDF / extract slides]
+    H --> I[Render first slide]
+    I --> J[Publish video track to LiveKit]
+    J --> K[Start background video pre-download]
+    K --> L[Return 201 with presentation info]
+
+    L --> M{Waiting for commands}
+    M --> N[navigate] --> O[Render slide + broadcast state] --> M
+    M --> P[video:play] --> Q[Composite with ffmpeg + broadcast] --> M
+    M --> R[video:pause] --> S[SIGSTOP ffmpeg + broadcast] --> M
+    M --> T[get-state] --> U[Broadcast current state] --> M
+    M --> V[stop] --> W[Disconnect + cleanup]
+    M --> X{Idle 5 min?} -- Yes --> W
 ```
 
 ## Components
