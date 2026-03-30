@@ -19,7 +19,11 @@ export class LiveKitPublisher {
   private allowedRoles: Set<string>
   private logger: { info: (msg: string) => void; warn: (msg: string) => void }
 
-  constructor(presentationId: string, logger: { info: (msg: string) => void; warn: (msg: string) => void }, allowedRoles?: Set<string>) {
+  constructor(
+    presentationId: string,
+    logger: { info: (msg: string) => void; warn: (msg: string) => void },
+    allowedRoles?: Set<string>
+  ) {
     this.presentationId = presentationId
     this.logger = logger
     this.allowedRoles = allowedRoles || new Set(['streamer', 'presenter', 'presentation'])
@@ -56,7 +60,9 @@ export class LiveKitPublisher {
         isJson = true
       } catch {}
 
-      this.logger.info(`[DataReceived] from=${identity} role=${senderRole} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`)
+      this.logger.info(
+        `[DataReceived] from=${identity} role=${senderRole} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
+      )
 
       if (!this.dataHandler) return
       if (!isJson) return

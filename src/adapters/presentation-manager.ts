@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto'
 import * as fs from 'fs'
-import * as path from 'path'
 import * as os from 'os'
+import * as path from 'path'
 import type { IConfigComponent, ILoggerComponent } from '@well-known-components/interfaces'
-import { PDFRenderer } from './pdf-renderer'
 import { LiveKitPublisher } from './livekit-publisher'
+import { PDFRenderer } from './pdf-renderer'
 import { VideoCompositor } from './video-compositor'
 import type {
   IPresentationManager,
@@ -45,7 +45,7 @@ export function createPresentationManager(components: {
         session.lastActivityAt = now
       } else if (now - session.lastActivityAt >= IDLE_TIMEOUT_MS) {
         logger.info(`Session ${id} idle for ${IDLE_TIMEOUT_MS / 1000}s with no participants, cleaning up`)
-        stopPresentation(id).catch(err => {
+        stopSession(session).catch((err) => {
           logger.warn(`Failed to stop idle session ${id}: ${err instanceof Error ? err.message : String(err)}`)
         })
       }
@@ -58,14 +58,16 @@ export function createPresentationManager(components: {
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
     // Broadcast to currently connected participants via data channel
-    await session.publisher.publishData({
-      type: 'presentation:state',
-      ...state
-    }).catch(err => {
-      logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
-    })
+    await session.publisher
+      .publishData({
+        type: 'presentation:state',
+        ...state
+      })
+      .catch((err) => {
+        logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
+      })
     // Update bot metadata so late joiners can read state immediately
-    await session.publisher.updateMetadataState(state as unknown as Record<string, unknown>).catch(err => {
+    await session.publisher.updateMetadataState(state as unknown as Record<string, unknown>).catch((err) => {
       logger.warn(`Failed to update metadata: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
@@ -85,7 +87,12 @@ export function createPresentationManager(components: {
     // avoid wasting resources on PDF parsing and rendering.
     const allowedRolesRaw = await config.getString('ALLOWED_COMMAND_ROLES')
     const allowedRoles = allowedRolesRaw
-      ? new Set(allowedRolesRaw.split(',').map(r => r.trim()).filter(Boolean))
+      ? new Set(
+          allowedRolesRaw
+            .split(',')
+            .map((r) => r.trim())
+            .filter(Boolean)
+        )
       : undefined
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = new LiveKitPublisher(id, publisherLogger, allowedRoles)
@@ -98,19 +105,24 @@ export function createPresentationManager(components: {
 
     // Handle data channel commands from participants
     publisher.setDataHandler(async (message: any) => {
+      const session = sessions.get(id)
+      if (!session) return
       try {
         switch (message.type) {
           case 'presentation:navigate':
-            await navigate(id, message.action, message.slideIndex)
+            await navigateSession(session, message.action, message.slideIndex)
             break
           case 'presentation:video:play':
-            await playVideo(id, message.videoIndex)
+            await playVideoSession(session, message.videoIndex)
             break
           case 'presentation:video:pause':
-            await pauseVideo(id)
+            await pauseVideoSession(session)
             break
           case 'presentation:stop':
-            await stopPresentation(id)
+            await stopSession(session)
+            break
+          case 'presentation:get-state':
+            await broadcastState(session)
             break
         }
       } catch (err) {
@@ -170,7 +182,7 @@ export function createPresentationManager(components: {
     })
 
     // Pre-download all videos across all slides in the background
-    preDownloadVideos(session).catch(err => {
+    preDownloadVideos(session).catch((err) => {
       logger.warn(`Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`)
     })
 
@@ -213,7 +225,9 @@ export function createPresentationManager(components: {
           fs.unlink(rawPath, () => {})
           logger.info(`Pre-transcoded video to ${size.width}x${size.height}: ${url}`)
         } catch (transcodeErr) {
-          logger.warn(`Pre-transcode failed (will scale at runtime): ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`)
+          logger.warn(
+            `Pre-transcode failed (will scale at runtime): ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`
+          )
           // Keep raw download — runtime overlay will scale it
         }
       } catch (err) {
@@ -223,14 +237,11 @@ export function createPresentationManager(components: {
     logger.info(`Pre-download queue complete. Cached: ${session.cachedVideoPaths.size} videos`)
   }
 
-  async function navigate(
-    id: string,
+  async function navigateSession(
+    session: InternalSession,
     action: 'next' | 'prev' | 'goto',
     slideIndex?: number
   ): Promise<PresentationState> {
-    const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
-
     // Prevent concurrent navigations
     if (session.navigating) {
       return getStateFromSession(session)
@@ -286,7 +297,7 @@ export function createPresentationManager(components: {
       session.lastFrameHeight = height
       session.slideVideos = slideVideos
 
-      logger.info(`Navigated presentation ${id} to slide ${targetSlide}`, {
+      logger.info(`Navigated presentation ${session.id} to slide ${targetSlide}`, {
         slideVideos: slideVideos.length
       })
 
@@ -311,10 +322,7 @@ export function createPresentationManager(components: {
   //   2. Pipe ffmpeg raw frames directly to VideoSource (skip canvas composite),
   //      temporarily replacing the slide track during playback.
   //   3. Single shared ffmpeg process with seek — avoid respawning per play.
-  async function playVideo(id: string, videoIndex: number): Promise<void> {
-    const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
-
+  async function playVideoSession(session: InternalSession, videoIndex: number): Promise<void> {
     // Prevent concurrent play requests
     if (session.videoState === 'playing' || session.videoState === 'loading') return
 
@@ -344,17 +352,17 @@ export function createPresentationManager(components: {
     }
 
     // Create compositor using session's shared temp dir
-    const compositorLogger = logs.getLogger(`video-compositor:${id}`)
+    const compositorLogger = logs.getLogger(`video-compositor:${session.id}`)
     const compositor = new VideoCompositor(compositorLogger, session.tempDir)
 
     // Use cached local file, or stream directly from URL via ffmpeg
     let videoPath = session.cachedVideoPaths.get(videoInfo.url)
     if (videoPath && fs.existsSync(videoPath)) {
-      logger.info(`Playing cached video for presentation ${id}`, { path: videoPath })
+      logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     } else {
       // Not pre-downloaded — ffmpeg will stream directly from URL (no full download needed)
       videoPath = await compositor.resolveStreamUrl(videoInfo.url)
-      logger.info(`Streaming video directly from URL for presentation ${id}`, { url: videoPath })
+      logger.info(`Streaming video directly from URL for presentation ${session.id}`, { url: videoPath })
     }
 
     // Check slide hasn't changed while we set up
@@ -384,33 +392,24 @@ export function createPresentationManager(components: {
       session.videoState = 'idle'
       session.compositor = null
       broadcastState(session).catch(() => {})
-      logger.info(`Video ended naturally for presentation ${id}`)
+      logger.info(`Video ended naturally for presentation ${session.id}`)
     })
 
     await broadcastState(session)
-    logger.info(`Video playback started for presentation ${id}`, { videoIndex })
+    logger.info(`Video playback started for presentation ${session.id}`, { videoIndex })
   }
 
-  async function pauseVideo(id: string): Promise<void> {
-    const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
-
+  async function pauseVideoSession(session: InternalSession): Promise<void> {
     if (session.compositor && session.videoState === 'playing') {
       session.compositor.pausePlayback()
       session.videoState = 'paused'
       await broadcastState(session)
-      logger.info(`Video paused for presentation ${id}`)
+      logger.info(`Video paused for presentation ${session.id}`)
     }
   }
 
-  async function stopPresentation(id: string): Promise<void> {
-    const session = sessions.get(id)
-    if (!session) {
-      logger.warn(`Tried to stop non-existent presentation ${id}`)
-      return
-    }
-
-    logger.info(`Stopping presentation ${id}`)
+  async function stopSession(session: InternalSession): Promise<void> {
+    logger.info(`Stopping presentation ${session.id}`)
 
     // Stop video playback
     if (session.compositor) {
@@ -428,9 +427,9 @@ export function createPresentationManager(components: {
     VideoCompositor.destroyTempDir(session.tempDir)
 
     // Remove session
-    sessions.delete(id)
+    sessions.delete(session.id)
 
-    logger.info(`Presentation ${id} stopped and cleaned up`)
+    logger.info(`Presentation ${session.id} stopped and cleaned up`)
   }
 
   function getStateFromSession(session: InternalSession): PresentationState {
@@ -443,6 +442,38 @@ export function createPresentationManager(components: {
       slideVideos: session.slideVideos,
       videoState: session.videoState
     }
+  }
+
+  // Public API — resolves session by id for HTTP handlers
+  async function navigate(
+    id: string,
+    action: 'next' | 'prev' | 'goto',
+    slideIndex?: number
+  ): Promise<PresentationState> {
+    const session = sessions.get(id)
+    if (!session) throw new Error(`Presentation ${id} not found`)
+    return navigateSession(session, action, slideIndex)
+  }
+
+  async function playVideo(id: string, videoIndex: number): Promise<void> {
+    const session = sessions.get(id)
+    if (!session) throw new Error(`Presentation ${id} not found`)
+    return playVideoSession(session, videoIndex)
+  }
+
+  async function pauseVideo(id: string): Promise<void> {
+    const session = sessions.get(id)
+    if (!session) throw new Error(`Presentation ${id} not found`)
+    return pauseVideoSession(session)
+  }
+
+  async function stopPresentation(id: string): Promise<void> {
+    const session = sessions.get(id)
+    if (!session) {
+      logger.warn(`Tried to stop non-existent presentation ${id}`)
+      return
+    }
+    return stopSession(session)
   }
 
   return {
