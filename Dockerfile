@@ -2,8 +2,8 @@ FROM node:24-alpine as builderenv
 
 WORKDIR /app
 
-# build deps for node-canvas and other native modules
-RUN apk add --no-cache build-base cairo-dev jpeg-dev pango-dev giflib-dev librsvg-dev pixman-dev python3
+# build deps for native modules (@napi-rs/canvas ships prebuilt, but @livekit/rtc-node may need build tools)
+RUN apk add --no-cache build-base python3
 
 # install dependencies
 COPY package.json /app/package.json
@@ -25,8 +25,8 @@ FROM node:24-alpine
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
 
-# Runtime deps: tini, ffmpeg, and node-canvas shared libs
-RUN apk add --no-cache tini ffmpeg cairo pango giflib librsvg pixman jpeg
+# Runtime deps: tini and ffmpeg
+RUN apk add --no-cache tini ffmpeg
 
 RUN addgroup -g 1001 -S appuser && adduser -S appuser -u 1001
 
