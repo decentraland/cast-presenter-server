@@ -1,50 +1,367 @@
 openapi: 3.0.3
 info:
-  title: X Server API
+  title: Cast Presenter Server API
   version: 1.0.0
   description: |
-    ## Overview
+    Real-time presentation streaming server for Decentraland. Accepts
+    PDF/PPTX uploads, renders slides as video frames, and publishes
+    them to a LiveKit room. Supports slide navigation, embedded video
+    playback, and a Google Drive video proxy.
 
-    <!-- Description of the API, including its purpose, key features, authentication requirements, and other relevant information -->
-
+    Authentication relies on LiveKit tokens issued by comms-gatekeeper.
+    A valid token is required to create a presentation; the server
+    validates it by connecting to the LiveKit room.
   contact:
     name: Decentraland Foundation
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
 
-# List of servers the API is available on
 servers:
-  - url: http://localhost:3000
+  - url: http://localhost:3002
     description: Local development server
 
-# List of tags for the API
 tags:
-  - name: X Server
-    description: API endpoints for X Server
-
-# List of security requirements for the API
-security:
-  # - SignedFetch: []
+  - name: Health
+    description: Health check
+  - name: Presentations
+    description: Presentation lifecycle and control
+  - name: Drive proxy
+    description: Google Drive public video proxy
 
 paths:
-  # List of paths for the API
-  /health/check:
+  /ping:
     get:
-      summary: Check the server health
-      description: Check the server health to check if it is alive
+      tags: [Health]
+      summary: Health check
       responses:
-        '200':
-          description: OK
-        '500':
-          description: Internal Server Error
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  body:
+                    type: string
+
+  /presentations:
+    post:
+      tags: [Presentations]
+      summary: Create a presentation
+      description: |
+        Upload a PDF or PPTX file together with a LiveKit bot token.
+        The server connects to the LiveKit room, renders the first
+        slide, and begins publishing a video track. Rate-limited to
+        5 requests per minute per IP.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, livekitToken, livekitUrl]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF or PPTX file (max 100 MB)
+                livekitToken:
+                  type: string
+                  description: LiveKit JWT issued by comms-gatekeeper
+                livekitUrl:
+                  type: string
+                  description: LiveKit server WebSocket URL
+      responses:
+        "201":
+          description: Presentation created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresentationInfo"
+        "400":
+          description: Invalid file type, missing fields, or bad magic bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: File exceeds 100 MB limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /presentations/{id}:
+    get:
+      tags: [Presentations]
+      summary: Get presentation state
+      parameters:
+        - $ref: "#/components/parameters/PresentationId"
+      responses:
+        "200":
+          description: Current presentation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresentationState"
+        "404":
+          description: Presentation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [Presentations]
+      summary: Stop a presentation
+      description: |
+        Disconnects from LiveKit, cleans up temporary files, and
+        removes the session.
+      parameters:
+        - $ref: "#/components/parameters/PresentationId"
+      responses:
+        "200":
+          description: Presentation stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: stopped
+
+  /presentations/{id}/navigate:
+    post:
+      tags: [Presentations]
+      summary: Navigate slides
+      parameters:
+        - $ref: "#/components/parameters/PresentationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [next, prev, goto]
+                slideIndex:
+                  type: integer
+                  description: Required when action is "goto"
+      responses:
+        "200":
+          description: Updated presentation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresentationState"
+        "404":
+          description: Presentation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /presentations/{id}/video/play:
+    post:
+      tags: [Presentations]
+      summary: Play an embedded video
+      parameters:
+        - $ref: "#/components/parameters/PresentationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [videoIndex]
+              properties:
+                videoIndex:
+                  type: integer
+                  description: Index into the current slide's video list
+      responses:
+        "200":
+          description: Playback started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: playing
+        "404":
+          description: Presentation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /presentations/{id}/video/pause:
+    post:
+      tags: [Presentations]
+      summary: Pause video playback
+      parameters:
+        - $ref: "#/components/parameters/PresentationId"
+      responses:
+        "200":
+          description: Playback paused
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: paused
+        "404":
+          description: Presentation not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/drive-video:
+    get:
+      tags: [Drive proxy]
+      summary: Stream a public Google Drive video
+      description: |
+        Proxies a public Google Drive file as a binary stream.
+        Supports HTTP Range requests for seek. The file ID must
+        appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist;
+        an empty allowlist denies all requests. Rate-limited to
+        30 requests per minute per IP.
+      parameters:
+        - name: fileId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-zA-Z0-9_-]+$"
+          description: Google Drive file ID
+      responses:
+        "200":
+          description: Full file stream
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+          content:
+            video/*:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Partial content (range request)
+          headers:
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1023/4096
+          content:
+            video/*:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: File ID not in allowlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: File not found or not accessible
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
 components:
-  securitySchemes:
-    SignedFetch:
-      type: apiKey
-      in: header
-      name: X-Identity-Auth-Chain-*
-      description: |
-        Signed fetch authentication using Decentraland's ADR-44 specification.
-        Multiple headers are used to provide the authentication chain.
+  parameters:
+    PresentationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Presentation session ID
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    PresentationInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        fileName:
+          type: string
+        slideCount:
+          type: integer
+        currentSlide:
+          type: integer
+        fileType:
+          type: string
+          enum: [pdf, pptx]
+
+    PresentationState:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        fileName:
+          type: string
+        slideCount:
+          type: integer
+        currentSlide:
+          type: integer
+        fileType:
+          type: string
+          enum: [pdf, pptx]
+        slideVideos:
+          type: array
+          items:
+            $ref: "#/components/schemas/SlideVideoInfo"
+        videoState:
+          type: string
+          enum: [idle, loading, playing, paused]
+
+    SlideVideoInfo:
+      type: object
+      properties:
+        url:
+          type: string
+        geometry:
+          type: object
+          properties:
+            x:
+              type: integer
+            y:
+              type: integer
+            width:
+              type: integer
+            height:
+              type: integer
