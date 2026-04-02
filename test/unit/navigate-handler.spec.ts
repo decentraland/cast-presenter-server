@@ -1,6 +1,6 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
-import { PresentationNotFoundError } from '../../src/adapters/presentation-manager'
 import { navigateHandler } from '../../src/controllers/handlers/navigate-handler'
+import { PresentationNotFoundError } from '../../src/logic/presentation-manager'
 import { createMockLogger, createMockPresentationState } from '../mocks/context'
 
 function createMockContext(body: Record<string, unknown>, options?: { throwError?: Error }) {

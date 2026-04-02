@@ -1,5 +1,5 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
-import type { PresentationState } from '../../src/adapters/presentation-manager'
+import type { PresentationState } from '../../src/logic/presentation-manager'
 
 export function createMockLogger(): ILoggerComponent {
   return {

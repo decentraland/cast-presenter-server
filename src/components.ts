@@ -14,8 +14,9 @@ import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
 import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
 import { createPdfRendererComponent } from './adapters/pdf-renderer'
-import { createPresentationManager } from './adapters/presentation-manager'
 import { createVideoCompositorComponent } from './adapters/video-compositor'
+import { createNetworkValidatorComponent } from './logic/network-validator'
+import { createPresentationManager } from './logic/presentation-manager'
 import { metricDeclarations } from './metrics'
 import type { AppComponents, GlobalContext } from './types'
 
@@ -59,13 +60,16 @@ export async function initComponents(): Promise<AppComponents> {
 
   await instrumentHttpServerWithPromClientRegistry({ metrics, server, config, registry: metrics.registry })
 
+  // Logic components
+  const networkValidator = createNetworkValidatorComponent()
+
   // Adapter components
   const googleDrive = await createGoogleDriveComponent({ config, fetcher })
-  const fileProvider = createFileProviderComponent({ logs })
+  const fileProvider = createFileProviderComponent({ logs, networkValidator })
 
   const liveKitPublisher = createLiveKitPublisherComponent()
   const pdfRenderer = createPdfRendererComponent()
-  const videoCompositor = createVideoCompositorComponent()
+  const videoCompositor = createVideoCompositorComponent({ networkValidator })
 
   const presentationManager = await createPresentationManager({
     config,
@@ -84,6 +88,10 @@ export async function initComponents(): Promise<AppComponents> {
     metrics,
     presentationManager,
     googleDrive,
-    fileProvider
+    fileProvider,
+    liveKitPublisher,
+    pdfRenderer,
+    videoCompositor,
+    networkValidator
   }
 }

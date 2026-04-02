@@ -2,12 +2,13 @@ import { randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import type { IConfigComponent, ILoggerComponent } from '@well-known-components/interfaces'
+import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
-import type { ILiveKitPublisher, ILiveKitPublisherComponent } from '../livekit-publisher/types'
-import type { IPdfRenderer, IPdfRendererComponent } from '../pdf-renderer/types'
-import type { IVideoCompositor, IVideoCompositorComponent } from '../video-compositor/types'
+import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
+import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
+import type { IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { AppComponents } from '../../types'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
@@ -23,13 +24,23 @@ interface InternalSession extends PresentationSession {
   lastActivityAt: number
 }
 
-export async function createPresentationManager(components: {
-  config: IConfigComponent
-  logs: ILoggerComponent
-  liveKitPublisher: ILiveKitPublisherComponent
-  pdfRenderer: IPdfRendererComponent
-  videoCompositor: IVideoCompositorComponent
-}): Promise<IPresentationManager> {
+/**
+ * Creates the presentation manager logic component.
+ *
+ * Orchestrates the full presentation lifecycle:
+ * 1. Connects to LiveKit (fail-fast auth validation)
+ * 2. Initializes PDF renderer and renders first slide
+ * 3. Publishes video track and starts heartbeat
+ * 4. Handles navigation, video playback, and session cleanup
+ *
+ * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
+ *
+ * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, videoCompositor
+ * @returns IPresentationManager implementation
+ */
+export async function createPresentationManager(
+  components: Pick<AppComponents, 'config' | 'logs' | 'liveKitPublisher' | 'pdfRenderer' | 'videoCompositor'>
+): Promise<IPresentationManager> {
   const { config, logs, liveKitPublisher, pdfRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
 
@@ -466,7 +477,7 @@ export async function createPresentationManager(components: {
     playVideo,
     pauseVideo,
     stopPresentation,
-    async start(): Promise<void> {
+    async [START_COMPONENT](): Promise<void> {
       idleCheckInterval = setInterval(() => {
         cleanupIdleSessions().catch((err) => {
           logger.warn(`Idle cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -474,7 +485,7 @@ export async function createPresentationManager(components: {
       }, IDLE_CHECK_INTERVAL_MS)
       logger.info('Presentation manager started', { maxConcurrent })
     },
-    async stop(): Promise<void> {
+    async [STOP_COMPONENT](): Promise<void> {
       if (idleCheckInterval) {
         clearInterval(idleCheckInterval)
         idleCheckInterval = null

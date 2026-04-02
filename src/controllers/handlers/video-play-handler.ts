@@ -1,5 +1,5 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
-import { PresentationNotFoundError } from '../../adapters/presentation-manager'
+import { PresentationNotFoundError } from '../../logic/presentation-manager'
 import type { HandlerContextWithPath } from '../../types'
 
 export async function videoPlayHandler(
