@@ -1,33 +1,10 @@
-import * as path from 'path'
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
-import { MaxConcurrentPresentationsError } from '../../adapters/presentation-manager'
+import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
+import { MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
-
-// PDF starts with %PDF, PPTX is a ZIP starting with PK\x03\x04
-const PDF_MAGIC = Buffer.from('%PDF')
-const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
-
-export function validateMagicBytes(buffer: Buffer, fileType: 'pdf' | 'pptx'): boolean {
-  if (buffer.length < 4) return false
-  if (fileType === 'pdf') return buffer.subarray(0, 4).equals(PDF_MAGIC)
-  if (fileType === 'pptx') return buffer.subarray(0, 4).equals(ZIP_MAGIC)
-  return false
-}
-
-export function sanitizeFilename(filename: string): string {
-  const base = path.basename(filename)
-  return base.replace(/[^a-zA-Z0-9._-]/g, '_')
-}
-
-function getFileTypeFromName(filename: string): 'pdf' | 'pptx' | null {
-  const lower = filename.toLowerCase()
-  if (lower.endsWith('.pdf')) return 'pdf'
-  if (lower.endsWith('.pptx')) return 'pptx'
-  return null
-}
 
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager' | 'fileProvider', '/presentations'>

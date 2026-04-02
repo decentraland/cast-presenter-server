@@ -1,4 +1,4 @@
-import { sanitizeFilename, validateMagicBytes } from '../../src/controllers/handlers/create-presentation-handler'
+import { sanitizeFilename, validateMagicBytes } from '../../src/logic/file-validator'
 
 describe('when validating file uploads', () => {
   describe('when checking magic bytes', () => {
