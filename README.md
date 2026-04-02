@@ -84,18 +84,8 @@ yarn build
 
 The service uses environment variables for configuration. Create a
 `.env` file in the root directory using `.env.default` as a reference.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HTTP_SERVER_PORT` | `3002` | HTTP server port |
-| `HTTP_SERVER_HOST` | `0.0.0.0` | HTTP server bind address |
-| `DRIVE_VIDEO_ALLOWED_FILE_IDS` | (empty) | Comma-separated Drive file IDs to allow (empty = deny all) |
-| `DRIVE_VIDEO_CORS_ORIGIN` | (empty) | CORS origin for the Drive proxy endpoint |
-| `ALLOWED_COMMAND_ROLES` | `presenter,streamer,presentation` | Metadata roles allowed to send data channel commands |
-
-> **Note:** In production, this server must run behind a
-> TLS-terminating reverse proxy (for example, nginx or AWS ALB) to
-> protect LiveKit tokens in transit.
+All available variables and their defaults are documented in
+`.env.default`.
 
 ### Running the service
 
@@ -109,7 +99,7 @@ Run with Docker:
 
 ```bash
 docker build -t cast-presenter-service .
-docker run -p 3002:3002 cast-presenter-service
+docker run -p 3000:3000 cast-presenter-service
 ```
 
 ## Testing
