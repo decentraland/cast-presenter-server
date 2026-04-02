@@ -10,7 +10,12 @@ import { createLogComponent } from '@well-known-components/logger'
 import { createMetricsComponent } from '@well-known-components/metrics'
 import { createTracerComponent } from '@well-known-components/tracer-component'
 import { createTracedFetcherComponent } from '@dcl/traced-fetch-component'
+import { createFileProviderComponent } from './adapters/file-provider'
+import { createGoogleDriveComponent } from './adapters/google-drive'
+import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
+import { createPdfRendererComponent } from './adapters/pdf-renderer'
 import { createPresentationManager } from './adapters/presentation-manager'
+import { createVideoCompositorComponent } from './adapters/video-compositor'
 import { metricDeclarations } from './metrics'
 import type { AppComponents, GlobalContext } from './types'
 
@@ -54,7 +59,21 @@ export async function initComponents(): Promise<AppComponents> {
 
   await instrumentHttpServerWithPromClientRegistry({ metrics, server, config, registry: metrics.registry })
 
-  const presentationManager = createPresentationManager({ config, logs })
+  // Adapter components
+  const googleDrive = await createGoogleDriveComponent({ config, fetcher })
+  const fileProvider = createFileProviderComponent({ logs })
+
+  const liveKitPublisher = createLiveKitPublisherComponent()
+  const pdfRenderer = createPdfRendererComponent()
+  const videoCompositor = createVideoCompositorComponent()
+
+  const presentationManager = await createPresentationManager({
+    config,
+    logs,
+    liveKitPublisher,
+    pdfRenderer,
+    videoCompositor
+  })
 
   return {
     fetcher,
@@ -63,6 +82,8 @@ export async function initComponents(): Promise<AppComponents> {
     server,
     statusChecks,
     metrics,
-    presentationManager
+    presentationManager,
+    googleDrive,
+    fileProvider
   }
 }

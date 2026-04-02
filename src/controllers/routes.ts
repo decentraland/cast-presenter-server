@@ -7,7 +7,7 @@ import { pingHandler } from './handlers/ping-handler'
 import { stopPresentationHandler } from './handlers/stop-presentation-handler'
 import { videoPauseHandler } from './handlers/video-pause-handler'
 import { videoPlayHandler } from './handlers/video-play-handler'
-import { createRateLimiter } from '../logic/rate-limiter'
+import { createRateLimiterComponent } from '../logic/rate-limiter'
 import type { GlobalContext } from '../types'
 
 // We return the entire router because it will be easier to test than a whole server
@@ -15,8 +15,9 @@ export async function setupRouter(_: GlobalContext): Promise<Router<GlobalContex
   const router = new Router<GlobalContext>()
 
   // Rate limiters per endpoint group
-  const presentationLimiter = createRateLimiter(5, 60_000) // 5 per minute
-  const driveVideoLimiter = createRateLimiter(30, 60_000) // 30 per minute
+  const rateLimiter = createRateLimiterComponent()
+  const presentationLimiter = rateLimiter.createLimiter(5, 60_000) // 5 per minute
+  const driveVideoLimiter = rateLimiter.createLimiter(30, 60_000) // 30 per minute
 
   router.get('/ping', pingHandler)
   router.get('/api/drive-video', async (ctx) => {

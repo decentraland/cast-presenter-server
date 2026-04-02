@@ -6,7 +6,9 @@ import type {
   ILoggerComponent,
   IMetricsComponent
 } from '@well-known-components/interfaces'
-import type { IPresentationManager } from './logic/types'
+import type { IFileProviderComponent } from './adapters/file-provider'
+import type { IGoogleDriveComponent } from './adapters/google-drive'
+import type { IPresentationManager } from './adapters/presentation-manager'
 import type { metricDeclarations } from './metrics'
 
 export interface GlobalContext {
@@ -21,6 +23,8 @@ export interface BaseComponents {
   metrics: IMetricsComponent<keyof typeof metricDeclarations>
   fetcher: IFetchComponent
   presentationManager: IPresentationManager
+  googleDrive: IGoogleDriveComponent
+  fileProvider: IFileProviderComponent
 }
 
 // components used in runtime
