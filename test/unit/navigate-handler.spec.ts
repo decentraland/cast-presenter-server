@@ -1,8 +1,9 @@
+import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { PresentationNotFoundError } from '../../src/adapters/presentation-manager'
 import { navigateHandler } from '../../src/controllers/handlers/navigate-handler'
 import { createMockLogger, createMockPresentationState } from '../mocks/context'
 
-function mockContext(body: Record<string, unknown>, options?: { throwError?: Error }) {
+function createMockContext(body: Record<string, unknown>, options?: { throwError?: Error }) {
   const mockState = createMockPresentationState()
 
   return {
@@ -13,48 +14,89 @@ function mockContext(body: Record<string, unknown>, options?: { throwError?: Err
     components: {
       logs: createMockLogger(),
       presentationManager: {
-        navigate: async () => {
+        navigate: jest.fn().mockImplementation(async () => {
           if (options?.throwError) throw options.throwError
           return mockState
-        }
+        })
       }
     }
   } as unknown as Parameters<typeof navigateHandler>[0]
 }
 
-describe('navigate-handler', () => {
-  it('returns 400 for missing action', async () => {
-    const res = await navigateHandler(mockContext({}))
-    expect(res.status).toBe(400)
-    expect((res.body as Record<string, string>).error).toContain('Invalid action')
+describe('when handling a navigate request', () => {
+  let result: IHttpServerComponent.IResponse
+
+  describe('and the action field is missing', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(createMockContext({}))
+    })
+
+    it('should return status 400', () => {
+      expect(result.status).toBe(400)
+    })
+
+    it('should return an error message about invalid action', () => {
+      expect((result.body as Record<string, string>).error).toContain('Invalid action')
+    })
   })
 
-  it('returns 400 for invalid action value', async () => {
-    const res = await navigateHandler(mockContext({ action: 'jump' }))
-    expect(res.status).toBe(400)
+  describe('and the action is an unsupported value', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(createMockContext({ action: 'jump' }))
+    })
+
+    it('should return status 400', () => {
+      expect(result.status).toBe(400)
+    })
   })
 
-  it('returns 200 for valid next action', async () => {
-    const res = await navigateHandler(mockContext({ action: 'next' }))
-    expect(res.status).toBe(200)
-    expect((res.body as Record<string, unknown>).currentSlide).toBeDefined()
+  describe('and the action is "next"', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(createMockContext({ action: 'next' }))
+    })
+
+    it('should return status 200', () => {
+      expect(result.status).toBe(200)
+    })
+
+    it('should return the presentation state with currentSlide', () => {
+      expect((result.body as Record<string, unknown>).currentSlide).toBeDefined()
+    })
   })
 
-  it('returns 200 for valid prev action', async () => {
-    const res = await navigateHandler(mockContext({ action: 'prev' }))
-    expect(res.status).toBe(200)
+  describe('and the action is "prev"', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(createMockContext({ action: 'prev' }))
+    })
+
+    it('should return status 200', () => {
+      expect(result.status).toBe(200)
+    })
   })
 
-  it('returns 200 for valid goto action', async () => {
-    const res = await navigateHandler(mockContext({ action: 'goto', slideIndex: 3 }))
-    expect(res.status).toBe(200)
+  describe('and the action is "goto" with a slide index', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(createMockContext({ action: 'goto', slideIndex: 3 }))
+    })
+
+    it('should return status 200', () => {
+      expect(result.status).toBe(200)
+    })
   })
 
-  it('returns 404 when presentation not found', async () => {
-    const res = await navigateHandler(
-      mockContext({ action: 'next' }, { throwError: new PresentationNotFoundError('test-id') })
-    )
-    expect(res.status).toBe(404)
-    expect((res.body as Record<string, string>).error).toContain('not found')
+  describe('and the presentation does not exist', () => {
+    beforeEach(async () => {
+      result = await navigateHandler(
+        createMockContext({ action: 'next' }, { throwError: new PresentationNotFoundError('test-id') })
+      )
+    })
+
+    it('should return status 404', () => {
+      expect(result.status).toBe(404)
+    })
+
+    it('should return an error message containing "not found"', () => {
+      expect((result.body as Record<string, string>).error).toContain('not found')
+    })
   })
 })

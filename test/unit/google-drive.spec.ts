@@ -1,93 +1,93 @@
+import type { IFetchComponent } from '@well-known-components/interfaces'
 import { createGoogleDriveComponent, getPublicDriveDownloadUrl } from '../../src/adapters/google-drive'
 import type { IGoogleDriveComponent } from '../../src/adapters/google-drive'
 
-describe('google-drive', () => {
+function createMockConfig(allowedIds: string) {
+  return {
+    getString: async (key: string) => {
+      if (key === 'DRIVE_VIDEO_ALLOWED_FILE_IDS') return allowedIds
+      return undefined
+    },
+    getNumber: async () => undefined,
+    requireString: async (key: string) => key,
+    requireNumber: async (key: string) => parseInt(key, 10)
+  }
+}
+
+function createMockFetcher(): IFetchComponent {
+  return { fetch: async () => new Response() } as unknown as IFetchComponent
+}
+
+describe('when using the google drive component', () => {
   let googleDrive: IGoogleDriveComponent
 
-  describe('with allowed file IDs configured', () => {
+  describe('and the allowlist has configured file IDs', () => {
     beforeEach(async () => {
       googleDrive = await createGoogleDriveComponent({
-        config: {
-          getString: async (key: string) => {
-            if (key === 'DRIVE_VIDEO_ALLOWED_FILE_IDS') return 'file-a, file-b'
-            return undefined
-          },
-          getNumber: async () => undefined,
-          requireString: async (key: string) => key,
-          requireNumber: async (key: string) => parseInt(key, 10)
-        },
-        fetcher: { fetch: async () => new Response() } as unknown as Parameters<
-          typeof createGoogleDriveComponent
-        >[0]['fetcher']
+        config: createMockConfig('file-a, file-b'),
+        fetcher: createMockFetcher()
       })
     })
 
-    describe('isValidFileId', () => {
-      it('accepts alphanumeric with hyphens and underscores', () => {
+    describe('when validating a file ID format', () => {
+      it('should accept alphanumeric characters with hyphens and underscores', () => {
         expect(googleDrive.isValidFileId('abc123-_XYZ')).toBe(true)
       })
 
-      it('rejects empty string', () => {
+      it('should reject an empty string', () => {
         expect(googleDrive.isValidFileId('')).toBe(false)
       })
 
-      it('rejects path traversal characters', () => {
+      it('should reject path traversal characters', () => {
         expect(googleDrive.isValidFileId('../etc/passwd')).toBe(false)
         expect(googleDrive.isValidFileId('file/id')).toBe(false)
       })
 
-      it('rejects special characters', () => {
+      it('should reject special characters like angle brackets and spaces', () => {
         expect(googleDrive.isValidFileId('id<script>')).toBe(false)
         expect(googleDrive.isValidFileId('id with spaces')).toBe(false)
       })
     })
 
-    describe('isFileAllowed', () => {
-      it('allows file in the allowlist', () => {
+    describe('when checking if a file is allowed', () => {
+      it('should return true for a file in the allowlist', () => {
         expect(googleDrive.isFileAllowed('file-a')).toBe(true)
       })
 
-      it('denies file not in the allowlist', () => {
+      it('should return false for a file not in the allowlist', () => {
         expect(googleDrive.isFileAllowed('file-c')).toBe(false)
       })
     })
 
-    describe('isVideoMime', () => {
-      it('accepts video MIME types', () => {
+    describe('when checking MIME types', () => {
+      it('should accept video MIME types regardless of case', () => {
         expect(googleDrive.isVideoMime('video/mp4')).toBe(true)
         expect(googleDrive.isVideoMime('video/webm')).toBe(true)
         expect(googleDrive.isVideoMime('Video/MP4')).toBe(true)
       })
 
-      it('rejects non-video MIME types', () => {
+      it('should reject non-video MIME types', () => {
         expect(googleDrive.isVideoMime('text/html')).toBe(false)
         expect(googleDrive.isVideoMime('application/pdf')).toBe(false)
       })
     })
   })
 
-  describe('with empty allowlist (default-deny)', () => {
+  describe('and the allowlist is empty (default-deny)', () => {
     beforeEach(async () => {
       googleDrive = await createGoogleDriveComponent({
-        config: {
-          getString: async () => '',
-          getNumber: async () => undefined,
-          requireString: async (key: string) => key,
-          requireNumber: async (key: string) => parseInt(key, 10)
-        },
-        fetcher: { fetch: async () => new Response() } as unknown as Parameters<
-          typeof createGoogleDriveComponent
-        >[0]['fetcher']
+        config: createMockConfig(''),
+        fetcher: createMockFetcher()
       })
     })
 
-    it('denies all files when allowlist is empty', () => {
+    it('should deny all files', () => {
       expect(googleDrive.isFileAllowed('any-id')).toBe(false)
     })
   })
 
-  describe('getPublicDriveDownloadUrl', () => {
-    it('encodes the file ID', () => {
+  describe('when building a public Drive download URL', () => {
+    it('should encode the file ID and include the export parameter', () => {
       const url = getPublicDriveDownloadUrl('abc-123')
       expect(url).toContain('id=abc-123')
       expect(url).toContain('export=download')
