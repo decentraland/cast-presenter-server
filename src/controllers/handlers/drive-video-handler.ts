@@ -1,4 +1,4 @@
-import { getAllowedFileIds, isFileAllowed, isValidFileId, streamPublicDriveFile } from '../../adapters/google-drive'
+import { FileNotFoundError, UnknownFileRetrievalError } from '../../adapters/google-drive'
 import type { HandlerContextWithPath } from '../../types'
 import type { Readable } from 'stream'
 
@@ -24,7 +24,7 @@ function getCorsHeaders(corsOrigin: string | undefined): Record<string, string> 
 
 export async function driveVideoHandler(
   context: Pick<
-    HandlerContextWithPath<'config' | 'fetcher' | 'logs', '/api/drive-video'>,
+    HandlerContextWithPath<'config' | 'googleDrive' | 'logs', '/api/drive-video'>,
     'url' | 'components' | 'request'
   >
 ): Promise<
@@ -33,16 +33,15 @@ export async function driveVideoHandler(
 > {
   const {
     url,
-    components: { config, fetcher, logs },
+    components: { config, googleDrive, logs },
     request
   } = context
 
-  const getConfig = (key: string) => config.getString(key)
-  const corsOrigin = await getConfig('DRIVE_VIDEO_CORS_ORIGIN')
+  const corsOrigin = await config.getString('DRIVE_VIDEO_CORS_ORIGIN')
   const cors = getCorsHeaders(corsOrigin)
 
   const fileId = url.searchParams.get('fileId')
-  if (!fileId || !isValidFileId(fileId)) {
+  if (!fileId || !googleDrive.isValidFileId(fileId)) {
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json', ...cors },
@@ -50,8 +49,7 @@ export async function driveVideoHandler(
     }
   }
 
-  const allowedList = await getAllowedFileIds(getConfig)
-  if (!isFileAllowed(fileId, allowedList)) {
+  if (!googleDrive.isFileAllowed(fileId)) {
     return {
       status: 403,
       headers: { 'Content-Type': 'application/json', ...cors },
@@ -63,16 +61,7 @@ export async function driveVideoHandler(
   const range = parseRange(rangeHeader)
 
   try {
-    const fetchAdapter = async (url: string, init?: { headers?: Record<string, string> }) => {
-      const res = await fetcher.fetch(url, init)
-      return {
-        ok: res.ok,
-        status: res.status,
-        headers: { get: (name: string) => res.headers.get(name) },
-        body: res.body
-      }
-    }
-    const result = await streamPublicDriveFile(fileId, fetchAdapter, range ?? undefined)
+    const result = await googleDrive.streamFile(fileId, range ?? undefined)
     const isPartial = range !== null && (result.contentRange !== undefined || range.end !== undefined)
     const status = isPartial ? 206 : 200
     const headers: Record<string, string> = {
@@ -86,11 +75,19 @@ export async function driveVideoHandler(
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
     logs.getLogger('drive-video').warn('Drive video proxy failed', { fileId, message })
-    if (message.includes('not found') || message.includes('not accessible')) {
+
+    if (err instanceof FileNotFoundError) {
       return {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...cors },
         body: JSON.stringify({ error: 'File not found or not accessible' })
+      }
+    }
+    if (err instanceof UnknownFileRetrievalError) {
+      return {
+        status: 502,
+        headers: { 'Content-Type': 'application/json', ...cors },
+        body: JSON.stringify({ error: 'Failed to stream file' })
       }
     }
     return {

@@ -1,4 +1,5 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
+import { PresentationNotFoundError } from '../../adapters/presentation-manager'
 import type { HandlerContextWithPath } from '../../types'
 
 export async function navigateHandler(
@@ -25,10 +26,10 @@ export async function navigateHandler(
 
     return { status: 200, body: state }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (message.includes('not found')) {
-      return { status: 404, body: { error: message } }
+    if (error instanceof PresentationNotFoundError) {
+      return { status: 404, body: { error: error.message } }
     }
+    const message = error instanceof Error ? error.message : String(error)
     logger.error(`Navigation failed: ${message}`)
     return { status: 500, body: { error: message } }
   }
