@@ -171,12 +171,45 @@ function createPublisher(
 
     async disconnect(): Promise<void> {
       this.stopHeartbeat()
+
+      // WORKAROUND: @livekit/rtc-node leaks file descriptors and memory on disconnect
+      // because Room.disconnect() never disposes its native FFI handle. We manually
+      // close tracks/sources and dispose handles below. The true fix belongs in the
+      // SDK itself — see https://github.com/livekit/node-sdks for upstream status.
+
+      // Close video track + source FIRST (disposes their native FFI handles)
+      // LocalVideoTrack.close(true) also closes the underlying VideoSource
+      if (videoTrack) {
+        try {
+          await videoTrack.close(true)
+        } catch (err) {
+          logger.warn(`Failed to close video track: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        videoTrack = null
+        videoSource = null
+      } else if (videoSource) {
+        try {
+          await videoSource.close()
+        } catch (err) {
+          logger.warn(`Failed to close video source: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        videoSource = null
+      }
+
+      // Disconnect room (cleans up JS listeners, sends FFI disconnect request)
       if (room) {
         await room.disconnect()
+
+        // Room.disconnect() does NOT dispose its native FFI handle — known SDK leak.
+        // Manually dispose to free the Rust-side Room struct and its file descriptors.
+        try {
+          const roomAny = room as unknown as { ffiHandle?: { dispose(): void } }
+          roomAny.ffiHandle?.dispose()
+        } catch {
+          // Best-effort — if SDK changes internals, we just skip
+        }
         room = null
       }
-      videoSource = null
-      videoTrack = null
     }
   }
 }
