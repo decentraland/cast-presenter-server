@@ -1,14 +1,15 @@
 import { Readable } from 'stream'
 import { driveVideoHandler } from '../../src/controllers/handlers/drive-video-handler'
+import { createMockLogger } from '../mocks/context'
 
 function mockContext(overrides: {
   fileId?: string | null
   allowedIds?: string
   corsOrigin?: string
   rangeHeader?: string | null
-  fetchResponse?: { ok: boolean; status: number; headers: Record<string, string | null>; body: Readable | null }
+  streamError?: Error
 }) {
-  const { fileId = 'valid-id', allowedIds = 'valid-id', corsOrigin = '', rangeHeader = null, fetchResponse } = overrides
+  const { fileId = 'valid-id', allowedIds = 'valid-id', corsOrigin = '', rangeHeader = null, streamError } = overrides
 
   const url = new URL('http://localhost/api/drive-video')
   if (fileId !== null) url.searchParams.set('fileId', fileId)
@@ -26,50 +27,37 @@ function mockContext(overrides: {
     components: {
       config: {
         getString: async (key: string) => {
-          if (key === 'DRIVE_VIDEO_ALLOWED_FILE_IDS') return allowedIds
           if (key === 'DRIVE_VIDEO_CORS_ORIGIN') return corsOrigin
           return undefined
-        }
+        },
+        getNumber: async () => undefined,
+        requireString: async (key: string) => key,
+        requireNumber: async (key: string) => parseInt(key, 10)
       },
-      fetcher: {
-        fetch: async (_url: string, _init?: RequestInit) => {
-          if (fetchResponse) return fetchResponse
+      googleDrive: {
+        isValidFileId: (id: string) => /^[a-zA-Z0-9_-]+$/.test(id),
+        isFileAllowed: (id: string) => {
+          if (!allowedIds) return false
+          return allowedIds
+            .split(',')
+            .map((s) => s.trim())
+            .includes(id)
+        },
+        streamFile: async () => {
+          if (streamError) throw streamError
           const stream = new Readable()
           stream.push(Buffer.from('video-data'))
           stream.push(null)
           return {
-            ok: true,
-            status: 200,
-            headers: {
-              get: (name: string) => {
-                if (name === 'content-type') return 'video/mp4'
-                if (name === 'content-length') return '1024'
-                return null
-              }
-            },
-            body: stream
+            stream,
+            contentLength: 1024,
+            contentRange: undefined,
+            contentType: 'video/mp4'
           }
-        }
+        },
+        isVideoMime: (mime: string) => mime.startsWith('video/')
       },
-      logs: {
-        getLogger: () => ({
-          info: () => {
-            /* noop */
-          },
-          warn: () => {
-            /* noop */
-          },
-          error: () => {
-            /* noop */
-          },
-          debug: () => {
-            /* noop */
-          },
-          log: () => {
-            /* noop */
-          }
-        })
-      }
+      logs: createMockLogger()
     }
   } as unknown as Parameters<typeof driveVideoHandler>[0]
 }
@@ -115,14 +103,8 @@ describe('drive-video-handler', () => {
   })
 
   it('returns 404 when Drive returns not found', async () => {
-    const ctx = mockContext({
-      fetchResponse: {
-        ok: false,
-        status: 404,
-        headers: { 'content-type': null },
-        body: null
-      }
-    })
+    const { FileNotFoundError } = await import('../../src/adapters/google-drive')
+    const ctx = mockContext({ streamError: new FileNotFoundError('test-id') })
     const res = await driveVideoHandler(ctx)
     expect(res.status).toBe(404)
   })

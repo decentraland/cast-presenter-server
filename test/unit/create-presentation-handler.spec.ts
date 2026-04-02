@@ -1,26 +1,5 @@
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
-
-function mockLogger() {
-  return {
-    getLogger: () => ({
-      info: () => {
-        /* noop */
-      },
-      warn: () => {
-        /* noop */
-      },
-      error: () => {
-        /* noop */
-      },
-      debug: () => {
-        /* noop */
-      },
-      log: () => {
-        /* noop */
-      }
-    })
-  }
-}
+import { createMockLogger } from '../mocks/context'
 
 function jsonContext(body: Record<string, unknown>) {
   return {
@@ -34,7 +13,7 @@ function jsonContext(body: Record<string, unknown>) {
       json: async () => body
     },
     components: {
-      logs: mockLogger(),
+      logs: createMockLogger(),
       presentationManager: {
         createPresentation: async () => ({
           id: 'test-id',
@@ -43,6 +22,14 @@ function jsonContext(body: Record<string, unknown>) {
           currentSlide: 0,
           fileType: 'pdf' as const
         })
+      },
+      fileProvider: {
+        fromUrl: async () => {
+          throw new (await import('../../src/adapters/file-provider')).InvalidUrlError('URL must use HTTPS')
+        },
+        fromMultipart: async () => {
+          throw new Error('not expected')
+        }
       }
     }
   } as unknown as Parameters<typeof createPresentationHandler>[0]
@@ -59,8 +46,9 @@ function badContentTypeContext() {
       }
     },
     components: {
-      logs: mockLogger(),
-      presentationManager: {}
+      logs: createMockLogger(),
+      presentationManager: {},
+      fileProvider: {}
     }
   } as unknown as Parameters<typeof createPresentationHandler>[0]
 }
@@ -70,7 +58,7 @@ describe('create-presentation-handler', () => {
     it('rejects unsupported Content-Type', async () => {
       const res = await createPresentationHandler(badContentTypeContext())
       expect(res.status).toBe(400)
-      expect((res.body as unknown as Record<string, string>).error).toContain('Content-Type')
+      expect((res.body as Record<string, string>).error).toContain('Content-Type')
     })
   })
 
@@ -78,13 +66,13 @@ describe('create-presentation-handler', () => {
     it('returns 400 when url is missing', async () => {
       const res = await createPresentationHandler(jsonContext({ livekitToken: 't', livekitUrl: 'u' }))
       expect(res.status).toBe(400)
-      expect((res.body as unknown as Record<string, string>).error).toContain('Missing url')
+      expect((res.body as Record<string, string>).error).toContain('Missing url')
     })
 
     it('returns 400 when livekitToken is missing', async () => {
       const res = await createPresentationHandler(jsonContext({ url: 'https://example.com/file.pdf' }))
       expect(res.status).toBe(400)
-      expect((res.body as unknown as Record<string, string>).error).toContain('Missing livekitToken')
+      expect((res.body as Record<string, string>).error).toContain('Missing livekitToken')
     })
 
     it('returns 400 for non-HTTPS URL', async () => {
@@ -96,19 +84,27 @@ describe('create-presentation-handler', () => {
         })
       )
       expect(res.status).toBe(400)
-      expect((res.body as unknown as Record<string, string>).error).toContain('HTTPS')
+      expect((res.body as Record<string, string>).error).toContain('HTTPS')
     })
 
     it('returns 400 for invalid URL', async () => {
-      const res = await createPresentationHandler(
-        jsonContext({
-          url: 'not-a-url',
-          livekitToken: 't',
-          livekitUrl: 'u'
-        })
-      )
+      const ctx = jsonContext({
+        url: 'not-a-url',
+        livekitToken: 't',
+        livekitUrl: 'u'
+      })
+      // Override fileProvider to throw InvalidUrlError for invalid URL
+      ctx.components.fileProvider = {
+        fromUrl: async () => {
+          throw new (await import('../../src/adapters/file-provider')).InvalidUrlError('Invalid URL: not-a-url')
+        },
+        fromMultipart: async () => {
+          throw new Error('not expected')
+        }
+      } as unknown as typeof ctx.components.fileProvider
+      const res = await createPresentationHandler(ctx)
       expect(res.status).toBe(400)
-      expect((res.body as unknown as Record<string, string>).error).toContain('Invalid URL')
+      expect((res.body as Record<string, string>).error).toContain('Invalid URL')
     })
   })
 })

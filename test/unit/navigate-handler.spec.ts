@@ -1,15 +1,9 @@
+import { PresentationNotFoundError } from '../../src/adapters/presentation-manager'
 import { navigateHandler } from '../../src/controllers/handlers/navigate-handler'
+import { createMockLogger, createMockPresentationState } from '../mocks/context'
 
-function mockContext(body: Record<string, unknown>, presentationExists = true) {
-  const mockState = {
-    id: 'test-id',
-    fileName: 'Test',
-    slideCount: 5,
-    currentSlide: 1,
-    fileType: 'pdf' as const,
-    slideVideos: [],
-    videoState: 'idle' as const
-  }
+function mockContext(body: Record<string, unknown>, options?: { throwError?: Error }) {
+  const mockState = createMockPresentationState()
 
   return {
     params: { id: 'test-id' },
@@ -17,28 +11,10 @@ function mockContext(body: Record<string, unknown>, presentationExists = true) {
       json: async () => body
     },
     components: {
-      logs: {
-        getLogger: () => ({
-          info: () => {
-            /* noop */
-          },
-          warn: () => {
-            /* noop */
-          },
-          error: () => {
-            /* noop */
-          },
-          debug: () => {
-            /* noop */
-          },
-          log: () => {
-            /* noop */
-          }
-        })
-      },
+      logs: createMockLogger(),
       presentationManager: {
-        navigate: async (_id: string, _action: string, _slideIndex?: number) => {
-          if (!presentationExists) throw new Error('Presentation not found')
+        navigate: async () => {
+          if (options?.throwError) throw options.throwError
           return mockState
         }
       }
@@ -50,7 +26,7 @@ describe('navigate-handler', () => {
   it('returns 400 for missing action', async () => {
     const res = await navigateHandler(mockContext({}))
     expect(res.status).toBe(400)
-    expect((res.body as unknown as Record<string, string>).error).toContain('Invalid action')
+    expect((res.body as Record<string, string>).error).toContain('Invalid action')
   })
 
   it('returns 400 for invalid action value', async () => {
@@ -61,7 +37,7 @@ describe('navigate-handler', () => {
   it('returns 200 for valid next action', async () => {
     const res = await navigateHandler(mockContext({ action: 'next' }))
     expect(res.status).toBe(200)
-    expect((res.body as unknown as Record<string, unknown>).currentSlide).toBeDefined()
+    expect((res.body as Record<string, unknown>).currentSlide).toBeDefined()
   })
 
   it('returns 200 for valid prev action', async () => {
@@ -75,8 +51,10 @@ describe('navigate-handler', () => {
   })
 
   it('returns 404 when presentation not found', async () => {
-    const res = await navigateHandler(mockContext({ action: 'next' }, false))
+    const res = await navigateHandler(
+      mockContext({ action: 'next' }, { throwError: new PresentationNotFoundError('test-id') })
+    )
     expect(res.status).toBe(404)
-    expect((res.body as unknown as Record<string, string>).error).toContain('not found')
+    expect((res.body as Record<string, string>).error).toContain('not found')
   })
 })
