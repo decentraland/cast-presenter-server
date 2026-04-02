@@ -1,7 +1,7 @@
 import { Readable } from 'stream'
-import type { IConfigComponent, IFetchComponent } from '@well-known-components/interfaces'
 import { FileNotFoundError, UnknownFileRetrievalError } from './errors'
 import type { DriveStreamResult, IGoogleDriveComponent } from './types'
+import type { AppComponents } from '../../types'
 
 /** Allow only Drive file ID characters: alphanumeric, hyphen, underscore */
 const FILE_ID_REGEX = /^[a-zA-Z0-9_-]+$/
@@ -38,10 +38,18 @@ function toNodeStream(webStream: ReadableStream): Readable {
   })
 }
 
-export async function createGoogleDriveComponent(components: {
-  config: IConfigComponent
-  fetcher: IFetchComponent
-}): Promise<IGoogleDriveComponent> {
+/**
+ * Creates the Google Drive adapter component.
+ *
+ * Resolves the file ID allowlist from config at creation time
+ * and provides methods for streaming public Drive files.
+ *
+ * @param components - Required: config (allowlist), fetcher (HTTP client)
+ * @returns IGoogleDriveComponent implementation
+ */
+export async function createGoogleDriveComponent(
+  components: Pick<AppComponents, 'config' | 'fetcher'>
+): Promise<IGoogleDriveComponent> {
   const { config, fetcher } = components
 
   // Resolve config at component creation

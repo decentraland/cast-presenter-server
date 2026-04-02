@@ -1,5 +1,11 @@
-import type { ILoggerComponent } from '@well-known-components/interfaces'
+import type { IBaseComponent, ILoggerComponent } from '@well-known-components/interfaces'
 
+/**
+ * A LiveKit publisher instance bound to a single presentation session.
+ *
+ * Manages the room connection, video track publishing, data channel
+ * handling, and metadata updates for one presentation.
+ */
 export interface ILiveKitPublisher {
   connect(url: string, token: string): Promise<void>
   startPublishing(width: number, height: number): Promise<void>
@@ -14,7 +20,18 @@ export interface ILiveKitPublisher {
   disconnect(): Promise<void>
 }
 
-export interface ILiveKitPublisherComponent {
+/**
+ * Factory component for creating per-session LiveKit publishers.
+ */
+export interface ILiveKitPublisherComponent extends IBaseComponent {
+  /**
+   * Creates a new publisher instance for a presentation session.
+   *
+   * @param presentationId - Unique ID for the presentation
+   * @param logger - Scoped logger for this publisher
+   * @param allowedRoles - Metadata roles allowed to send data channel commands
+   * @returns A new ILiveKitPublisher instance
+   */
   createPublisher(
     presentationId: string,
     logger: ILoggerComponent.ILogger,
