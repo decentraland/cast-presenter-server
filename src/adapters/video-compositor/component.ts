@@ -1,10 +1,11 @@
 import { spawn } from 'child_process'
-import * as dns from 'dns/promises'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo } from './types'
+import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
+import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
 
@@ -12,59 +13,14 @@ const FRAME_RATE = 15
 const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024 // 500 MB
 const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
 
-// Allowed domains for video downloads extracted from PDF annotations
-const ALLOWED_VIDEO_DOMAINS = new Set([
-  'drive.google.com',
-  'drive.usercontent.google.com',
-  'docs.google.com',
-  'youtube.com',
-  'www.youtube.com',
-  'youtu.be',
-  'vimeo.com',
-  'player.vimeo.com'
-])
-
-// Private IP ranges — block SSRF to internal services
-export function isPrivateIP(ip: string): boolean {
-  const parts = ip.split('.').map(Number)
-  if (parts.length !== 4) return false
-  if (parts[0] === 127) return true
-  if (parts[0] === 10) return true
-  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
-  if (parts[0] === 192 && parts[1] === 168) return true
-  if (parts[0] === 169 && parts[1] === 254) return true
-  if (parts.every((p) => p === 0)) return true
-  return false
-}
-
-export async function validateVideoUrl(url: string): Promise<void> {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error(`Invalid video URL: ${url}`)
-  }
-
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`Video URL must use HTTPS, got ${parsed.protocol} for ${url}`)
-  }
-
-  if (!ALLOWED_VIDEO_DOMAINS.has(parsed.hostname)) {
-    throw new Error(`Video URL domain not allowed: ${parsed.hostname}`)
-  }
-
-  try {
-    const addresses = await dns.resolve4(parsed.hostname)
-    for (const addr of addresses) {
-      if (isPrivateIP(addr)) {
-        throw new Error(`Video URL resolves to private IP: ${parsed.hostname} → ${addr}`)
-      }
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('private IP')) throw err
-  }
-}
-
+/**
+ * Validates an ffmpeg filter parameter is a safe integer within bounds.
+ *
+ * @param value - The numeric value to validate
+ * @param name - Parameter name for error messages
+ * @param max - Upper bound (default 7680 for 8K resolution)
+ * @throws {Error} If value is not an integer or out of range
+ */
 export function validateFilterParam(value: number, name: string, max = 7680): void {
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new Error(`Invalid ffmpeg filter param ${name}=${value}, must be integer 0-${max}`)
@@ -87,7 +43,11 @@ function getDriveDownloadUrls(fileId: string): string[] {
   ]
 }
 
-function createVideoCompositor(logger: ILoggerComponent.ILogger, tempDir?: string): IVideoCompositor {
+function createVideoCompositor(
+  logger: ILoggerComponent.ILogger,
+  networkValidator: INetworkValidatorComponent,
+  tempDir?: string
+): IVideoCompositor {
   let compositeProcess: ChildProcess | null = null
   let frameLoop: ReturnType<typeof setInterval> | null = null
   let videoBuffer: Buffer = Buffer.alloc(0)
@@ -200,7 +160,7 @@ function createVideoCompositor(logger: ILoggerComponent.ILogger, tempDir?: strin
 
   return {
     async downloadVideo(url: string): Promise<string> {
-      await validateVideoUrl(url)
+      await networkValidator.validateVideoUrl(url)
       const driveFileId = extractDriveFileId(url)
       const urlsToTry = driveFileId ? getDriveDownloadUrls(driveFileId) : [url]
 
@@ -217,7 +177,7 @@ function createVideoCompositor(logger: ILoggerComponent.ILogger, tempDir?: strin
     },
 
     async resolveStreamUrl(url: string): Promise<string> {
-      await validateVideoUrl(url)
+      await networkValidator.validateVideoUrl(url)
       const driveFileId = extractDriveFileId(url)
       if (driveFileId) {
         return `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`
@@ -403,9 +363,12 @@ function createVideoCompositor(logger: ILoggerComponent.ILogger, tempDir?: strin
   }
 }
 
-export function createVideoCompositorComponent(): IVideoCompositorComponent {
+export function createVideoCompositorComponent(
+  components: Pick<AppComponents, 'networkValidator'>
+): IVideoCompositorComponent {
+  const { networkValidator } = components
   return {
-    createCompositor: createVideoCompositor,
+    createCompositor: (logger, tempDir?) => createVideoCompositor(logger, networkValidator, tempDir),
     destroyTempDir(tempDir: string): void {
       try {
         fs.rmSync(tempDir, { recursive: true, force: true })

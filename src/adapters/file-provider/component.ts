@@ -1,10 +1,8 @@
-import * as dns from 'dns/promises'
 import { Readable } from 'stream'
 import Busboy = require('busboy')
-import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from './errors'
-import { isPrivateIP } from '../video-compositor'
 import type { FileProviderResult, IFileProviderComponent } from './types'
+import type { AppComponents } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
@@ -56,31 +54,18 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
   })
 }
 
-async function downloadFromUrl(url: string): Promise<{ buffer: Buffer; filename: string }> {
-  let parsed: URL
+async function downloadFromUrl(
+  url: string,
+  networkValidator: AppComponents['networkValidator']
+): Promise<{ buffer: Buffer; filename: string }> {
+  // Validate URL (HTTPS + private IP check) via centralized network validator
   try {
-    parsed = new URL(url)
-  } catch {
-    throw new InvalidUrlError(`Invalid URL: ${url}`)
-  }
-
-  if (parsed.protocol !== 'https:') {
-    throw new InvalidUrlError('URL must use HTTPS')
-  }
-
-  // Block private IPs
-  try {
-    const addresses = await dns.resolve4(parsed.hostname)
-    for (const addr of addresses) {
-      if (isPrivateIP(addr)) {
-        throw new InvalidUrlError(`URL resolves to private IP: ${parsed.hostname}`)
-      }
-    }
+    await networkValidator.validateHttpsUrl(url)
   } catch (err) {
-    if (err instanceof InvalidUrlError) throw err
-    // DNS failure — let fetch fail naturally
+    throw new InvalidUrlError(err instanceof Error ? err.message : String(err))
   }
 
+  const parsed = new URL(url) // safe — validateHttpsUrl already parsed it
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
 
@@ -124,7 +109,20 @@ async function downloadFromUrl(url: string): Promise<{ buffer: Buffer; filename:
   return { buffer: Buffer.concat(chunks), filename }
 }
 
-export function createFileProviderComponent(components: { logs: ILoggerComponent }): IFileProviderComponent {
+/**
+ * Creates the file provider adapter component.
+ *
+ * Handles file acquisition from two sources:
+ * 1. Multipart form uploads (parsed via busboy)
+ * 2. HTTPS URL downloads (with SSRF protection via networkValidator)
+ *
+ * @param components - Required: logs, networkValidator
+ * @returns IFileProviderComponent implementation
+ */
+export function createFileProviderComponent(
+  components: Pick<AppComponents, 'logs' | 'networkValidator'>
+): IFileProviderComponent {
+  const { networkValidator } = components
   const logger = components.logs.getLogger('file-provider')
 
   return {
@@ -143,7 +141,7 @@ export function createFileProviderComponent(components: { logs: ILoggerComponent
 
     async fromUrl(url: string): Promise<FileProviderResult> {
       logger.info('Downloading file from URL', { url })
-      const { buffer, filename } = await downloadFromUrl(url)
+      const { buffer, filename } = await downloadFromUrl(url, networkValidator)
       logger.info('Downloaded file from URL', { url, size: buffer.length })
       return {
         buffer,

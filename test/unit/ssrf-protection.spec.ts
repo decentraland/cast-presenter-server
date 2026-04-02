@@ -1,4 +1,5 @@
-import { isPrivateIP, validateFilterParam, validateVideoUrl } from '../../src/adapters/video-compositor'
+import { validateFilterParam } from '../../src/adapters/video-compositor'
+import { isPrivateIP, validateVideoUrl } from '../../src/logic/network-validator'
 
 describe('when checking SSRF protections', () => {
   describe('when evaluating an IP address', () => {
