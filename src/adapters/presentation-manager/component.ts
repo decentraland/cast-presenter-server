@@ -3,67 +3,87 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { IConfigComponent, ILoggerComponent } from '@well-known-components/interfaces'
-import { LiveKitPublisher } from './livekit-publisher'
-import { PDFRenderer } from './pdf-renderer'
-import { VideoCompositor } from './video-compositor'
-import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from '../logic/types'
+import { MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
+import type { ILiveKitPublisher, ILiveKitPublisherComponent } from '../livekit-publisher/types'
+import type { IPdfRenderer, IPdfRendererComponent } from '../pdf-renderer/types'
+import type { IVideoCompositor, IVideoCompositorComponent } from '../video-compositor/types'
 
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
-const IDLE_CHECK_INTERVAL_MS = 60 * 1000 // check every 60 seconds
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const IDLE_CHECK_INTERVAL_MS = 60 * 1000
+const DEFAULT_MAX_CONCURRENT = 10
 
 interface InternalSession extends PresentationSession {
-  renderer: PDFRenderer
-  publisher: LiveKitPublisher
-  compositor: VideoCompositor | null
-  cachedVideoPaths: Map<string, string> // url -> local path
-  navigating: boolean // lock to prevent concurrent navigations
+  renderer: IPdfRenderer
+  publisher: ILiveKitPublisher
+  compositor: IVideoCompositor | null
+  cachedVideoPaths: Map<string, string>
+  navigating: boolean
   tempDir: string
-  lastActivityAt: number // timestamp of last participant activity
+  lastActivityAt: number
 }
 
-export function createPresentationManager(components: {
+export async function createPresentationManager(components: {
   config: IConfigComponent
   logs: ILoggerComponent
-}): IPresentationManager {
-  const { config, logs } = components
+  liveKitPublisher: ILiveKitPublisherComponent
+  pdfRenderer: IPdfRendererComponent
+  videoCompositor: IVideoCompositorComponent
+}): Promise<IPresentationManager> {
+  const { config, logs, liveKitPublisher, pdfRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
 
-  const sessions = new Map<string, InternalSession>()
+  // Resolve config at component creation
+  const allowedRolesRaw = await config.getString('ALLOWED_COMMAND_ROLES')
+  const allowedRoles = allowedRolesRaw
+    ? new Set(
+        allowedRolesRaw
+          .split(',')
+          .map((r) => r.trim())
+          .filter(Boolean)
+      )
+    : new Set(['streamer', 'presenter', 'presentation'])
 
-  // Periodically clean up sessions with no remote participants for IDLE_TIMEOUT_MS
-  const idleCheckInterval = setInterval(() => {
+  const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
+  const maxConcurrent = maxConcurrentRaw
+    ? parseInt(maxConcurrentRaw, 10) || DEFAULT_MAX_CONCURRENT
+    : DEFAULT_MAX_CONCURRENT
+
+  const sessions = new Map<string, InternalSession>()
+  let idleCheckInterval: ReturnType<typeof setInterval> | null = null
+
+  async function cleanupIdleSessions(): Promise<void> {
     const now = Date.now()
     for (const [id, session] of sessions) {
       const participantCount = session.publisher.getRemoteParticipantCount()
       if (participantCount > 0) {
         session.lastActivityAt = now
-      } else if (now - session.lastActivityAt >= IDLE_TIMEOUT_MS) {
-        logger.info(`Session ${id} idle for ${IDLE_TIMEOUT_MS / 1000}s with no participants, cleaning up`)
-        stopSession(session).catch((err) => {
+      } else if (now - session.lastActivityAt >= DEFAULT_IDLE_TIMEOUT_MS) {
+        logger.info(`Session ${id} idle for ${DEFAULT_IDLE_TIMEOUT_MS / 1000}s with no participants, cleaning up`)
+        try {
+          await stopSession(session)
+        } catch (err) {
           logger.warn(`Failed to stop idle session ${id}: ${err instanceof Error ? err.message : String(err)}`)
-        })
+        }
       }
     }
-  }, IDLE_CHECK_INTERVAL_MS)
-
-  // Prevent the interval from keeping the process alive
-  idleCheckInterval.unref()
+  }
 
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
-    // Broadcast to currently connected participants via data channel
-    await session.publisher
-      .publishData({
+    try {
+      await session.publisher.publishData({
         type: 'presentation:state',
         ...state
       })
-      .catch((err) => {
-        logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
-      })
-    // Update bot metadata so late joiners can read state immediately
-    await session.publisher.updateMetadataState(state as unknown as Record<string, unknown>).catch((err) => {
+    } catch (err) {
+      logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    try {
+      await session.publisher.updateMetadataState(state as unknown as Record<string, unknown>)
+    } catch (err) {
       logger.warn(`Failed to update metadata: ${err instanceof Error ? err.message : String(err)}`)
-    })
+    }
   }
 
   async function createPresentation(
@@ -73,27 +93,20 @@ export function createPresentationManager(components: {
     livekitUrl: string,
     fileName?: string
   ): Promise<PresentationInfo> {
+    if (sessions.size >= maxConcurrent) {
+      throw new MaxConcurrentPresentationsError(maxConcurrent)
+    }
+
     const id = randomUUID()
     logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length })
 
-    // Connect to LiveKit FIRST — this validates the token.
-    // If the token is invalid/expired, LiveKit rejects immediately and we
-    // avoid wasting resources on PDF parsing and rendering.
-    const allowedRolesRaw = await config.getString('ALLOWED_COMMAND_ROLES')
-    const allowedRoles = allowedRolesRaw
-      ? new Set(
-          allowedRolesRaw
-            .split(',')
-            .map((r) => r.trim())
-            .filter(Boolean)
-        )
-      : undefined
+    // Connect to LiveKit FIRST — validates the token
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
-    const publisher = new LiveKitPublisher(id, publisherLogger, allowedRoles)
+    const publisher = liveKitPublisher.createPublisher(id, publisherLogger, allowedRoles)
     await publisher.connect(livekitUrl, livekitToken)
 
     // Initialize PDF renderer
-    const renderer = new PDFRenderer()
+    const renderer = pdfRenderer.createRenderer()
     await renderer.initialize(fileBuffer)
     const slideCount = renderer.getSlideCount()
 
@@ -171,9 +184,7 @@ export function createPresentationManager(components: {
     }
 
     sessions.set(id, session)
-    broadcastState(session).catch(() => {
-      /* noop */
-    })
+    await broadcastState(session)
 
     logger.info(`Presentation ${id} created with ${slideCount} slides`, {
       width,
@@ -190,9 +201,8 @@ export function createPresentationManager(components: {
   }
 
   async function preDownloadVideos(session: InternalSession): Promise<void> {
-    const downloader = new VideoCompositor(logger, session.tempDir)
+    const downloader = videoCompositor.createCompositor(logger, session.tempDir)
 
-    // Collect all unique video URLs with their target sizes
     const videoTargets = new Map<string, { width: number; height: number }>()
     for (let i = 0; i < session.slideCount; i++) {
       const videos = await session.renderer.getSlideVideos(i)
@@ -206,7 +216,6 @@ export function createPresentationManager(components: {
     logger.info(`Pre-download queue: ${videoTargets.size} videos to process`)
 
     for (const [url, size] of videoTargets) {
-      // Stop if session was ended while we're downloading
       if (!sessions.has(session.id)) {
         logger.info('Session ended, aborting pre-download queue')
         break
@@ -218,7 +227,6 @@ export function createPresentationManager(components: {
         session.cachedVideoPaths.set(url, rawPath)
         logger.info(`Pre-downloaded video: ${url}`)
 
-        // Try to pre-transcode (optional optimization — runtime overlay scales if this fails)
         try {
           const transcodedPath = await downloader.preTranscode(rawPath, size.width, size.height)
           session.cachedVideoPaths.set(url, transcodedPath)
@@ -230,7 +238,6 @@ export function createPresentationManager(components: {
           logger.warn(
             `Pre-transcode failed (will scale at runtime): ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`
           )
-          // Keep raw download — runtime overlay will scale it
         }
       } catch (err) {
         logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
@@ -244,7 +251,6 @@ export function createPresentationManager(components: {
     action: 'next' | 'prev' | 'goto',
     slideIndex?: number
   ): Promise<PresentationState> {
-    // Prevent concurrent navigations
     if (session.navigating) {
       return getStateFromSession(session)
     }
@@ -273,26 +279,19 @@ export function createPresentationManager(components: {
     session.navigating = true
 
     try {
-      // Stop any video playback when navigating
       if (session.compositor) {
         session.compositor.cleanup()
         session.compositor = null
       }
       session.videoState = 'idle'
 
-      // Render new slide
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
-      // Force high-quality keyframe for the new slide
       session.publisher.forceEncoderQuality(buffer, width, height)
-
-      // Restart heartbeat with new frame
       session.publisher.startHeartbeat(buffer, width, height)
 
-      // Get video annotations for new slide
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
-      // Update session state atomically
       session.currentSlide = targetSlide
       session.lastFrameBuffer = buffer
       session.lastFrameWidth = width
@@ -316,16 +315,7 @@ export function createPresentationManager(components: {
     return getStateFromSession(session)
   }
 
-  // TODO: Video playback optimization
-  // Current: ffmpeg → canvas composite → LiveKit. Heavy CPU/RAM, ~2-3s startup per play.
-  // Better approaches (in order of preference):
-  //   1. Publish video as a separate LiveKit track — cast2 overlays via CSS positioning.
-  //      Zero server-side compositing. LiveKit handles encoding natively.
-  //   2. Pipe ffmpeg raw frames directly to VideoSource (skip canvas composite),
-  //      temporarily replacing the slide track during playback.
-  //   3. Single shared ffmpeg process with seek — avoid respawning per play.
   async function playVideoSession(session: InternalSession, videoIndex: number): Promise<void> {
-    // Prevent concurrent play requests
     if (session.videoState === 'playing' || session.videoState === 'loading') return
 
     if (videoIndex < 0 || videoIndex >= session.slideVideos.length) {
@@ -334,7 +324,6 @@ export function createPresentationManager(components: {
 
     const videoInfo = session.slideVideos[videoIndex]
 
-    // If paused, just resume
     if (session.videoState === 'paused' && session.compositor) {
       session.compositor.resumePlayback()
       session.videoState = 'playing'
@@ -342,32 +331,26 @@ export function createPresentationManager(components: {
       return
     }
 
-    // Mark as loading immediately to block duplicate requests and show loading UI
     const requestedSlide = session.currentSlide
     session.videoState = 'loading'
     await broadcastState(session)
 
-    // Stop previous compositor if any
     if (session.compositor) {
       session.compositor.cleanup()
       session.compositor = null
     }
 
-    // Create compositor using session's shared temp dir
     const compositorLogger = logs.getLogger(`video-compositor:${session.id}`)
-    const compositor = new VideoCompositor(compositorLogger, session.tempDir)
+    const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
 
-    // Use cached local file, or stream directly from URL via ffmpeg
     let videoPath = session.cachedVideoPaths.get(videoInfo.url)
     if (videoPath && fs.existsSync(videoPath)) {
       logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     } else {
-      // Not pre-downloaded — ffmpeg will stream directly from URL (no full download needed)
       videoPath = await compositor.resolveStreamUrl(videoInfo.url)
       logger.info(`Streaming video directly from URL for presentation ${session.id}`, { url: videoPath })
     }
 
-    // Check slide hasn't changed while we set up
     if (session.currentSlide !== requestedSlide) {
       compositor.cleanup()
       session.videoState = 'idle'
@@ -384,7 +367,6 @@ export function createPresentationManager(components: {
       return
     }
 
-    // Start playback
     await compositor.startPlayback(
       videoPath,
       videoInfo,
@@ -396,7 +378,6 @@ export function createPresentationManager(components: {
 
     session.videoState = 'playing'
 
-    // When video ends naturally, reset state and broadcast
     compositor.onEnd(() => {
       session.videoState = 'idle'
       session.compositor = null
@@ -422,22 +403,14 @@ export function createPresentationManager(components: {
   async function stopSession(session: InternalSession): Promise<void> {
     logger.info(`Stopping presentation ${session.id}`)
 
-    // Stop video playback
     if (session.compositor) {
       session.compositor.cleanup()
       session.compositor = null
     }
 
-    // Disconnect from LiveKit
     await session.publisher.disconnect()
-
-    // Clean up PDF resources
     session.renderer.destroy()
-
-    // Clean up temp dir (all cached video files)
-    VideoCompositor.destroyTempDir(session.tempDir)
-
-    // Remove session
+    videoCompositor.destroyTempDir(session.tempDir)
     sessions.delete(session.id)
 
     logger.info(`Presentation ${session.id} stopped and cleaned up`)
@@ -455,26 +428,25 @@ export function createPresentationManager(components: {
     }
   }
 
-  // Public API — resolves session by id for HTTP handlers
   async function navigate(
     id: string,
     action: 'next' | 'prev' | 'goto',
     slideIndex?: number
   ): Promise<PresentationState> {
     const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
+    if (!session) throw new PresentationNotFoundError(id)
     return navigateSession(session, action, slideIndex)
   }
 
   async function playVideo(id: string, videoIndex: number): Promise<void> {
     const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
+    if (!session) throw new PresentationNotFoundError(id)
     return playVideoSession(session, videoIndex)
   }
 
   async function pauseVideo(id: string): Promise<void> {
     const session = sessions.get(id)
-    if (!session) throw new Error(`Presentation ${id} not found`)
+    if (!session) throw new PresentationNotFoundError(id)
     return pauseVideoSession(session)
   }
 
@@ -493,6 +465,29 @@ export function createPresentationManager(components: {
     getState,
     playVideo,
     pauseVideo,
-    stopPresentation
+    stopPresentation,
+    async start(): Promise<void> {
+      idleCheckInterval = setInterval(() => {
+        cleanupIdleSessions().catch((err) => {
+          logger.warn(`Idle cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }, IDLE_CHECK_INTERVAL_MS)
+      logger.info('Presentation manager started', { maxConcurrent })
+    },
+    async stop(): Promise<void> {
+      if (idleCheckInterval) {
+        clearInterval(idleCheckInterval)
+        idleCheckInterval = null
+      }
+      // Stop all active sessions
+      for (const session of sessions.values()) {
+        try {
+          await stopSession(session)
+        } catch (err) {
+          logger.warn(`Failed to stop session during shutdown: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      logger.info('Presentation manager stopped')
+    }
   }
 }

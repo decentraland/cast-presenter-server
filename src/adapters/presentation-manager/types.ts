@@ -1,7 +1,5 @@
-export interface SlideVideoInfo {
-  url: string
-  geometry: { x: number; y: number; width: number; height: number }
-}
+import type { IBaseComponent } from '@well-known-components/interfaces'
+import type { SlideVideoInfo } from '../video-compositor/types'
 
 export interface PresentationSession {
   id: string
@@ -36,7 +34,7 @@ export interface PresentationState {
   videoState: 'idle' | 'loading' | 'playing' | 'paused'
 }
 
-export interface IPresentationManager {
+export interface IPresentationManager extends IBaseComponent {
   createPresentation(
     fileBuffer: Buffer,
     fileType: 'pdf' | 'pptx',
