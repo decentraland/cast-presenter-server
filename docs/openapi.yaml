@@ -18,8 +18,10 @@ info:
     url: https://www.apache.org/licenses/LICENSE-2.0.html
 
 servers:
-  - url: http://localhost:3002
-    description: Local development server
+  - url: https://cast-presenter-service.decentraland.org
+    description: Production server
+  - url: https://cast-presenter-service.decentraland.zone
+    description: Development server
 
 tags:
   - name: Health
