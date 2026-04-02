@@ -108,8 +108,8 @@ yarn start:dev
 Run with Docker:
 
 ```bash
-docker build -t cast-presenter-server .
-docker run -p 3002:3002 cast-presenter-server
+docker build -t cast-presenter-service .
+docker run -p 3002:3002 cast-presenter-service
 ```
 
 ## Testing
