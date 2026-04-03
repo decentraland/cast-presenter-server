@@ -4,9 +4,19 @@ on:
   push:
     branches:
       - 'main'
+  # TODO: Remove workflow_run trigger and the if condition below before merging to master
+  workflow_run:
+    workflows: ['node']
+    types:
+      - completed
 
 jobs:
   cd:
+    # TODO: Remove this if condition before merging to master (keep only the uses/with/secrets)
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
     uses: decentraland/platform-actions/.github/workflows/apps-docker-next.yml@main
     with:
       service-name: cast-presenter-service
