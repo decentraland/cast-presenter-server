@@ -40,6 +40,7 @@ export function sanitizeFilename(filename: string): string {
 export function getFileTypeFromName(filename: string): 'pdf' | 'pptx' | null {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.pdf')) return 'pdf'
-  if (lower.endsWith('.pptx')) return 'pptx'
+  // TODO: Re-enable PPTX support once parsing is stable
+  // if (lower.endsWith('.pptx')) return 'pptx'
   return null
 }
