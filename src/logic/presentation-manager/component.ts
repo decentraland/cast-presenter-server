@@ -45,16 +45,6 @@ export async function createPresentationManager(
   const logger = logs.getLogger('presentation-manager')
 
   // Resolve config at component creation
-  const allowedRolesRaw = await config.getString('ALLOWED_COMMAND_ROLES')
-  const allowedRoles = allowedRolesRaw
-    ? new Set(
-        allowedRolesRaw
-          .split(',')
-          .map((r) => r.trim())
-          .filter(Boolean)
-      )
-    : new Set(['streamer', 'presenter', 'presentation'])
-
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
   const maxConcurrent = maxConcurrentRaw
     ? parseInt(maxConcurrentRaw, 10) || DEFAULT_MAX_CONCURRENT
@@ -113,7 +103,7 @@ export async function createPresentationManager(
 
     // Connect to LiveKit FIRST — validates the token
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
-    const publisher = liveKitPublisher.createPublisher(id, publisherLogger, allowedRoles)
+    const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
     await publisher.connect(livekitUrl, livekitToken)
 
     // Initialize PDF renderer

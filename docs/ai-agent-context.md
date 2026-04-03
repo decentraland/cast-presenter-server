@@ -72,8 +72,7 @@ remote control through LiveKit data channels.
   in-memory).
 - PDF rendering and video compositing happen server-side; clients
   only receive a standard video track.
-- The `ALLOWED_COMMAND_ROLES` environment variable controls which
-  LiveKit metadata roles can send presentation commands. The
-  `metadata.role` field is set by comms-gatekeeper. A planned
-  gatekeeper change will set `canUpdateOwnMetadata=false` for
-  watchers to make role-based authorization fully trustworthy.
+- Presentation commands are authorized by checking the sender's
+  identity against the `presenters` array in LiveKit room metadata,
+  which is managed exclusively by comms-gatekeeper via the server-side
+  API. Room participants cannot modify room metadata.

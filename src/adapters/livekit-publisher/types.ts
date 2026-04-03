@@ -29,12 +29,7 @@ export interface ILiveKitPublisherComponent extends IBaseComponent {
    *
    * @param presentationId - Unique ID for the presentation
    * @param logger - Scoped logger for this publisher
-   * @param allowedRoles - Metadata roles allowed to send data channel commands
    * @returns A new ILiveKitPublisher instance
    */
-  createPublisher(
-    presentationId: string,
-    logger: ILoggerComponent.ILogger,
-    allowedRoles?: Set<string>
-  ): ILiveKitPublisher
+  createPublisher(presentationId: string, logger: ILoggerComponent.ILogger): ILiveKitPublisher
 }

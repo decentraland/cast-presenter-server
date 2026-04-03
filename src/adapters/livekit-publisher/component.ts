@@ -11,17 +11,25 @@ import {
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { ILiveKitPublisher, ILiveKitPublisherComponent } from './types'
 
-function createPublisher(
-  presentationId: string,
-  logger: ILoggerComponent.ILogger,
-  allowedRoles?: Set<string>
-): ILiveKitPublisher {
+function parsePresentersFromRoomMetadata(metadata: string | undefined): Set<string> {
+  try {
+    if (!metadata) return new Set()
+    const parsed = JSON.parse(metadata)
+    return Array.isArray(parsed?.presenters)
+      ? new Set(parsed.presenters.map((p: string) => p.toLowerCase()))
+      : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function createPublisher(presentationId: string, logger: ILoggerComponent.ILogger): ILiveKitPublisher {
   let room: Room | null = null
   let videoSource: VideoSource | null = null
   let videoTrack: LocalVideoTrack | null = null
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
-  const roles = allowedRoles || new Set(['streamer', 'presenter', 'presentation'])
+  let presenters: Set<string> = new Set()
 
   function parseExistingMetadata(participant: { metadata?: string }): Record<string, unknown> {
     try {
@@ -42,6 +50,14 @@ function createPublisher(
         await localParticipant.updateMetadata(JSON.stringify({ ...existing, role: 'presentation', presentationId }))
       }
 
+      presenters = parsePresentersFromRoomMetadata(room.metadata)
+      logger.info(`[connect] Initial presenters: ${[...presenters].join(', ') || 'none'}`)
+
+      room.on(RoomEvent.RoomMetadataChanged, (metadata: string) => {
+        presenters = parsePresentersFromRoomMetadata(metadata)
+        logger.info(`[RoomMetadataChanged] Presenters updated: ${[...presenters].join(', ') || 'none'}`)
+      })
+
       room.on(
         RoomEvent.DataReceived,
         (
@@ -51,13 +67,7 @@ function createPublisher(
           topic?: string
         ) => {
           const identity = participant?.identity || 'unknown'
-          let senderRole = 'unknown'
-          try {
-            const meta = participant?.metadata ? JSON.parse(participant.metadata) : null
-            senderRole = meta?.role || 'none'
-          } catch {
-            /* ignored */
-          }
+          const isPresenter = presenters.has(identity.toLowerCase())
 
           let message: Record<string, unknown> | undefined
           let isJson = false
@@ -69,7 +79,7 @@ function createPublisher(
           }
 
           logger.info(
-            `[DataReceived] from=${identity} role=${senderRole} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
+            `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
           )
 
           if (!dataHandler) return
@@ -78,8 +88,8 @@ function createPublisher(
           const msgType = typeof message.type === 'string' ? message.type : ''
           if (topic !== 'presentation' && !msgType.startsWith('presentation:')) return
 
-          if (!roles.has(senderRole)) {
-            logger.warn(`[DataReceived] Role '${senderRole}' from ${identity} not authorized, ignoring`)
+          if (!isPresenter) {
+            logger.warn(`[DataReceived] Identity '${identity}' not in presenters list, ignoring`)
             return
           }
 
@@ -171,6 +181,7 @@ function createPublisher(
 
     async disconnect(): Promise<void> {
       this.stopHeartbeat()
+      presenters = new Set()
 
       // WORKAROUND: @livekit/rtc-node leaks file descriptors and memory on disconnect
       // because Room.disconnect() never disposes its native FFI handle. We manually

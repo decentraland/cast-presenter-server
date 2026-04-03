@@ -182,15 +182,11 @@ broadcast.
 
 ### Authorization
 
-Commands are accepted only from participants whose
-`metadata.role` matches one of the configured `ALLOWED_COMMAND_ROLES`
-(default: `presenter`, `streamer`, `presentation`). The role is set
-by comms-gatekeeper when issuing tokens.
-
-> **Note:** A planned comms-gatekeeper change will set
-> `canUpdateOwnMetadata=false` for watchers and add server-side
-> presenter promotion. Until then, any room participant can
-> self-assign a presenter role.
+Commands are accepted only from participants whose identity appears in
+the `presenters` array within LiveKit room metadata. This array is
+managed exclusively by comms-gatekeeper via the server-side Room API
+— room participants cannot modify room metadata, making this
+authorization model tamper-proof.
 
 ### Bot identity
 
