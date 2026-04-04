@@ -229,9 +229,11 @@ download:
 - Domain must be in the allowlist: `drive.google.com`,
   `drive.usercontent.google.com`, `docs.google.com`,
   `youtube.com`, `youtu.be`, `vimeo.com`.
-- DNS resolution is checked to block private IP ranges
-  (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
-  169.254.0.0/16).
+- DNS resolution (both A and AAAA records) is checked to block
+  private IP ranges: IPv4 loopback (127/8), RFC 1918 (10/8,
+  172.16/12, 192.168/16), link-local (169.254/16), multicast
+  (224/4), broadcast; and IPv6 loopback (::1), unique local
+  (fc00::/7), link-local (fe80::/10), mapped-IPv4 (::ffff:x.x.x.x).
 
 ### Download limits
 
@@ -258,6 +260,27 @@ All responses include:
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+- `Content-Security-Policy: default-src 'none'`
+
+### HTTP control endpoints (removed)
+
+The server previously exposed HTTP endpoints for controlling
+presentations: navigate, video play/pause, stop, and get-state.
+These were removed because they lacked authentication — any client
+that knew the presentation UUID could control it.
+
+All presentation control now flows exclusively through the LiveKit
+data channel, which enforces presenter authorization via room
+metadata (see [Authorization](#authorization) above). This makes
+the data channel the single control plane.
+
+**Re-adding HTTP control in the future:** If HTTP endpoints are
+needed again (for example, for a webapp without LiveKit access),
+they must require authentication. Options include:
+- A session token returned at creation time (only the creator has
+  it), sent as a `Bearer` header on control requests.
+- Signed-fetch using the caller's wallet identity, checked against
+  the presenters list.
 
 ### Container hardening
 
