@@ -30,6 +30,53 @@ describe('when checking SSRF protections', () => {
       it('should identify 0.0.0.0 as private', () => {
         expect(isPrivateIP('0.0.0.0')).toBe(true)
       })
+
+      it('should identify 224.x.x.x as private (multicast)', () => {
+        expect(isPrivateIP('224.0.0.1')).toBe(true)
+        expect(isPrivateIP('239.255.255.255')).toBe(true)
+      })
+
+      it('should identify 255.255.255.255 as private (broadcast)', () => {
+        expect(isPrivateIP('255.255.255.255')).toBe(true)
+      })
+    })
+
+    describe('and the IP is an IPv6 address', () => {
+      it('should identify ::1 as private (loopback)', () => {
+        expect(isPrivateIP('::1')).toBe(true)
+      })
+
+      it('should identify :: as private (unspecified)', () => {
+        expect(isPrivateIP('::')).toBe(true)
+      })
+
+      it('should identify fe80:: as private (link-local)', () => {
+        expect(isPrivateIP('fe80::1')).toBe(true)
+        expect(isPrivateIP('fe80::abcd:1234')).toBe(true)
+      })
+
+      it('should identify fc00::/fd00:: as private (unique local)', () => {
+        expect(isPrivateIP('fc00::1')).toBe(true)
+        expect(isPrivateIP('fd00::1')).toBe(true)
+        expect(isPrivateIP('fdab::1')).toBe(true)
+      })
+
+      it('should identify IPv6-mapped private IPv4 as private', () => {
+        expect(isPrivateIP('::ffff:127.0.0.1')).toBe(true)
+        expect(isPrivateIP('::ffff:10.0.0.1')).toBe(true)
+        expect(isPrivateIP('::ffff:192.168.1.1')).toBe(true)
+        expect(isPrivateIP('::ffff:169.254.169.254')).toBe(true)
+      })
+
+      it('should return false for IPv6-mapped public IPv4', () => {
+        expect(isPrivateIP('::ffff:8.8.8.8')).toBe(false)
+        expect(isPrivateIP('::ffff:142.250.80.46')).toBe(false)
+      })
+
+      it('should return false for public IPv6 addresses', () => {
+        expect(isPrivateIP('2001:4860:4860::8888')).toBe(false)
+        expect(isPrivateIP('2607:f8b0:4004:800::200e')).toBe(false)
+      })
     })
 
     describe('and the IP is public', () => {
