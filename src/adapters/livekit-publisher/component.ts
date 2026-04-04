@@ -31,14 +31,6 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
   let presenters: Set<string> = new Set()
 
-  function parseExistingMetadata(participant: { metadata?: string }): Record<string, unknown> {
-    try {
-      return participant.metadata ? JSON.parse(participant.metadata) : {}
-    } catch {
-      return {}
-    }
-  }
-
   return {
     async connect(url: string, token: string): Promise<void> {
       room = new Room()
@@ -46,8 +38,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
       const localParticipant = room.localParticipant
       if (localParticipant) {
-        const existing = parseExistingMetadata(localParticipant)
-        await localParticipant.updateMetadata(JSON.stringify({ ...existing, role: 'presentation', presentationId }))
+        await localParticipant.updateMetadata(JSON.stringify({ role: 'presentation', presentationId }))
       }
 
       presenters = parsePresentersFromRoomMetadata(room.metadata)
@@ -78,15 +69,15 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
             /* ignored */
           }
 
-          logger.info(
-            `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} json=${isJson} type=${message?.type || 'n/a'}`
-          )
-
           if (!dataHandler) return
           if (!isJson || !message) return
 
           const msgType = typeof message.type === 'string' ? message.type : ''
           if (topic !== 'presentation' && !msgType.startsWith('presentation:')) return
+
+          logger.info(
+            `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} type=${msgType}`
+          )
 
           if (!isPresenter) {
             logger.warn(`[DataReceived] Identity '${identity}' not in presenters list, ignoring`)
@@ -107,8 +98,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       const publishOptions = new TrackPublishOptions({
         source: TrackSource.SOURCE_CAMERA,
         videoEncoding: {
-          maxBitrate: BigInt(5_000_000),
-          maxFramerate: 30
+          maxBitrate: BigInt(2_000_000),
+          maxFramerate: 10
         },
         simulcast: false
       })
@@ -141,7 +132,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       this.stopHeartbeat()
       heartbeatInterval = setInterval(() => {
         this.pushFrame(rgbaBuffer, width, height)
-      }, 33)
+      }, 500)
     },
 
     stopHeartbeat(): void {
@@ -157,9 +148,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async updateMetadataState(state: Record<string, unknown>): Promise<void> {
       if (!room?.localParticipant) return
-      const existing = parseExistingMetadata(room.localParticipant)
       await room.localParticipant.updateMetadata(
-        JSON.stringify({ ...existing, role: 'presentation', presentationId, ...state })
+        JSON.stringify({ role: 'presentation', presentationId, ...state })
       )
     },
 

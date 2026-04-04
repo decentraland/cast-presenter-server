@@ -40,7 +40,8 @@ export async function initComponents(): Promise<AppComponents> {
   const securityHeaders: Record<string, string> = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains'
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    'Content-Security-Policy': "default-src 'none'"
   }
   server.use(async (_ctx, next) => {
     const res = await next()

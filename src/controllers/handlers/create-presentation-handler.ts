@@ -113,7 +113,7 @@ export async function createPresentationHandler(
     logger.error(`Failed to create presentation: ${error instanceof Error ? error.message : String(error)}`)
     return {
       status: 500,
-      body: { error: error instanceof Error ? error.message : 'Internal error' }
+      body: { error: 'Internal error' }
     }
   }
 }
