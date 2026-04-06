@@ -148,9 +148,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async updateMetadataState(state: Record<string, unknown>): Promise<void> {
       if (!room?.localParticipant) return
-      await room.localParticipant.updateMetadata(
-        JSON.stringify({ role: 'presentation', presentationId, ...state })
-      )
+      await room.localParticipant.updateMetadata(JSON.stringify({ role: 'presentation', presentationId, ...state }))
     },
 
     async publishData(message: Record<string, unknown>): Promise<void> {
