@@ -52,7 +52,9 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
       room.on(RoomEvent.RoomMetadataChanged, (metadata: string) => {
         presenters = parsePresentersFromRoomMetadata(metadata)
-        logger.info(`[RoomMetadataChanged] Presenters updated: ${[...presenters].join(', ') || 'none'}`)
+        logger.info(`[RoomMetadataChanged] Presenters updated: ${[...presenters].join(', ') || 'none'}`, {
+          rawMetadata: metadata
+        })
       })
 
       room.on(
@@ -86,7 +88,9 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           )
 
           if (!isPresenter) {
-            logger.warn(`[DataReceived] Identity '${identity}' not in presenters list, ignoring`)
+            logger.warn(
+              `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
+            )
             return
           }
 
