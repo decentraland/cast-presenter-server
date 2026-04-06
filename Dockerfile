@@ -1,9 +1,9 @@
-FROM node:24-alpine as builderenv
+FROM node:24-slim as builderenv
 
 WORKDIR /app
 
 # some packages require a build step
-RUN apk update && apk add wget
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 
 # install dependencies
 COPY package.json /app/package.json
@@ -19,9 +19,9 @@ RUN yarn install --prod --frozen-lockfile
 
 ########################## END OF BUILD STAGE ##########################
 
-FROM node:24-alpine
+FROM node:24-slim
 
-RUN apk update && apk add --update wget && apk add --update tini ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends wget tini ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
@@ -32,7 +32,7 @@ ENV COMMIT_HASH=${COMMIT_HASH:-local}
 ARG CURRENT_VERSION=Unknown
 ENV CURRENT_VERSION=${CURRENT_VERSION:-Unknown}
 
-RUN addgroup -g 1001 -S appuser && adduser -S appuser -u 1001
+RUN groupadd -g 1001 appuser && useradd -u 1001 -g appuser -s /bin/sh appuser
 
 WORKDIR /app
 COPY --from=builderenv /app /app
@@ -45,6 +45,6 @@ RUN echo "" > /app/.env
 # (i.e. SIGTERM) to reach the service
 # Read more here: https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/
 #            and: https://www.ctl.io/developers/blog/post/gracefully-stopping-docker-containers/
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 # Run the program under Tini
 CMD [ "/usr/local/bin/node", "--trace-warnings", "--abort-on-uncaught-exception", "--unhandled-rejections=strict", "dist/index.js" ]
