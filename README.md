@@ -7,6 +7,7 @@ as a live video track and can control it through data channel commands.
 
 ## Features
 
+
 - **Slide streaming:** Renders PDF/PPTX slides server-side and
   publishes them as an H.264 video track via LiveKit.
 - **Embedded video playback:** Detects video annotations in PDFs and
