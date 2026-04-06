@@ -54,6 +54,15 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
   })
 }
 
+const GDRIVE_SHARE_RE = /^https:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/
+
+/** Converts a Google Drive sharing URL to a direct download URL. */
+function toDirectDownloadUrl(url: string): string {
+  const match = url.match(GDRIVE_SHARE_RE)
+  if (!match) return url
+  return `https://drive.usercontent.google.com/download?id=${match[1]}&export=download&confirm=t`
+}
+
 async function downloadFromUrl(
   url: string,
   networkValidator: AppComponents['networkValidator']
@@ -103,8 +112,12 @@ async function downloadFromUrl(
     clearTimeout(timeout)
   }
 
-  const urlPath = parsed.pathname
-  const filename = urlPath.split('/').pop() || 'presentation'
+  // Prefer filename from Content-Disposition header (Google Drive, S3, etc.)
+  const disposition = response.headers.get('content-disposition') || ''
+  const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)"?/)
+  const filename = filenameMatch
+    ? decodeURIComponent(filenameMatch[1])
+    : parsed.pathname.split('/').pop() || 'presentation'
 
   return { buffer: Buffer.concat(chunks), filename }
 }
@@ -140,8 +153,12 @@ export function createFileProviderComponent(
     },
 
     async fromUrl(url: string): Promise<FileProviderResult> {
-      logger.info('Downloading file from URL', { url })
-      const { buffer, filename } = await downloadFromUrl(url, networkValidator)
+      const resolved = toDirectDownloadUrl(url)
+      if (resolved !== url) {
+        logger.info('Resolved Google Drive sharing URL to direct download', { original: url, resolved })
+      }
+      logger.info('Downloading file from URL', { url: resolved })
+      const { buffer, filename } = await downloadFromUrl(resolved, networkValidator)
       logger.info('Downloaded file from URL', { url, size: buffer.length })
       return {
         buffer,
