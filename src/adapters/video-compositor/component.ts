@@ -49,8 +49,11 @@ function createVideoCompositor(
   tempDir?: string
 ): IVideoCompositor {
   let compositeProcess: ChildProcess | null = null
-  let frameLoop: ReturnType<typeof setInterval> | null = null
-  let videoBuffer: Buffer = Buffer.alloc(0)
+  let dataListener: ((chunk: Buffer) => void) | null = null
+  let frameDelivery: ReturnType<typeof setInterval> | null = null
+  let frameAccumulator: Buffer = Buffer.alloc(0)
+  let frameAccumLength = 0
+  let latestFrame: Buffer | null = null
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
   let cleanedUp = false
@@ -143,17 +146,23 @@ function createVideoCompositor(
     cleanedUp = true
     isPlaying = false
 
-    if (frameLoop) {
-      clearInterval(frameLoop)
-      frameLoop = null
+    if (frameDelivery) {
+      clearInterval(frameDelivery)
+      frameDelivery = null
     }
 
     if (compositeProcess) {
+      if (dataListener) {
+        compositeProcess.stdout?.removeListener('data', dataListener)
+        dataListener = null
+      }
       compositeProcess.kill('SIGKILL')
       compositeProcess = null
     }
 
-    videoBuffer = Buffer.alloc(0)
+    frameAccumulator = Buffer.alloc(0)
+    frameAccumLength = 0
+    latestFrame = null
     publisher.pushFrame(slideBuffer, slideWidth, slideHeight)
     publisher.startHeartbeat(slideBuffer, slideWidth, slideHeight)
   }
@@ -241,7 +250,8 @@ function createVideoCompositor(
       slideBuffer: Buffer,
       slideWidth: number,
       slideHeight: number,
-      publisher: ILiveKitPublisher
+      publisher: ILiveKitPublisher,
+      onAudioData?: (pcmChunk: Buffer) => void
     ): Promise<void> {
       isPlaying = true
 
@@ -251,69 +261,89 @@ function createVideoCompositor(
       validateFilterParam(vw, 'vw')
       validateFilterParam(vh, 'vh')
       const compositeFrameSize = slideWidth * slideHeight * 4
+      const MAX_BUFFERED_FRAMES = 5
 
       const slidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       fs.writeFileSync(slidePath, slideBuffer)
 
-      compositeProcess = spawn(
-        'ffmpeg',
-        [
-          '-stream_loop',
-          '-1',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'rgba',
-          '-s',
-          `${slideWidth}x${slideHeight}`,
-          '-r',
-          String(FRAME_RATE),
-          '-i',
-          slidePath,
-          '-i',
-          videoPath,
-          '-filter_complex',
-          `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`,
-          '-an',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'rgba',
-          '-r',
-          String(FRAME_RATE),
-          'pipe:1'
-        ],
-        { stdio: ['ignore', 'pipe', 'pipe'] }
-      )
+      const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
 
-      compositeProcess.stdout?.on('data', (chunk: Buffer) => {
-        videoBuffer = Buffer.concat([videoBuffer, chunk])
-      })
+      let ffmpegArgs: string[]
+      let stdio: Array<'ignore' | 'pipe'>
+
+      if (onAudioData) {
+        // With audio: need explicit -map for both video and audio outputs
+        ffmpegArgs = [
+          '-stream_loop', '-1',
+          '-f', 'rawvideo', '-pix_fmt', 'rgba',
+          '-s', `${slideWidth}x${slideHeight}`,
+          '-r', String(FRAME_RATE),
+          '-i', slidePath,
+          '-i', videoPath,
+          '-filter_complex', `${filterComplex}[out]`,
+          '-map', '[out]', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-r', String(FRAME_RATE), 'pipe:1',
+          '-map', '1:a?', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:3'
+        ]
+        stdio = ['ignore', 'pipe', 'pipe', 'pipe']
+      } else {
+        // Without audio: original ffmpeg args, no explicit maps
+        ffmpegArgs = [
+          '-stream_loop', '-1',
+          '-f', 'rawvideo', '-pix_fmt', 'rgba',
+          '-s', `${slideWidth}x${slideHeight}`,
+          '-r', String(FRAME_RATE),
+          '-i', slidePath,
+          '-i', videoPath,
+          '-filter_complex', filterComplex,
+          '-an',
+          '-f', 'rawvideo', '-pix_fmt', 'rgba', '-r', String(FRAME_RATE), 'pipe:1'
+        ]
+        stdio = ['ignore', 'pipe', 'pipe']
+      }
+
+      compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio })
 
       compositeProcess.stderr?.on('data', () => {
         /* noop */
       })
 
+      // Forward audio PCM data if available
+      if (onAudioData && compositeProcess.stdio[3]) {
+        const audioStream = compositeProcess.stdio[3] as NodeJS.ReadableStream
+        audioStream.on('data', (chunk: Buffer) => {
+          if (isPlaying) onAudioData(chunk)
+        })
+      }
+
       publisher.stopHeartbeat()
 
-      const MAX_BUFFERED_FRAMES = 5
-      const POLL_INTERVAL_MS = 30
-
-      frameLoop = setInterval(() => {
+      // Data callback: accumulate chunks, extract latest complete frame
+      dataListener = (chunk: Buffer) => {
         if (!isPlaying) return
 
-        const maxVideoBytes = compositeFrameSize * MAX_BUFFERED_FRAMES
-        if (videoBuffer.length > maxVideoBytes) {
-          const framesToDrop = Math.floor(videoBuffer.length / compositeFrameSize) - 1
-          videoBuffer = videoBuffer.subarray(framesToDrop * compositeFrameSize)
+        if (frameAccumLength === 0) {
+          frameAccumulator = chunk
+          frameAccumLength = chunk.length
+        } else {
+          frameAccumulator = Buffer.concat([frameAccumulator, chunk])
+          frameAccumLength = frameAccumulator.length
         }
 
-        if (videoBuffer.length >= compositeFrameSize) {
-          const frame = videoBuffer.subarray(0, compositeFrameSize)
-          videoBuffer = videoBuffer.subarray(compositeFrameSize)
-          publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight)
+        // Extract the latest complete frame, discard older ones
+        while (frameAccumLength >= compositeFrameSize) {
+          latestFrame = Buffer.from(frameAccumulator.subarray(0, compositeFrameSize))
+          frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
+          frameAccumLength = frameAccumulator.length
         }
-      }, POLL_INTERVAL_MS)
+      }
+      compositeProcess.stdout?.on('data', dataListener)
+
+      // Timer-paced delivery: push the latest frame at the target frame rate
+      const FRAME_INTERVAL_MS = 1000 / FRAME_RATE
+      frameDelivery = setInterval(() => {
+        if (!isPlaying || !latestFrame) return
+        publisher.pushFrame(latestFrame, slideWidth, slideHeight)
+      }, FRAME_INTERVAL_MS)
 
       compositeProcess.on('close', () => {
         if (!cleanedUp && isPlaying) {
@@ -322,7 +352,7 @@ function createVideoCompositor(
         }
       })
 
-      logger.info('Video playback started (video only, no audio)', {
+      logger.info(`Video playback started (audio: ${onAudioData ? 'enabled' : 'disabled'})`, {
         slideSize: `${slideWidth}x${slideHeight}`,
         videoSize: `${vw}x${vh}`,
         position: `${x},${y}`
@@ -350,15 +380,21 @@ function createVideoCompositor(
     cleanup(): void {
       cleanedUp = true
       isPlaying = false
-      if (frameLoop) {
-        clearInterval(frameLoop)
-        frameLoop = null
+      if (frameDelivery) {
+        clearInterval(frameDelivery)
+        frameDelivery = null
       }
       if (compositeProcess) {
+        if (dataListener) {
+          compositeProcess.stdout?.removeListener('data', dataListener)
+          dataListener = null
+        }
         compositeProcess.kill('SIGKILL')
         compositeProcess = null
       }
-      videoBuffer = Buffer.alloc(0)
+      frameAccumulator = Buffer.alloc(0)
+      frameAccumLength = 0
+      latestFrame = null
     }
   }
 }

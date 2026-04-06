@@ -148,10 +148,7 @@ export async function createPresentationManager(
     // Start publishing video track
     await publisher.startPublishing(width, height)
 
-    // Force encoder to produce high-quality keyframes from the start
-    publisher.forceEncoderQuality(buffer, width, height)
-
-    // Start 30 FPS heartbeat to maintain quality
+    publisher.pushFrame(buffer, width, height)
     publisher.startHeartbeat(buffer, width, height)
 
     // Get video annotations for first slide
@@ -214,9 +211,15 @@ export async function createPresentationManager(
       }
     }
 
-    logger.info(`Pre-download queue: ${videoTargets.size} videos to process`)
+    const MAX_PRE_DOWNLOADS = 2
+    logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
 
+    let downloaded = 0
     for (const [url, size] of videoTargets) {
+      if (downloaded >= MAX_PRE_DOWNLOADS) {
+        logger.info(`Pre-download limit reached (${MAX_PRE_DOWNLOADS}), remaining videos will be downloaded on demand`)
+        break
+      }
       if (!sessions.has(session.id)) {
         logger.info('Session ended, aborting pre-download queue')
         break
@@ -227,19 +230,18 @@ export async function createPresentationManager(
         const rawPath = await downloader.downloadVideo(url)
         session.cachedVideoPaths.set(url, rawPath)
         logger.info(`Pre-downloaded video: ${url}`)
+        downloaded++
 
-        try {
-          const transcodedPath = await downloader.preTranscode(rawPath, size.width, size.height)
-          session.cachedVideoPaths.set(url, transcodedPath)
-          fs.unlink(rawPath, () => {
-            /* noop */
-          })
-          logger.info(`Pre-transcoded video to ${size.width}x${size.height}: ${url}`)
-        } catch (transcodeErr) {
-          logger.warn(
-            `Pre-transcode failed (will scale at runtime): ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`
-          )
-        }
+        // TODO: Re-enable pre-transcoding once we have more CPU headroom
+        // Pre-transcoding uses ~63% CPU; runtime ffmpeg scales just fine at ~11%
+        // try {
+        //   const transcodedPath = await downloader.preTranscode(rawPath, size.width, size.height)
+        //   session.cachedVideoPaths.set(url, transcodedPath)
+        //   fs.unlink(rawPath, () => { /* noop */ })
+        //   logger.info(`Pre-transcoded video to ${size.width}x${size.height}: ${url}`)
+        // } catch (transcodeErr) {
+        //   logger.warn(`Pre-transcode failed: ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`)
+        // }
       } catch (err) {
         logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -288,7 +290,7 @@ export async function createPresentationManager(
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
-      session.publisher.forceEncoderQuality(buffer, width, height)
+      session.publisher.pushFrame(buffer, width, height)
       session.publisher.startHeartbeat(buffer, width, height)
 
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
@@ -368,6 +370,9 @@ export async function createPresentationManager(
       return
     }
 
+    // TODO: Enable audio when ready — the infrastructure is in place
+    // (publisher.startAudioPublishing, compositor onAudioData callback, publisher.pushAudioFrame)
+    // Disabled for now due to ~500MB RAM increase from ffmpeg audio decoding + LiveKit audio track
     await compositor.startPlayback(
       videoPath,
       videoInfo,
@@ -379,7 +384,7 @@ export async function createPresentationManager(
 
     session.videoState = 'playing'
 
-    compositor.onEnd(() => {
+    compositor.onEnd(async () => {
       session.videoState = 'idle'
       session.compositor = null
       broadcastState(session).catch(() => {
@@ -407,6 +412,12 @@ export async function createPresentationManager(
     if (session.compositor) {
       session.compositor.cleanup()
       session.compositor = null
+    }
+
+    try {
+      await session.publisher.publishData({ type: 'presentation:stopped', id: session.id })
+    } catch (err) {
+      logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     await session.publisher.disconnect()

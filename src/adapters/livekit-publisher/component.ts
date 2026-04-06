@@ -1,10 +1,14 @@
 import {
+  AudioFrame,
+  AudioSource,
+  LocalAudioTrack,
   LocalVideoTrack,
   Room,
   RoomEvent,
   TrackPublishOptions,
   TrackSource,
   VideoBufferType,
+  VideoCodec,
   VideoFrame,
   VideoSource
 } from '@livekit/rtc-node'
@@ -27,6 +31,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   let room: Room | null = null
   let videoSource: VideoSource | null = null
   let videoTrack: LocalVideoTrack | null = null
+  let audioSource: AudioSource | null = null
+  let audioTrack: LocalAudioTrack | null = null
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
   let presenters: Set<string> = new Set()
@@ -96,12 +102,14 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       videoSource = new VideoSource(width, height)
       videoTrack = LocalVideoTrack.createVideoTrack('presentation', videoSource)
       const publishOptions = new TrackPublishOptions({
-        source: TrackSource.SOURCE_CAMERA,
+        source: TrackSource.SOURCE_SCREENSHARE,
+        videoCodec: VideoCodec.H264,
         videoEncoding: {
-          maxBitrate: BigInt(2_000_000),
-          maxFramerate: 10
+          maxBitrate: BigInt(8_000_000),
+          maxFramerate: 15
         },
-        simulcast: false
+        simulcast: false,
+        stream: 'presentation'
       })
       const localParticipant = room.localParticipant
       if (!localParticipant) throw new Error('No local participant')
@@ -114,31 +122,55 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       videoSource.captureFrame(frame)
     },
 
-    forceEncoderQuality(rgbaBuffer: Buffer, width: number, height: number): void {
-      const noisy = Buffer.from(rgbaBuffer)
-      for (let i = 0; i < 30; i++) {
-        if (i % 2 === 0) {
-          for (let p = 2; p < noisy.length && p < 4000; p += 4) {
-            noisy[p] = rgbaBuffer[p] > 0 ? rgbaBuffer[p] - 1 : 1
-          }
-          this.pushFrame(noisy, width, height)
-        } else {
-          this.pushFrame(rgbaBuffer, width, height)
-        }
-      }
-    },
-
     startHeartbeat(rgbaBuffer: Buffer, width: number, height: number): void {
       this.stopHeartbeat()
       heartbeatInterval = setInterval(() => {
         this.pushFrame(rgbaBuffer, width, height)
-      }, 500)
+      }, 33)
     },
 
     stopHeartbeat(): void {
       if (heartbeatInterval) {
         clearInterval(heartbeatInterval)
         heartbeatInterval = null
+      }
+    },
+
+    async startAudioPublishing(sampleRate: number, channels: number): Promise<void> {
+      if (!room) throw new Error('Not connected')
+      audioSource = new AudioSource(sampleRate, channels, 5)
+      audioTrack = LocalAudioTrack.createAudioTrack('presentation-audio', audioSource)
+      const options = new TrackPublishOptions({
+        source: TrackSource.SOURCE_SCREENSHARE_AUDIO,
+        stream: 'presentation'
+      })
+      const localParticipant = room.localParticipant
+      if (!localParticipant) throw new Error('No local participant')
+      await localParticipant.publishTrack(audioTrack, options)
+    },
+
+    pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void {
+      if (!audioSource) return
+      const frame = new AudioFrame(pcmData, sampleRate, channels, samplesPerChannel)
+      audioSource.captureFrame(frame)
+    },
+
+    async stopAudioPublishing(): Promise<void> {
+      if (audioTrack) {
+        try {
+          await audioTrack.close(true)
+        } catch (err) {
+          logger.warn(`Failed to close audio track: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        audioTrack = null
+        audioSource = null
+      } else if (audioSource) {
+        try {
+          await audioSource.close()
+        } catch (err) {
+          logger.warn(`Failed to close audio source: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        audioSource = null
       }
     },
 
@@ -169,6 +201,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async disconnect(): Promise<void> {
       this.stopHeartbeat()
+      await this.stopAudioPublishing()
       presenters = new Set()
 
       // WORKAROUND: @livekit/rtc-node leaks file descriptors and memory on disconnect

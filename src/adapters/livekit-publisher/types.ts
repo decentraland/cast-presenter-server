@@ -10,9 +10,11 @@ export interface ILiveKitPublisher {
   connect(url: string, token: string): Promise<void>
   startPublishing(width: number, height: number): Promise<void>
   pushFrame(rgbaBuffer: Buffer, width: number, height: number): void
-  forceEncoderQuality(rgbaBuffer: Buffer, width: number, height: number): void
   startHeartbeat(rgbaBuffer: Buffer, width: number, height: number): void
   stopHeartbeat(): void
+  startAudioPublishing(sampleRate: number, channels: number): Promise<void>
+  pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void
+  stopAudioPublishing(): Promise<void>
   setDataHandler(handler: (data: Record<string, unknown>) => void): void
   updateMetadataState(state: Record<string, unknown>): Promise<void>
   publishData(message: Record<string, unknown>): Promise<void>

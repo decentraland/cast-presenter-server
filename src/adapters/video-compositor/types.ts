@@ -21,7 +21,8 @@ export interface IVideoCompositor {
     slideBuffer: Buffer,
     slideWidth: number,
     slideHeight: number,
-    publisher: ILiveKitPublisher
+    publisher: ILiveKitPublisher,
+    onAudioData?: (pcmChunk: Buffer) => void
   ): Promise<void>
   pausePlayback(): void
   resumePlayback(): void
