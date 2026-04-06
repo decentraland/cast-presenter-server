@@ -261,7 +261,6 @@ function createVideoCompositor(
       validateFilterParam(vw, 'vw')
       validateFilterParam(vh, 'vh')
       const compositeFrameSize = slideWidth * slideHeight * 4
-      const MAX_BUFFERED_FRAMES = 5
 
       const slidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       fs.writeFileSync(slidePath, slideBuffer)
@@ -274,29 +273,69 @@ function createVideoCompositor(
       if (onAudioData) {
         // With audio: need explicit -map for both video and audio outputs
         ffmpegArgs = [
-          '-stream_loop', '-1',
-          '-f', 'rawvideo', '-pix_fmt', 'rgba',
-          '-s', `${slideWidth}x${slideHeight}`,
-          '-r', String(FRAME_RATE),
-          '-i', slidePath,
-          '-i', videoPath,
-          '-filter_complex', `${filterComplex}[out]`,
-          '-map', '[out]', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-r', String(FRAME_RATE), 'pipe:1',
-          '-map', '1:a?', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:3'
+          '-stream_loop',
+          '-1',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          '-s',
+          `${slideWidth}x${slideHeight}`,
+          '-r',
+          String(FRAME_RATE),
+          '-i',
+          slidePath,
+          '-i',
+          videoPath,
+          '-filter_complex',
+          `${filterComplex}[out]`,
+          '-map',
+          '[out]',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          '-r',
+          String(FRAME_RATE),
+          'pipe:1',
+          '-map',
+          '1:a?',
+          '-f',
+          's16le',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+          'pipe:3'
         ]
         stdio = ['ignore', 'pipe', 'pipe', 'pipe']
       } else {
         // Without audio: original ffmpeg args, no explicit maps
         ffmpegArgs = [
-          '-stream_loop', '-1',
-          '-f', 'rawvideo', '-pix_fmt', 'rgba',
-          '-s', `${slideWidth}x${slideHeight}`,
-          '-r', String(FRAME_RATE),
-          '-i', slidePath,
-          '-i', videoPath,
-          '-filter_complex', filterComplex,
+          '-stream_loop',
+          '-1',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          '-s',
+          `${slideWidth}x${slideHeight}`,
+          '-r',
+          String(FRAME_RATE),
+          '-i',
+          slidePath,
+          '-i',
+          videoPath,
+          '-filter_complex',
+          filterComplex,
           '-an',
-          '-f', 'rawvideo', '-pix_fmt', 'rgba', '-r', String(FRAME_RATE), 'pipe:1'
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          '-r',
+          String(FRAME_RATE),
+          'pipe:1'
         ]
         stdio = ['ignore', 'pipe', 'pipe']
       }

@@ -152,7 +152,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
     pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void {
       if (!audioSource) return
       const frame = new AudioFrame(pcmData, sampleRate, channels, samplesPerChannel)
-      audioSource.captureFrame(frame)
+      void audioSource.captureFrame(frame)
     },
 
     async stopAudioPublishing(): Promise<void> {
