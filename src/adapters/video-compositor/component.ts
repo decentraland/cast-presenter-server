@@ -53,7 +53,6 @@ function createVideoCompositor(
   let frameDelivery: ReturnType<typeof setInterval> | null = null
   let frameAccumulator: Buffer = Buffer.alloc(0)
   let frameAccumLength = 0
-  let latestFrame: Buffer | null = null
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
   let cleanedUp = false
@@ -162,7 +161,6 @@ function createVideoCompositor(
 
     frameAccumulator = Buffer.alloc(0)
     frameAccumLength = 0
-    latestFrame = null
     publisher.pushFrame(slideBuffer, slideWidth, slideHeight)
     publisher.startHeartbeat(slideBuffer, slideWidth, slideHeight)
   }
@@ -356,7 +354,7 @@ function createVideoCompositor(
 
       publisher.stopHeartbeat()
 
-      // Data callback: accumulate chunks, extract latest complete frame
+      // Accumulate stdout chunks, push one frame per timer tick
       dataListener = (chunk: Buffer) => {
         if (!isPlaying) return
 
@@ -367,21 +365,27 @@ function createVideoCompositor(
           frameAccumulator = Buffer.concat([frameAccumulator, chunk])
           frameAccumLength = frameAccumulator.length
         }
-
-        // Extract the latest complete frame, discard older ones
-        while (frameAccumLength >= compositeFrameSize) {
-          latestFrame = Buffer.from(frameAccumulator.subarray(0, compositeFrameSize))
-          frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
-          frameAccumLength = frameAccumulator.length
-        }
       }
       compositeProcess.stdout?.on('data', dataListener)
 
-      // Timer-paced delivery: push the latest frame at the target frame rate
+      const MAX_BUFFERED_FRAMES = 5
       const FRAME_INTERVAL_MS = 1000 / FRAME_RATE
       frameDelivery = setInterval(() => {
-        if (!isPlaying || !latestFrame) return
-        publisher.pushFrame(latestFrame, slideWidth, slideHeight)
+        if (!isPlaying || frameAccumLength < compositeFrameSize) return
+
+        // Drop excess frames to prevent falling behind
+        const maxBytes = compositeFrameSize * MAX_BUFFERED_FRAMES
+        if (frameAccumLength > maxBytes) {
+          const framesToDrop = Math.floor(frameAccumLength / compositeFrameSize) - 1
+          frameAccumulator = frameAccumulator.subarray(framesToDrop * compositeFrameSize)
+          frameAccumLength = frameAccumulator.length
+        }
+
+        // Consume the next frame sequentially
+        const frame = frameAccumulator.subarray(0, compositeFrameSize)
+        publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight)
+        frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
+        frameAccumLength = frameAccumulator.length
       }, FRAME_INTERVAL_MS)
 
       compositeProcess.on('close', () => {
@@ -433,7 +437,6 @@ function createVideoCompositor(
       }
       frameAccumulator = Buffer.alloc(0)
       frameAccumLength = 0
-      latestFrame = null
     }
   }
 }
