@@ -28,6 +28,7 @@
     "tabWidth": 2
   },
   "dependencies": {
+    "@dcl/protocol": "1.0.0-23951495761.commit-bf007b9",
     "@dcl/traced-fetch-component": "^1.0.0",
     "@livekit/rtc-node": "^0.13.24",
     "@napi-rs/canvas": "^0.1.97",

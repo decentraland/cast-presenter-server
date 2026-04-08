@@ -12,8 +12,46 @@ import {
   VideoFrame,
   VideoSource
 } from '@livekit/rtc-node'
+import { Packet } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { ILiveKitPublisher, ILiveKitPublisherComponent } from './types'
+
+const PROTOCOL_VERSION = 100
+const MSG_TYPE_COMMS_DATA = 3
+const PRESENTATION_TOPIC = 'presentation'
+
+/**
+ * Encodes topic + JSON data into the CommsData wire format.
+ * Wire format after MsgType byte: [topicLen 2 bytes LE][topic UTF-8][data UTF-8].
+ */
+function encodeCommsPayload(topic: string, jsonData: string): Uint8Array {
+  const topicBytes = new TextEncoder().encode(topic)
+  const dataBytes = new TextEncoder().encode(jsonData)
+  // [MsgType 1 byte][topicLen 2 bytes LE][topic][data]
+  const payload = new Uint8Array(1 + 2 + topicBytes.length + dataBytes.length)
+  payload[0] = MSG_TYPE_COMMS_DATA
+  payload[1] = topicBytes.length & 0xff
+  payload[2] = (topicBytes.length >> 8) & 0xff
+  payload.set(topicBytes, 3)
+  payload.set(dataBytes, 3 + topicBytes.length)
+  return payload
+}
+
+/**
+ * Decodes CommsData wire format from Scene.data (after MsgType byte is stripped).
+ * Returns { topic, data } or null if malformed.
+ */
+function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: string } | null {
+  // sceneData[0] is MsgType — check it, then skip it.
+  if (sceneData.length < 1 || sceneData[0] !== MSG_TYPE_COMMS_DATA) return null
+  const inner = sceneData.slice(1)
+  if (inner.length < 2) return null
+  const topicLen = inner[0] | (inner[1] << 8)
+  if (inner.length < 2 + topicLen) return null
+  const topic = new TextDecoder().decode(inner.slice(2, 2 + topicLen))
+  const data = new TextDecoder().decode(inner.slice(2 + topicLen))
+  return { topic, data }
+}
 
 function parsePresentersFromRoomMetadata(metadata: string | undefined): Set<string> {
   try {
@@ -36,6 +74,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
   let presenters: Set<string> = new Set()
+  let lastSceneId: string = ''
 
   return {
     async connect(url: string, token: string): Promise<void> {
@@ -69,19 +108,35 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           const isPresenter = presenters.has(identity.toLowerCase())
 
           let message: Record<string, unknown> | undefined
-          let isJson = false
+
+          // Try protobuf decode first (Packet { Scene { data: [MsgType.CommsData][topicLen][topic][json] } }).
           try {
-            message = JSON.parse(new TextDecoder().decode(payload))
-            isJson = true
+            const packet = Packet.decode(payload)
+            if (packet.message?.$case === 'scene') {
+              if (packet.message.scene.sceneId) {
+                lastSceneId = packet.message.scene.sceneId
+              }
+              const decoded = decodeCommsPayload(packet.message.scene.data)
+              if (decoded) {
+                message = JSON.parse(decoded.data)
+              }
+            }
           } catch {
-            /* ignored */
+            // Fallback: raw JSON for backward compatibility during migration.
+            try {
+              message = JSON.parse(new TextDecoder().decode(payload))
+            } catch {
+              /* ignored */
+            }
           }
 
-          if (!dataHandler) return
-          if (!isJson || !message) return
+          if (!message) return
 
           const msgType = typeof message.type === 'string' ? message.type : ''
-          if (topic !== 'presentation' && !msgType.startsWith('presentation:')) return
+          logger.debug(`[DataReceived] from=${identity} topic=${topic || 'none'} type=${msgType}`)
+
+          if (!dataHandler) return
+          if (!msgType.startsWith('presentation:')) return
 
           logger.info(
             `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} type=${msgType}`
@@ -189,11 +244,17 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async publishData(message: Record<string, unknown>): Promise<void> {
       if (!room) return
-      const data = new TextEncoder().encode(JSON.stringify(message))
       const localParticipant = room.localParticipant
       if (!localParticipant) return
-      await localParticipant.publishData(data, {
-        topic: 'presentation',
+
+      const sceneData = encodeCommsPayload(PRESENTATION_TOPIC, JSON.stringify(message))
+
+      const packet = Packet.encode({
+        message: { $case: 'scene', scene: { sceneId: lastSceneId, data: sceneData } },
+        protocolVersion: PROTOCOL_VERSION
+      }).finish()
+
+      await localParticipant.publishData(packet, {
         reliable: true
       })
     },
