@@ -1,3 +1,4 @@
+import { Packet } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import {
   AudioFrame,
   AudioSource,
@@ -12,7 +13,6 @@ import {
   VideoFrame,
   VideoSource
 } from '@livekit/rtc-node'
-import { Packet } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { ILiveKitPublisher, ILiveKitPublisherComponent } from './types'
 
@@ -38,7 +38,8 @@ function encodeCommsPayload(topic: string, jsonData: string): Uint8Array {
 }
 
 /**
- * Decodes CommsData wire format from Scene.data (after MsgType byte is stripped).
+ * Decodes CommsData wire format from Scene.data.
+ * Expects the full payload including the leading MsgType byte.
  * Returns { topic, data } or null if malformed.
  */
 function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: string } | null {
@@ -74,7 +75,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
   let presenters: Set<string> = new Set()
-  let lastSceneId: string = ''
+  let lastSceneId = ''
 
   return {
     async connect(url: string, token: string): Promise<void> {
@@ -117,7 +118,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
                 lastSceneId = packet.message.scene.sceneId
               }
               const decoded = decodeCommsPayload(packet.message.scene.data)
-              if (decoded) {
+              if (decoded && decoded.topic === PRESENTATION_TOPIC) {
                 message = JSON.parse(decoded.data)
               }
             }
