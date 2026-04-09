@@ -212,7 +212,9 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
     pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void {
       if (!audioSource) return
       const frame = new AudioFrame(pcmData, sampleRate, channels, samplesPerChannel)
-      audioSource.captureFrame(frame).catch(() => { /* track not ready yet, drop frame */ })
+      audioSource.captureFrame(frame).catch(() => {
+        /* track not ready yet, drop frame */
+      })
     },
 
     async stopAudioPublishing(): Promise<void> {

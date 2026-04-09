@@ -3,12 +3,12 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { i420FrameSize } from '../../logic/color-convert'
 import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo } from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
-import { i420FrameSize } from '../../logic/color-convert'
 
 const FRAME_RATE = 10
 const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
