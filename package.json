@@ -6,7 +6,16 @@
     "lint": "eslint '{src,test}/**/*.{js,ts}'",
     "lint:fix": "eslint '{src,test}/**/*.{js,ts}' --fix",
     "start:dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
-    "test": "jest --forceExit --detectOpenHandles --coverage --verbose"
+    "test": "jest --forceExit --detectOpenHandles --coverage --verbose",
+    "typecheck": "tsc --noEmit",
+    "prepare": "simple-git-hooks"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx nano-staged",
+    "pre-push": "yarn typecheck && yarn test"
+  },
+  "nano-staged": {
+    "*.{js,ts}": ["eslint", "prettier --check"]
   },
   "devDependencies": {
     "@dcl/eslint-config": "^2.3.1",
@@ -15,7 +24,9 @@
     "@well-known-components/test-helpers": "^1.5.8",
     "eslint": "^8",
     "jest": "^30.2.0",
+    "nano-staged": "^1.0.2",
     "nodemon": "^3.1.10",
+    "simple-git-hooks": "^2.13.1",
     "ts-jest": "^29.4.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
