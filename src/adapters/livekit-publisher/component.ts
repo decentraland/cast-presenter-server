@@ -165,7 +165,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
         source: TrackSource.SOURCE_SCREENSHARE,
         videoCodec: VideoCodec.H264,
         videoEncoding: {
-          maxBitrate: BigInt(8_000_000),
+          maxBitrate: BigInt(4_000_000),
           maxFramerate: 15
         },
         simulcast: false,
@@ -176,17 +176,17 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       await localParticipant.publishTrack(videoTrack, publishOptions)
     },
 
-    pushFrame(rgbaBuffer: Buffer, width: number, height: number): void {
+    pushFrame(buffer: Buffer, width: number, height: number, bufferType?: number): void {
       if (!videoSource) return
-      const frame = new VideoFrame(rgbaBuffer, width, height, VideoBufferType.RGBA)
+      const frame = new VideoFrame(buffer, width, height, bufferType ?? VideoBufferType.RGBA)
       videoSource.captureFrame(frame)
     },
 
-    startHeartbeat(rgbaBuffer: Buffer, width: number, height: number): void {
+    startHeartbeat(buffer: Buffer, width: number, height: number, bufferType?: number): void {
       this.stopHeartbeat()
       heartbeatInterval = setInterval(() => {
-        this.pushFrame(rgbaBuffer, width, height)
-      }, 33)
+        this.pushFrame(buffer, width, height, bufferType)
+      }, 500)
     },
 
     stopHeartbeat(): void {
@@ -198,7 +198,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async startAudioPublishing(sampleRate: number, channels: number): Promise<void> {
       if (!room) throw new Error('Not connected')
-      audioSource = new AudioSource(sampleRate, channels, 5)
+      audioSource = new AudioSource(sampleRate, channels, 10)
       audioTrack = LocalAudioTrack.createAudioTrack('presentation-audio', audioSource)
       const options = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE_AUDIO,
@@ -212,7 +212,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
     pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void {
       if (!audioSource) return
       const frame = new AudioFrame(pcmData, sampleRate, channels, samplesPerChannel)
-      void audioSource.captureFrame(frame)
+      audioSource.captureFrame(frame).catch(() => { /* track not ready yet, drop frame */ })
     },
 
     async stopAudioPublishing(): Promise<void> {

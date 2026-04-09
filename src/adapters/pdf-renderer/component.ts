@@ -21,7 +21,7 @@ interface PDFAnnotation {
   rect?: number[]
 }
 
-const TARGET_WIDTH = 1280
+const TARGET_WIDTH = 960
 
 const VIDEO_URL_PATTERN = /youtube\.com|youtu\.be|drive\.google\.com|docs\.google\.com\/file|vimeo\.com/
 const MEDIA_URL_PATTERN = /\.gif($|\?)|\.mp4($|\?)|\.webm($|\?)/i

@@ -8,8 +8,10 @@ import type { INetworkValidatorComponent } from '../../logic/network-validator/t
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
+import { i420FrameSize } from '../../logic/color-convert'
 
-const FRAME_RATE = 15
+const FRAME_RATE = 10
+const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
 const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024 // 500 MB
 const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
 
@@ -55,6 +57,7 @@ function createVideoCompositor(
   let frameAccumLength = 0
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
+  let isPaused = false
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
 
@@ -207,17 +210,22 @@ function createVideoCompositor(
         const proc = spawn(
           'ffmpeg',
           [
+            '-threads',
+            '1',
             '-i',
             inputPath,
-            '-map',
-            '0:v',
             '-vf',
             `scale=${width}:${height}`,
             '-c:v',
             'libx264',
             '-preset',
             'fast',
-            '-an',
+            '-threads',
+            '1',
+            '-r',
+            String(FRAME_RATE),
+            '-c:a',
+            'copy',
             '-y',
             outputPath
           ],
@@ -258,11 +266,14 @@ function createVideoCompositor(
       validateFilterParam(y, 'y')
       validateFilterParam(vw, 'vw')
       validateFilterParam(vh, 'vh')
-      const compositeFrameSize = slideWidth * slideHeight * 4
+
+      const compositeFrameSize = i420FrameSize(slideWidth, slideHeight)
 
       const slidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       fs.writeFileSync(slidePath, slideBuffer)
 
+      // Overlay video at PDF geometry coordinates — no scaling needed
+      // Video is pre-transcoded to exact geometry size, slide is already at target resolution
       const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
 
       let ffmpegArgs: string[]
@@ -271,6 +282,8 @@ function createVideoCompositor(
       if (onAudioData) {
         // With audio: need explicit -map for both video and audio outputs
         ffmpegArgs = [
+          '-threads',
+          '1',
           '-stream_loop',
           '-1',
           '-f',
@@ -283,6 +296,8 @@ function createVideoCompositor(
           String(FRAME_RATE),
           '-i',
           slidePath,
+          '-threads',
+          '1',
           '-i',
           videoPath,
           '-filter_complex',
@@ -292,7 +307,7 @@ function createVideoCompositor(
           '-f',
           'rawvideo',
           '-pix_fmt',
-          'rgba',
+          'yuv420p',
           '-r',
           String(FRAME_RATE),
           'pipe:1',
@@ -308,8 +323,10 @@ function createVideoCompositor(
         ]
         stdio = ['ignore', 'pipe', 'pipe', 'pipe']
       } else {
-        // Without audio: original ffmpeg args, no explicit maps
+        // Without audio: no explicit maps
         ffmpegArgs = [
+          '-threads',
+          '1',
           '-stream_loop',
           '-1',
           '-f',
@@ -322,6 +339,8 @@ function createVideoCompositor(
           String(FRAME_RATE),
           '-i',
           slidePath,
+          '-threads',
+          '1',
           '-i',
           videoPath,
           '-filter_complex',
@@ -330,7 +349,7 @@ function createVideoCompositor(
           '-f',
           'rawvideo',
           '-pix_fmt',
-          'rgba',
+          'yuv420p',
           '-r',
           String(FRAME_RATE),
           'pipe:1'
@@ -338,26 +357,27 @@ function createVideoCompositor(
         stdio = ['ignore', 'pipe', 'pipe']
       }
 
-      compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio })
+      compositeProcess = spawn('taskset', ['-c', '1', 'ffmpeg', ...ffmpegArgs], { stdio })
 
       compositeProcess.stderr?.on('data', () => {
         /* noop */
       })
 
-      // Forward audio PCM data if available
+      // Accumulate audio alongside video — flush together to keep them in sync
+      let audioAccumulator = Buffer.alloc(0)
       if (onAudioData && compositeProcess.stdio[3]) {
         const audioStream = compositeProcess.stdio[3] as NodeJS.ReadableStream
         audioStream.on('data', (chunk: Buffer) => {
-          if (isPlaying) onAudioData(chunk)
+          if (isPlaying) {
+            audioAccumulator = audioAccumulator.length === 0 ? chunk : Buffer.concat([audioAccumulator, chunk])
+          }
         })
       }
 
       publisher.stopHeartbeat()
 
-      // Accumulate stdout chunks, push one frame per timer tick
+      // Always accumulate stdout chunks — keeps the byte stream continuous across pause/resume
       dataListener = (chunk: Buffer) => {
-        if (!isPlaying) return
-
         if (frameAccumLength === 0) {
           frameAccumulator = chunk
           frameAccumLength = chunk.length
@@ -368,22 +388,13 @@ function createVideoCompositor(
       }
       compositeProcess.stdout?.on('data', dataListener)
 
-      const MAX_BUFFERED_FRAMES = 5
       const FRAME_INTERVAL_MS = 1000 / FRAME_RATE
       frameDelivery = setInterval(() => {
-        if (!isPlaying || frameAccumLength < compositeFrameSize) return
+        if (!isPlaying || isPaused || frameAccumLength < compositeFrameSize) return
 
-        // Drop excess frames to prevent falling behind
-        const maxBytes = compositeFrameSize * MAX_BUFFERED_FRAMES
-        if (frameAccumLength > maxBytes) {
-          const framesToDrop = Math.floor(frameAccumLength / compositeFrameSize) - 1
-          frameAccumulator = frameAccumulator.subarray(framesToDrop * compositeFrameSize)
-          frameAccumLength = frameAccumulator.length
-        }
-
-        // Consume the next frame sequentially
+        // Consume the next frame sequentially — push as I420
         const frame = frameAccumulator.subarray(0, compositeFrameSize)
-        publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight)
+        publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
         frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
         frameAccumLength = frameAccumulator.length
       }, FRAME_INTERVAL_MS)
@@ -397,19 +408,20 @@ function createVideoCompositor(
 
       logger.info(`Video playback started (audio: ${onAudioData ? 'enabled' : 'disabled'})`, {
         slideSize: `${slideWidth}x${slideHeight}`,
+        compositeSize: `${slideWidth}x${slideHeight}`,
         videoSize: `${vw}x${vh}`,
         position: `${x},${y}`
       })
     },
 
     pausePlayback(): void {
+      isPaused = true
       if (compositeProcess) compositeProcess.kill('SIGSTOP')
-      isPlaying = false
     },
 
     resumePlayback(): void {
       if (compositeProcess) compositeProcess.kill('SIGCONT')
-      isPlaying = true
+      isPaused = false
     },
 
     onEnd(callback: () => void): void {

@@ -190,7 +190,7 @@ export async function createPresentationManager(
       slideVideos: slideVideos.length
     })
 
-    // Pre-download all videos across all slides in the background
+    // Pre-download videos in the background (no transcoding — FFmpeg streams from local file)
     preDownloadVideos(session).catch((err) => {
       logger.warn(`Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`)
     })
@@ -215,7 +215,7 @@ export async function createPresentationManager(
     logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
 
     let downloaded = 0
-    for (const [url, size] of videoTargets) {
+    for (const [url] of videoTargets) {
       if (downloaded >= MAX_PRE_DOWNLOADS) {
         logger.info(`Pre-download limit reached (${MAX_PRE_DOWNLOADS}), remaining videos will be downloaded on demand`)
         break
@@ -226,22 +226,11 @@ export async function createPresentationManager(
       }
       if (session.cachedVideoPaths.has(url)) continue
       try {
-        logger.info(`Pre-downloading video (${size.width}x${size.height}): ${url}`)
+        logger.info(`Pre-downloading video: ${url}`)
         const rawPath = await downloader.downloadVideo(url)
         session.cachedVideoPaths.set(url, rawPath)
         logger.info(`Pre-downloaded video: ${url}`)
         downloaded++
-
-        // TODO: Re-enable pre-transcoding once we have more CPU headroom
-        // Pre-transcoding uses ~63% CPU; runtime ffmpeg scales just fine at ~11%
-        // try {
-        //   const transcodedPath = await downloader.preTranscode(rawPath, size.width, size.height)
-        //   session.cachedVideoPaths.set(url, transcodedPath)
-        //   fs.unlink(rawPath, () => { /* noop */ })
-        //   logger.info(`Pre-transcoded video to ${size.width}x${size.height}: ${url}`)
-        // } catch (transcodeErr) {
-        //   logger.warn(`Pre-transcode failed: ${transcodeErr instanceof Error ? transcodeErr.message : String(transcodeErr)}`)
-        // }
       } catch (err) {
         logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -351,7 +340,7 @@ export async function createPresentationManager(
       logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     } else {
       videoPath = await compositor.resolveStreamUrl(videoInfo.url)
-      logger.info(`Streaming video directly from URL for presentation ${session.id}`, { url: videoPath })
+      logger.info(`Streaming video from URL for presentation ${session.id}`, { url: videoPath })
     }
 
     if (session.currentSlide !== requestedSlide) {
@@ -370,9 +359,6 @@ export async function createPresentationManager(
       return
     }
 
-    // TODO: Enable audio when ready — the infrastructure is in place
-    // (publisher.startAudioPublishing, compositor onAudioData callback, publisher.pushAudioFrame)
-    // Disabled for now due to ~500MB RAM increase from ffmpeg audio decoding + LiveKit audio track
     await compositor.startPlayback(
       videoPath,
       videoInfo,
