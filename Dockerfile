@@ -1,9 +1,6 @@
-FROM node:24-slim as builderenv
+FROM node:24-trixie-slim as builderenv
 
 WORKDIR /app
-
-# some packages require a build step
-RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 
 # install dependencies
 COPY package.json /app/package.json
@@ -19,9 +16,9 @@ RUN yarn install --prod --frozen-lockfile
 
 ########################## END OF BUILD STAGE ##########################
 
-FROM node:24-slim
+FROM node:24-trixie-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends wget tini ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tini ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
@@ -35,8 +32,11 @@ ENV CURRENT_VERSION=${CURRENT_VERSION:-Unknown}
 RUN groupadd -g 1001 appuser && useradd -u 1001 -g appuser -s /bin/sh appuser
 
 WORKDIR /app
-COPY --from=builderenv /app /app
-RUN chown -R appuser:appuser /app
+RUN chown appuser:appuser /app
+COPY --chown=appuser:appuser --from=builderenv /app/dist /app/dist
+COPY --chown=appuser:appuser --from=builderenv /app/node_modules /app/node_modules
+COPY --chown=appuser:appuser --from=builderenv /app/package.json /app/package.json
+COPY --chown=appuser:appuser --from=builderenv /app/.env.default /app/.env.default
 
 USER appuser
 RUN echo "" > /app/.env
