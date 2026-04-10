@@ -9,7 +9,7 @@ import type { IBaseComponent, ILoggerComponent } from '@well-known-components/in
 export interface ILiveKitPublisher {
   connect(url: string, token: string): Promise<void>
   startPublishing(width: number, height: number): Promise<void>
-  pushFrame(buffer: Buffer, width: number, height: number, bufferType?: number): void
+  pushFrame(buffer: Buffer, width: number, height: number, bufferType?: number, timestampUs?: bigint): void
   startHeartbeat(buffer: Buffer, width: number, height: number, bufferType?: number): void
   stopHeartbeat(): void
   startAudioPublishing(sampleRate: number, channels: number): Promise<void>

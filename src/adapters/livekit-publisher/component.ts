@@ -176,10 +176,10 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       await localParticipant.publishTrack(videoTrack, publishOptions)
     },
 
-    pushFrame(buffer: Buffer, width: number, height: number, bufferType?: number): void {
+    pushFrame(buffer: Buffer, width: number, height: number, bufferType?: number, timestampUs?: bigint): void {
       if (!videoSource) return
       const frame = new VideoFrame(buffer, width, height, bufferType ?? VideoBufferType.RGBA)
-      videoSource.captureFrame(frame)
+      videoSource.captureFrame(frame, timestampUs)
     },
 
     startHeartbeat(buffer: Buffer, width: number, height: number, bufferType?: number): void {
@@ -198,7 +198,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async startAudioPublishing(sampleRate: number, channels: number): Promise<void> {
       if (!room) throw new Error('Not connected')
-      audioSource = new AudioSource(sampleRate, channels, 10)
+      audioSource = new AudioSource(sampleRate, channels, 500)
       audioTrack = LocalAudioTrack.createAudioTrack('presentation-audio', audioSource)
       const options = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE_AUDIO,

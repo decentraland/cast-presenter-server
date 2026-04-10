@@ -104,6 +104,14 @@ export interface IPresentationManager extends IBaseComponent {
   pauseVideo(id: string): Promise<void>
 
   /**
+   * Stops video playback and returns to the static slide frame.
+   *
+   * @param id - Presentation session ID
+   * @throws {PresentationNotFoundError} If the session does not exist
+   */
+  stopVideo(id: string): Promise<void>
+
+  /**
    * Stops and cleans up a presentation session.
    *
    * @param id - Presentation session ID

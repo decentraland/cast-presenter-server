@@ -12,6 +12,8 @@ import type { ChildProcess } from 'child_process'
 
 const FRAME_RATE = 10
 const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
+const AUDIO_SAMPLE_RATE = 48000
+const AUDIO_CHANNELS = 2
 const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024 // 500 MB
 const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
 
@@ -51,8 +53,8 @@ function createVideoCompositor(
   tempDir?: string
 ): IVideoCompositor {
   let compositeProcess: ChildProcess | null = null
+  let audioProcess: ChildProcess | null = null
   let dataListener: ((chunk: Buffer) => void) | null = null
-  let frameDelivery: ReturnType<typeof setInterval> | null = null
   let frameAccumulator: Buffer = Buffer.alloc(0)
   let frameAccumLength = 0
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
@@ -147,11 +149,6 @@ function createVideoCompositor(
   ): void {
     cleanedUp = true
     isPlaying = false
-
-    if (frameDelivery) {
-      clearInterval(frameDelivery)
-      frameDelivery = null
-    }
 
     if (compositeProcess) {
       if (dataListener) {
@@ -276,107 +273,86 @@ function createVideoCompositor(
       // Video is pre-transcoded to exact geometry size, slide is already at target resolution
       const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
 
-      let ffmpegArgs: string[]
-      let stdio: Array<'ignore' | 'pipe'>
+      // Video composite — FFmpeg paces output at real-time via -re (no timers needed)
+      const ffmpegArgs = [
+        '-threads',
+        '1',
+        '-stream_loop',
+        '-1',
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        'rgba',
+        '-s',
+        `${slideWidth}x${slideHeight}`,
+        '-r',
+        String(FRAME_RATE),
+        '-i',
+        slidePath,
+        '-threads',
+        '1',
+        '-re',
+        '-i',
+        videoPath,
+        '-filter_complex',
+        filterComplex,
+        '-an',
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        'yuv420p',
+        '-r',
+        String(FRAME_RATE),
+        'pipe:1'
+      ]
 
-      if (onAudioData) {
-        // With audio: need explicit -map for both video and audio outputs
-        ffmpegArgs = [
-          '-threads',
-          '1',
-          '-stream_loop',
-          '-1',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'rgba',
-          '-s',
-          `${slideWidth}x${slideHeight}`,
-          '-r',
-          String(FRAME_RATE),
-          '-i',
-          slidePath,
-          '-threads',
-          '1',
-          '-i',
-          videoPath,
-          '-filter_complex',
-          `${filterComplex}[out]`,
-          '-map',
-          '[out]',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'yuv420p',
-          '-r',
-          String(FRAME_RATE),
-          'pipe:1',
-          '-map',
-          '1:a?',
-          '-f',
-          's16le',
-          '-ar',
-          '48000',
-          '-ac',
-          '2',
-          'pipe:3'
-        ]
-        stdio = ['ignore', 'pipe', 'pipe', 'pipe']
-      } else {
-        // Without audio: no explicit maps
-        ffmpegArgs = [
-          '-threads',
-          '1',
-          '-stream_loop',
-          '-1',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'rgba',
-          '-s',
-          `${slideWidth}x${slideHeight}`,
-          '-r',
-          String(FRAME_RATE),
-          '-i',
-          slidePath,
-          '-threads',
-          '1',
-          '-i',
-          videoPath,
-          '-filter_complex',
-          filterComplex,
-          '-an',
-          '-f',
-          'rawvideo',
-          '-pix_fmt',
-          'yuv420p',
-          '-r',
-          String(FRAME_RATE),
-          'pipe:1'
-        ]
-        stdio = ['ignore', 'pipe', 'pipe']
-      }
-
-      compositeProcess = spawn('taskset', ['-c', '1', 'ffmpeg', ...ffmpegArgs], { stdio })
+      compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
       compositeProcess.stderr?.on('data', () => {
         /* noop */
       })
 
-      // Accumulate audio alongside video — flush together to keep them in sync
-      let audioAccumulator = Buffer.alloc(0)
-      if (onAudioData && compositeProcess.stdio[3]) {
-        const audioStream = compositeProcess.stdio[3] as NodeJS.ReadableStream
-        audioStream.on('data', (chunk: Buffer) => {
-          if (isPlaying) {
-            audioAccumulator = audioAccumulator.length === 0 ? chunk : Buffer.concat([audioAccumulator, chunk])
+      // Separate audio process — also paced at real-time via -re
+      if (onAudioData) {
+        audioProcess = spawn(
+          'ffmpeg',
+          [
+            '-threads',
+            '1',
+            '-re',
+            '-i',
+            videoPath,
+            '-vn',
+            '-f',
+            's16le',
+            '-ar',
+            String(AUDIO_SAMPLE_RATE),
+            '-ac',
+            String(AUDIO_CHANNELS),
+            'pipe:1'
+          ],
+          { stdio: ['ignore', 'pipe', 'pipe'] }
+        )
+
+        audioProcess.stderr?.on('data', () => {
+          /* noop */
+        })
+
+        // Push audio directly as it arrives — AudioSource self-paces via its internal queue
+        audioProcess.stdout?.on('data', (chunk: Buffer) => {
+          if (isPlaying && !isPaused) {
+            onAudioData(Buffer.from(chunk))
           }
+        })
+
+        audioProcess.on('close', () => {
+          audioProcess = null
         })
       }
 
       publisher.stopHeartbeat()
 
-      // Always accumulate stdout chunks — keeps the byte stream continuous across pause/resume
+      // Push video frames immediately as complete frames arrive — FFmpeg -re handles pacing
       dataListener = (chunk: Buffer) => {
         if (frameAccumLength === 0) {
           frameAccumulator = chunk
@@ -385,19 +361,17 @@ function createVideoCompositor(
           frameAccumulator = Buffer.concat([frameAccumulator, chunk])
           frameAccumLength = frameAccumulator.length
         }
+
+        // Deliver all complete frames immediately
+        while (frameAccumLength >= compositeFrameSize) {
+          if (!isPlaying || isPaused) break
+          const frame = frameAccumulator.subarray(0, compositeFrameSize)
+          publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
+          frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
+          frameAccumLength = frameAccumulator.length
+        }
       }
       compositeProcess.stdout?.on('data', dataListener)
-
-      const FRAME_INTERVAL_MS = 1000 / FRAME_RATE
-      frameDelivery = setInterval(() => {
-        if (!isPlaying || isPaused || frameAccumLength < compositeFrameSize) return
-
-        // Consume the next frame sequentially — push as I420
-        const frame = frameAccumulator.subarray(0, compositeFrameSize)
-        publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
-        frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
-        frameAccumLength = frameAccumulator.length
-      }, FRAME_INTERVAL_MS)
 
       compositeProcess.on('close', () => {
         if (!cleanedUp && isPlaying) {
@@ -417,10 +391,12 @@ function createVideoCompositor(
     pausePlayback(): void {
       isPaused = true
       if (compositeProcess) compositeProcess.kill('SIGSTOP')
+      if (audioProcess) audioProcess.kill('SIGSTOP')
     },
 
     resumePlayback(): void {
       if (compositeProcess) compositeProcess.kill('SIGCONT')
+      if (audioProcess) audioProcess.kill('SIGCONT')
       isPaused = false
     },
 
@@ -435,10 +411,6 @@ function createVideoCompositor(
     cleanup(): void {
       cleanedUp = true
       isPlaying = false
-      if (frameDelivery) {
-        clearInterval(frameDelivery)
-        frameDelivery = null
-      }
       if (compositeProcess) {
         if (dataListener) {
           compositeProcess.stdout?.removeListener('data', dataListener)
@@ -446,6 +418,10 @@ function createVideoCompositor(
         }
         compositeProcess.kill('SIGKILL')
         compositeProcess = null
+      }
+      if (audioProcess) {
+        audioProcess.kill('SIGKILL')
+        audioProcess = null
       }
       frameAccumulator = Buffer.alloc(0)
       frameAccumLength = 0

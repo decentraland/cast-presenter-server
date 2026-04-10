@@ -130,6 +130,9 @@ export async function createPresentationManager(
           case 'presentation:video:pause':
             await pauseVideoSession(session)
             break
+          case 'presentation:video:stop':
+            await stopVideoSession(session)
+            break
           case 'presentation:stop':
             await stopSession(session)
             break
@@ -190,10 +193,14 @@ export async function createPresentationManager(
       slideVideos: slideVideos.length
     })
 
-    // Pre-download videos in the background (no transcoding — FFmpeg streams from local file)
-    preDownloadVideos(session).catch((err) => {
-      logger.warn(`Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`)
-    })
+    // Pre-download videos in the background after stream establishes
+    setTimeout(() => {
+      preDownloadVideos(session).catch((err) => {
+        logger.warn(
+          `Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`
+        )
+      })
+    }, 3000)
 
     return { id, fileName: presentationName, slideCount, currentSlide: 0, fileType }
   }
@@ -211,7 +218,7 @@ export async function createPresentationManager(
       }
     }
 
-    const MAX_PRE_DOWNLOADS = 2
+    const MAX_PRE_DOWNLOADS = 10
     logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
 
     let downloaded = 0
@@ -272,6 +279,7 @@ export async function createPresentationManager(
 
     try {
       if (session.compositor) {
+        await session.publisher.stopAudioPublishing()
         session.compositor.cleanup()
         session.compositor = null
       }
@@ -359,13 +367,29 @@ export async function createPresentationManager(
       return
     }
 
+    // Start audio publishing — wrapped in try/catch so video works even if audio fails
+    try {
+      await session.publisher.startAudioPublishing(48000, 2)
+    } catch (err) {
+      logger.warn(
+        `Failed to start audio publishing for ${session.id}: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+
+    const onAudioData = (pcmChunk: Buffer) => {
+      const int16 = new Int16Array(pcmChunk.buffer, pcmChunk.byteOffset, pcmChunk.byteLength / 2)
+      const samplesPerChannel = int16.length / 2
+      session.publisher.pushAudioFrame(int16, 48000, 2, samplesPerChannel)
+    }
+
     await compositor.startPlayback(
       videoPath,
       videoInfo,
       session.lastFrameBuffer,
       session.lastFrameWidth,
       session.lastFrameHeight,
-      session.publisher
+      session.publisher,
+      onAudioData
     )
 
     session.videoState = 'playing'
@@ -373,6 +397,9 @@ export async function createPresentationManager(
     compositor.onEnd(async () => {
       session.videoState = 'idle'
       session.compositor = null
+      session.publisher.stopAudioPublishing().catch(() => {
+        /* noop */
+      })
       broadcastState(session).catch(() => {
         /* noop */
       })
@@ -381,6 +408,26 @@ export async function createPresentationManager(
 
     await broadcastState(session)
     logger.info(`Video playback started for presentation ${session.id}`, { videoIndex })
+  }
+
+  async function stopVideoSession(session: InternalSession): Promise<void> {
+    if (session.videoState === 'idle') return
+
+    await session.publisher.stopAudioPublishing()
+
+    if (session.compositor) {
+      session.compositor.cleanup()
+      session.compositor = null
+    }
+    session.videoState = 'idle'
+
+    if (session.lastFrameBuffer) {
+      session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+    }
+
+    await broadcastState(session)
+    logger.info(`Video stopped for presentation ${session.id}`)
   }
 
   async function pauseVideoSession(session: InternalSession): Promise<void> {
@@ -448,6 +495,12 @@ export async function createPresentationManager(
     return pauseVideoSession(session)
   }
 
+  async function stopVideo(id: string): Promise<void> {
+    const session = sessions.get(id)
+    if (!session) throw new PresentationNotFoundError(id)
+    return stopVideoSession(session)
+  }
+
   async function stopPresentation(id: string): Promise<void> {
     const session = sessions.get(id)
     if (!session) {
@@ -463,6 +516,7 @@ export async function createPresentationManager(
     getState,
     playVideo,
     pauseVideo,
+    stopVideo,
     stopPresentation,
     async [START_COMPONENT](): Promise<void> {
       idleCheckInterval = setInterval(() => {
