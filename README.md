@@ -58,7 +58,9 @@ installed:
 - **Node.js:** Version 24.x or higher
 - **Yarn:** Version 1.22.x or higher
 - **ffmpeg:** Required for video processing
-- **Docker:** For containerized deployment (optional)
+- **Docker:** For containerized deployment (optional). The image uses
+  `node:24-trixie-slim` (Debian) because `@livekit/rtc-node` does not
+  publish musl binaries for Alpine Linux.
 
 ### Installation
 

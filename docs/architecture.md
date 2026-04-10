@@ -149,6 +149,7 @@ strings sent with reliable delivery.
 { "type": "presentation:navigate", "action": "goto", "slideIndex": 3 }
 { "type": "presentation:video:play", "videoIndex": 0 }
 { "type": "presentation:video:pause" }
+{ "type": "presentation:video:stop" }
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
 ```
@@ -284,5 +285,9 @@ they must require authentication. Options include:
 
 ### Container hardening
 
-The Docker image runs as a non-root user (`appuser:1001`) and uses
-Tini as PID 1 for proper signal handling.
+The Docker image is based on `node:24-trixie-slim` (Debian). Alpine
+Linux is not supported because `@livekit/rtc-node` only ships
+glibc-compatible native binaries — there is no musl build available.
+
+The image runs as a non-root user (`appuser:1001`) and uses Tini as
+PID 1 for proper signal handling.
