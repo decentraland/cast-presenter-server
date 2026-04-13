@@ -167,12 +167,11 @@ describe('when managing video playback in a presentation', () => {
         await manager.playVideo(presentationId, 0)
         await manager.pauseVideo(presentationId)
         publisher.publishData.mockClear()
-        compositor.cleanup.mockClear()
 
         await manager.stopVideo(presentationId)
       })
 
-      it('should clean up the compositor', () => {
+      it('should have cleaned up the compositor during pause', () => {
         expect(compositor.cleanup).toHaveBeenCalled()
       })
 
@@ -257,7 +256,8 @@ describe('when managing video playback in a presentation', () => {
           expect.any(Number),
           expect.any(Number),
           publisher,
-          expect.any(Function)
+          expect.any(Function),
+          undefined
         )
       })
     })

@@ -165,8 +165,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
         source: TrackSource.SOURCE_SCREENSHARE,
         videoCodec: VideoCodec.H264,
         videoEncoding: {
-          maxBitrate: BigInt(4_000_000),
-          maxFramerate: 15
+          maxBitrate: BigInt(6_000_000),
+          maxFramerate: 30
         },
         simulcast: false,
         stream: 'presentation'
@@ -198,7 +198,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
 
     async startAudioPublishing(sampleRate: number, channels: number): Promise<void> {
       if (!room) throw new Error('Not connected')
-      audioSource = new AudioSource(sampleRate, channels, 500)
+      audioSource = new AudioSource(sampleRate, channels, 200)
       audioTrack = LocalAudioTrack.createAudioTrack('presentation-audio', audioSource)
       const options = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE_AUDIO,

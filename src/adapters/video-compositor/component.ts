@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
 import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo } from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
@@ -10,12 +11,11 @@ import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
 
-const FRAME_RATE = 10
+const FRAME_RATE = 20
 const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
 const AUDIO_SAMPLE_RATE = 48000
 const AUDIO_CHANNELS = 2
-const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024 // 500 MB
-const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
+const DOWNLOAD_TIMEOUT_MS = 120_000 // 120 seconds
 
 /**
  * Validates an ffmpeg filter parameter is a safe integer within bounds.
@@ -29,22 +29,6 @@ export function validateFilterParam(value: number, name: string, max = 7680): vo
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new Error(`Invalid ffmpeg filter param ${name}=${value}, must be integer 0-${max}`)
   }
-}
-
-function extractDriveFileId(url: string): string | null {
-  const patterns = [/\/file\/d\/([a-zA-Z0-9_-]+)/, /[?&]id=([a-zA-Z0-9_-]+)/, /\/uc\?.*id=([a-zA-Z0-9_-]+)/]
-  for (const pattern of patterns) {
-    const match = url.match(pattern)
-    if (match) return match[1]
-  }
-  return null
-}
-
-function getDriveDownloadUrls(fileId: string): string[] {
-  return [
-    `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`,
-    `https://drive.google.com/uc?id=${fileId}&export=download&confirm=t`
-  ]
 }
 
 function createVideoCompositor(
@@ -63,62 +47,50 @@ function createVideoCompositor(
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
 
-  async function tryDownload(downloadUrl: string, originalUrl: string): Promise<string> {
+  async function tryDownload(downloadUrl: string): Promise<string> {
     const destPath = path.join(dir, `video-${Date.now()}.mp4`)
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
-
-    let response: Response
-    try {
-      response = await fetch(downloadUrl, { redirect: 'follow', signal: controller.signal })
-    } catch (err) {
-      clearTimeout(timeout)
-      throw err instanceof Error && err.name === 'AbortError'
-        ? new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s: ${downloadUrl}`)
-        : err
-    }
-
-    if (!response.ok || !response.body) {
-      clearTimeout(timeout)
-      throw new Error(`HTTP ${response.status} from ${downloadUrl}`)
-    }
-
-    const contentType = response.headers.get('content-type') || ''
-    if (contentType.includes('text/html')) {
-      clearTimeout(timeout)
-      throw new Error(`Got HTML instead of video: ${originalUrl}`)
-    }
-
-    const fileStream = fs.createWriteStream(destPath)
-    const reader = response.body.getReader()
-    let bytesWritten = 0
-
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        bytesWritten += value.byteLength
-        if (bytesWritten > MAX_DOWNLOAD_BYTES) {
-          throw new Error(`Video download exceeds ${MAX_DOWNLOAD_BYTES / (1024 * 1024)}MB limit: ${originalUrl}`)
-        }
-        fileStream.write(Buffer.from(value))
-      }
-    } finally {
-      clearTimeout(timeout)
-      fileStream.end()
-    }
 
     return new Promise((resolve, reject) => {
-      fileStream.on('finish', () => {
-        const stat = fs.statSync(destPath)
-        if (stat.size < 1024) {
-          fs.unlinkSync(destPath)
-          reject(new Error(`File too small (${stat.size} bytes), likely not a valid video`))
+      const timeout = setTimeout(() => {
+        proc.kill('SIGKILL')
+        reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s: ${downloadUrl}`))
+      }, DOWNLOAD_TIMEOUT_MS)
+
+      // Use FFmpeg to download — its HTTP handler follows Google Drive redirects
+      // that Node's fetch cannot (virus scan confirmation pages).
+      // -c copy = no re-encoding, just remux to mp4.
+      const proc = spawn('ffmpeg', ['-threads', '1', '-i', downloadUrl, '-c', 'copy', '-y', destPath], {
+        stdio: ['ignore', 'ignore', 'pipe']
+      })
+
+      let stderr = ''
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+      })
+
+      proc.on('close', (code) => {
+        clearTimeout(timeout)
+        if (code !== 0) {
+          reject(new Error(`FFmpeg download failed (code ${code}): ${stderr.slice(-200)}`))
           return
         }
-        resolve(destPath)
+        try {
+          const stat = fs.statSync(destPath)
+          if (stat.size < 1024) {
+            fs.unlinkSync(destPath)
+            reject(new Error(`File too small (${stat.size} bytes), likely not a valid video`))
+            return
+          }
+          resolve(destPath)
+        } catch (err) {
+          reject(err)
+        }
       })
-      fileStream.on('error', reject)
+
+      proc.on('error', (err) => {
+        clearTimeout(timeout)
+        reject(err)
+      })
     })
   }
 
@@ -168,13 +140,12 @@ function createVideoCompositor(
   return {
     async downloadVideo(url: string): Promise<string> {
       await networkValidator.validateVideoUrl(url)
-      const driveFileId = extractDriveFileId(url)
-      const urlsToTry = driveFileId ? getDriveDownloadUrls(driveFileId) : [url]
+      const { downloadUrls } = resolveVideoUrls(url)
 
       let lastError: Error | null = null
-      for (const downloadUrl of urlsToTry) {
+      for (const downloadUrl of downloadUrls) {
         try {
-          return await tryDownload(downloadUrl, url)
+          return await tryDownload(downloadUrl)
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err))
           logger.warn(`Download attempt failed: ${lastError.message}`)
@@ -185,11 +156,7 @@ function createVideoCompositor(
 
     async resolveStreamUrl(url: string): Promise<string> {
       await networkValidator.validateVideoUrl(url)
-      const driveFileId = extractDriveFileId(url)
-      if (driveFileId) {
-        return `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`
-      }
-      return url
+      return resolveVideoUrls(url).streamUrl
     },
 
     async preTranscode(inputPath: string, width: number, height: number): Promise<string> {
@@ -254,9 +221,11 @@ function createVideoCompositor(
       slideWidth: number,
       slideHeight: number,
       publisher: ILiveKitPublisher,
-      onAudioData?: (pcmChunk: Buffer) => void
+      onAudioData?: (pcmChunk: Buffer) => void,
+      seekSeconds?: number
     ): Promise<void> {
       isPlaying = true
+      cleanedUp = false
 
       const { x, y, width: vw, height: vh } = videoInfo.geometry
       validateFilterParam(x, 'x')
@@ -269,11 +238,15 @@ function createVideoCompositor(
       const slidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       fs.writeFileSync(slidePath, slideBuffer)
 
-      // Overlay video at PDF geometry coordinates — no scaling needed
-      // Video is pre-transcoded to exact geometry size, slide is already at target resolution
+      // Overlay video at PDF geometry coordinates
       const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
 
-      // Video composite — FFmpeg paces output at real-time via -re (no timers needed)
+      // -ss before -i for input seeking (used for resume after pause)
+      // Modern FFmpeg enables -accurate_seek by default, so input seeking
+      // jumps to the nearest keyframe then decodes forward to the exact timestamp.
+      const seekArgs = seekSeconds ? ['-ss', String(seekSeconds)] : []
+
+      // Video composite — -re on video input for real-time pacing
       const ffmpegArgs = [
         '-threads',
         '1',
@@ -291,6 +264,7 @@ function createVideoCompositor(
         slidePath,
         '-threads',
         '1',
+        ...seekArgs,
         '-re',
         '-i',
         videoPath,
@@ -312,7 +286,7 @@ function createVideoCompositor(
         /* noop */
       })
 
-      // Separate audio process — also paced at real-time via -re
+      // Audio process — uses -re for real-time pacing (killed on pause, restarted on resume)
       if (onAudioData) {
         audioProcess = spawn(
           'ffmpeg',
@@ -320,6 +294,7 @@ function createVideoCompositor(
             '-threads',
             '1',
             '-re',
+            ...seekArgs,
             '-i',
             videoPath,
             '-vn',
@@ -338,7 +313,6 @@ function createVideoCompositor(
           /* noop */
         })
 
-        // Push audio directly as it arrives — AudioSource self-paces via its internal queue
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
           if (isPlaying && !isPaused) {
             onAudioData(Buffer.from(chunk))
@@ -352,7 +326,7 @@ function createVideoCompositor(
 
       publisher.stopHeartbeat()
 
-      // Push video frames immediately as complete frames arrive — FFmpeg -re handles pacing
+      // Push video frames as complete frames arrive — FFmpeg -re handles pacing
       dataListener = (chunk: Buffer) => {
         if (frameAccumLength === 0) {
           frameAccumulator = chunk
@@ -362,7 +336,6 @@ function createVideoCompositor(
           frameAccumLength = frameAccumulator.length
         }
 
-        // Deliver all complete frames immediately
         while (frameAccumLength >= compositeFrameSize) {
           if (!isPlaying || isPaused) break
           const frame = frameAccumulator.subarray(0, compositeFrameSize)
@@ -384,19 +357,16 @@ function createVideoCompositor(
         slideSize: `${slideWidth}x${slideHeight}`,
         compositeSize: `${slideWidth}x${slideHeight}`,
         videoSize: `${vw}x${vh}`,
-        position: `${x},${y}`
+        position: `${x},${y}`,
+        seekSeconds: seekSeconds ?? 0
       })
     },
 
     pausePlayback(): void {
       isPaused = true
-      if (compositeProcess) compositeProcess.kill('SIGSTOP')
-      if (audioProcess) audioProcess.kill('SIGSTOP')
     },
 
     resumePlayback(): void {
-      if (compositeProcess) compositeProcess.kill('SIGCONT')
-      if (audioProcess) audioProcess.kill('SIGCONT')
       isPaused = false
     },
 

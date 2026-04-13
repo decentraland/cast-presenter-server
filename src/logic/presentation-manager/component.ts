@@ -22,6 +22,9 @@ interface InternalSession extends PresentationSession {
   navigating: boolean
   tempDir: string
   lastActivityAt: number
+  videoPlaybackStartedAt: number
+  videoElapsedBeforePause: number
+  pausedVideoIndex: number
 }
 
 /**
@@ -181,6 +184,9 @@ export async function createPresentationManager(
       cachedVideoPaths: new Map(),
       tempDir,
       navigating: false,
+      videoPlaybackStartedAt: 0,
+      videoElapsedBeforePause: 0,
+      pausedVideoIndex: -1,
       lastActivityAt: Date.now()
     }
 
@@ -324,12 +330,11 @@ export async function createPresentationManager(
 
     const videoInfo = session.slideVideos[videoIndex]
 
-    if (session.videoState === 'paused' && session.compositor) {
-      session.compositor.resumePlayback()
-      session.videoState = 'playing'
-      await broadcastState(session)
-      return
-    }
+    // Resume from pause: kill old compositor, restart with seek offset
+    const seekSeconds =
+      session.videoState === 'paused' && session.pausedVideoIndex === videoIndex
+        ? session.videoElapsedBeforePause / 1000
+        : 0
 
     const requestedSlide = session.currentSlide
     session.videoState = 'loading'
@@ -344,10 +349,12 @@ export async function createPresentationManager(
     const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
 
     let videoPath = session.cachedVideoPaths.get(videoInfo.url)
+    let isStreaming = false
     if (videoPath && fs.existsSync(videoPath)) {
       logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     } else {
       videoPath = await compositor.resolveStreamUrl(videoInfo.url)
+      isStreaming = true
       logger.info(`Streaming video from URL for presentation ${session.id}`, { url: videoPath })
     }
 
@@ -376,11 +383,31 @@ export async function createPresentationManager(
       )
     }
 
+    // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
+    // Prevents overfilling AudioSource's internal buffer which causes tail latency on pause
+    const AUDIO_FRAME_BYTES = 1920
+    let audioRemainder = Buffer.alloc(0)
+
     const onAudioData = (pcmChunk: Buffer) => {
-      const int16 = new Int16Array(pcmChunk.buffer, pcmChunk.byteOffset, pcmChunk.byteLength / 2)
-      const samplesPerChannel = int16.length / 2
-      session.publisher.pushAudioFrame(int16, 48000, 2, samplesPerChannel)
+      audioRemainder = audioRemainder.length === 0 ? pcmChunk : Buffer.concat([audioRemainder, pcmChunk])
+
+      while (audioRemainder.length >= AUDIO_FRAME_BYTES) {
+        // Use Buffer.alloc for dedicated ArrayBuffer with guaranteed 2-byte alignment
+        // (Buffer pool may have odd byteOffset which breaks Int16Array)
+        const frame = Buffer.alloc(AUDIO_FRAME_BYTES)
+        audioRemainder.copy(frame, 0, 0, AUDIO_FRAME_BYTES)
+        const int16 = new Int16Array(frame.buffer, 0, AUDIO_FRAME_BYTES / 2)
+        session.publisher.pushAudioFrame(int16, 48000, 2, 480)
+        audioRemainder = audioRemainder.subarray(AUDIO_FRAME_BYTES)
+      }
     }
+
+    // Set playback start BEFORE spawning FFmpeg so the startup latency is
+    // counted symmetrically on both initial play and resume-from-pause.
+    // This prevents the elapsed time from overestimating by the spawn delay.
+    session.videoPlaybackStartedAt = Date.now()
+    session.pausedVideoIndex = videoIndex
+    if (seekSeconds === 0) session.videoElapsedBeforePause = 0
 
     await compositor.startPlayback(
       videoPath,
@@ -389,10 +416,29 @@ export async function createPresentationManager(
       session.lastFrameWidth,
       session.lastFrameHeight,
       session.publisher,
-      onAudioData
+      onAudioData,
+      seekSeconds > 0 ? seekSeconds : undefined
     )
 
     session.videoState = 'playing'
+
+    logger.info(`Video seek: ${seekSeconds.toFixed(2)}s, elapsed tracked: ${session.videoElapsedBeforePause}ms`)
+
+    // Cache the video in the background so pause/resume uses a local file
+    if (isStreaming) {
+      const downloadCompositor = videoCompositor.createCompositor(logger, session.tempDir)
+      downloadCompositor
+        .downloadVideo(videoInfo.url)
+        .then((localPath) => {
+          session.cachedVideoPaths.set(videoInfo.url, localPath)
+          logger.info(`Background download complete for resume cache`, { url: videoInfo.url, path: localPath })
+        })
+        .catch((err) => {
+          logger.warn(
+            `Background download failed (resume will use stream): ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
+    }
 
     compositor.onEnd(async () => {
       session.videoState = 'idle'
@@ -432,10 +478,16 @@ export async function createPresentationManager(
 
   async function pauseVideoSession(session: InternalSession): Promise<void> {
     if (session.compositor && session.videoState === 'playing') {
-      session.compositor.pausePlayback()
+      // Record elapsed time, then kill processes — resume will restart with -ss seek
+      session.videoElapsedBeforePause += Date.now() - session.videoPlaybackStartedAt
+      await session.publisher.stopAudioPublishing()
+      session.compositor.cleanup()
+      session.compositor = null
       session.videoState = 'paused'
       await broadcastState(session)
-      logger.info(`Video paused for presentation ${session.id}`)
+      logger.info(`Video paused for presentation ${session.id}`, {
+        elapsedMs: session.videoElapsedBeforePause
+      })
     }
   }
 
