@@ -1,6 +1,7 @@
 import { Readable } from 'stream'
 import Busboy = require('busboy')
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from './errors'
+import { resolveFileUrl } from './file-url-providers'
 import type { FileProviderResult, IFileProviderComponent } from './types'
 import type { AppComponents } from '../../types'
 
@@ -52,15 +53,6 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
     readable.push(null)
     readable.pipe(busboy)
   })
-}
-
-const GDRIVE_SHARE_RE = /^https:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/
-
-/** Converts a Google Drive sharing URL to a direct download URL. */
-function toDirectDownloadUrl(url: string): string {
-  const match = url.match(GDRIVE_SHARE_RE)
-  if (!match) return url
-  return `https://drive.usercontent.google.com/download?id=${match[1]}&export=download&confirm=t`
 }
 
 async function downloadFromUrl(
@@ -153,13 +145,14 @@ export function createFileProviderComponent(
     },
 
     async fromUrl(url: string): Promise<FileProviderResult> {
-      const resolved = toDirectDownloadUrl(url)
-      if (resolved !== url) {
-        logger.info('Resolved Google Drive sharing URL to direct download', { original: url, resolved })
+      const resolved = resolveFileUrl(url)
+      if (resolved.url !== url) {
+        logger.info('Resolved URL to direct download', { original: url, resolved: resolved.url })
       }
-      logger.info('Downloading file from URL', { url: resolved })
-      const { buffer, filename } = await downloadFromUrl(resolved, networkValidator)
-      logger.info('Downloaded file from URL', { url, size: buffer.length })
+      logger.info('Downloading file from URL', { url: resolved.url })
+      const { buffer, filename: downloadedFilename } = await downloadFromUrl(resolved.url, networkValidator)
+      const filename = resolved.filename ?? downloadedFilename
+      logger.info('Downloaded file from URL', { url, size: buffer.length, filename })
       return {
         buffer,
         filename,
