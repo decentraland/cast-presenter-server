@@ -136,3 +136,7 @@ yarn test test/integration
 
 For AI agent context, see
 [docs/ai-agent-context.md](docs/ai-agent-context.md).
+
+### AI Skills
+
+This project uses [skills](https://skills.sh/docs) to manage AI agent standards from [decentraland/ai-toolkit](https://github.com/decentraland/ai-toolkit). See the `skills-lock.json` file for installed skills.

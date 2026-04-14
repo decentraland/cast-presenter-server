@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "dcl-testing": {
+      "source": "decentraland/ai-toolkit",
+      "sourceType": "github",
+      "computedHash": "a172a9acb50dd656325623648a5281f56eb6aef6fe295b5e5c944752ecaea175"
+    },
+    "dcl-wkc-components": {
+      "source": "decentraland/ai-toolkit",
+      "sourceType": "github",
+      "computedHash": "d6fbac079ab680cfe2b1128f52f0b4c651cd53a5c18620a6a99fc6d8865473ff"
+    }
+  }
+}
