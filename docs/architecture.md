@@ -241,13 +241,6 @@ download:
 - Maximum video download size: 500 MB.
 - Download timeout: 60 seconds.
 
-### Rate limiting
-
-Per-IP in-memory rate limiters:
-
-- `POST /presentations`: 5 requests per minute.
-- `GET /api/drive-video`: 30 requests per minute.
-
 ### Drive proxy allowlist
 
 The `DRIVE_VIDEO_ALLOWED_FILE_IDS` configuration uses a default-deny
