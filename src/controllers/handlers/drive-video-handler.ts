@@ -1,4 +1,5 @@
-import { FileNotFoundError, UnknownFileRetrievalError } from '../../adapters/google-drive'
+import { FileNotFoundError } from '../../adapters/google-drive'
+import { FileNotAllowedError, ValidationError } from '../errors'
 import type { HandlerContextWithPath } from '../../types'
 import type { Readable } from 'stream'
 
@@ -39,28 +40,21 @@ export async function driveVideoHandler(
 
   const corsOrigin = await config.getString('DRIVE_VIDEO_CORS_ORIGIN')
   const cors = getCorsHeaders(corsOrigin)
-
-  const fileId = url.searchParams.get('fileId')
-  if (!fileId || !googleDrive.isValidFileId(fileId)) {
-    return {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', ...cors },
-      body: JSON.stringify({ error: 'Missing or invalid fileId' })
-    }
-  }
-
-  if (!googleDrive.isFileAllowed(fileId)) {
-    return {
-      status: 403,
-      headers: { 'Content-Type': 'application/json', ...cors },
-      body: JSON.stringify({ error: 'Not allowed to access this file' })
-    }
-  }
-
-  const rangeHeader = request?.headers?.get?.('Range') ?? null
-  const range = parseRange(rangeHeader)
+  let fileId: string | null = null
 
   try {
+    fileId = url.searchParams.get('fileId')
+    if (!fileId || !googleDrive.isValidFileId(fileId)) {
+      throw new ValidationError('Missing or invalid fileId')
+    }
+
+    if (!googleDrive.isFileAllowed(fileId)) {
+      throw new FileNotAllowedError()
+    }
+
+    const rangeHeader = request?.headers?.get?.('Range') ?? null
+    const range = parseRange(rangeHeader)
+
     const result = await googleDrive.streamFile(fileId, range ?? undefined)
     const isPartial = range !== null && (result.contentRange !== undefined || range.end !== undefined)
     const status = isPartial ? 206 : 200
@@ -73,21 +67,29 @@ export async function driveVideoHandler(
     if (result.contentRange) headers['Content-Range'] = result.contentRange
     return { status, headers, body: result.stream }
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...cors },
+        body: JSON.stringify({ error: err.message })
+      }
+    }
+    if (err instanceof FileNotAllowedError) {
+      return {
+        status: 403,
+        headers: { 'Content-Type': 'application/json', ...cors },
+        body: JSON.stringify({ error: err.message })
+      }
+    }
+
     const message = err instanceof Error ? err.message : 'Unknown error'
-    logs.getLogger('drive-video').warn('Drive video proxy failed', { fileId, message })
+    logs.getLogger('drive-video').warn('Drive video proxy failed', { fileId: fileId ?? 'unknown', message })
 
     if (err instanceof FileNotFoundError) {
       return {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...cors },
         body: JSON.stringify({ error: 'File not found or not accessible' })
-      }
-    }
-    if (err instanceof UnknownFileRetrievalError) {
-      return {
-        status: 502,
-        headers: { 'Content-Type': 'application/json', ...cors },
-        body: JSON.stringify({ error: 'Failed to stream file' })
       }
     }
     return {

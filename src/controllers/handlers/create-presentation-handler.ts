@@ -2,6 +2,7 @@ import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
 import { MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
+import { RequestTooLargeError, ValidationError } from '../errors'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
@@ -31,10 +32,10 @@ export async function createPresentationHandler(
       const lkUrl = body.livekitUrl as string | undefined
 
       if (!url) {
-        return { status: 400, body: { error: 'Missing url' } }
+        throw new ValidationError('Missing url')
       }
       if (!token || !lkUrl) {
-        return { status: 400, body: { error: 'Missing livekitToken or livekitUrl' } }
+        throw new ValidationError('Missing livekitToken or livekitUrl')
       }
 
       livekitToken = token
@@ -46,10 +47,7 @@ export async function createPresentationHandler(
     } else if (contentType.includes('multipart/form-data')) {
       const contentLength = request.headers.get('content-length')
       if (contentLength && parseInt(contentLength, 10) > MAX_FILE_SIZE) {
-        return {
-          status: 413,
-          body: { error: `Request exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)}MB` }
-        }
+        throw new RequestTooLargeError(MAX_FILE_SIZE / (1024 * 1024))
       }
 
       const rawBody = Buffer.from(await request.arrayBuffer())
@@ -58,7 +56,7 @@ export async function createPresentationHandler(
       const token = result.fields.livekitToken || null
       const lkUrl = result.fields.livekitUrl || null
       if (!token || !lkUrl) {
-        return { status: 400, body: { error: 'Missing livekitToken or livekitUrl' } }
+        throw new ValidationError('Missing livekitToken or livekitUrl')
       }
 
       livekitToken = token
@@ -66,21 +64,18 @@ export async function createPresentationHandler(
       fileBuffer = result.buffer
       fileName = result.filename
     } else {
-      return {
-        status: 400,
-        body: { error: 'Content-Type must be multipart/form-data or application/json' }
-      }
+      throw new ValidationError('Content-Type must be multipart/form-data or application/json')
     }
 
     // Common validation for both paths
     const rawFileName = sanitizeFilename(fileName)
     const fileType = getFileTypeFromName(rawFileName)
     if (!fileType) {
-      return { status: 400, body: { error: 'Unsupported file type. Only .pdf and .pptx files are supported.' } }
+      throw new ValidationError('Unsupported file type. Only .pdf and .pptx files are supported.')
     }
 
     if (!validateMagicBytes(fileBuffer, fileType)) {
-      return { status: 400, body: { error: `File content does not match expected ${fileType.toUpperCase()} format` } }
+      throw new ValidationError(`File content does not match expected ${fileType.toUpperCase()} format`)
     }
 
     logger.info(`Creating presentation from ${fileType} file`, {
@@ -98,22 +93,19 @@ export async function createPresentationHandler(
 
     return { status: 201, body: info }
   } catch (error) {
-    if (error instanceof FileTooLargeError) {
-      return { status: 413, body: { error: error.message } }
-    }
-    if (error instanceof InvalidUrlError || error instanceof MissingFileError) {
+    if (error instanceof ValidationError || error instanceof InvalidUrlError || error instanceof MissingFileError) {
       return { status: 400, body: { error: error.message } }
     }
     if (error instanceof DownloadError) {
       return { status: 400, body: { error: `Failed to download file: ${error.message}` } }
     }
+    if (error instanceof RequestTooLargeError || error instanceof FileTooLargeError) {
+      return { status: 413, body: { error: error.message } }
+    }
     if (error instanceof MaxConcurrentPresentationsError) {
       return { status: 429, body: { error: error.message } }
     }
     logger.error(`Failed to create presentation: ${error instanceof Error ? error.message : String(error)}`)
-    return {
-      status: 500,
-      body: { error: 'Internal error' }
-    }
+    return { status: 500, body: { error: 'Internal error' } }
   }
 }
