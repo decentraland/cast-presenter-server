@@ -123,12 +123,17 @@ export async function validateHttpsUrl(url: string): Promise<void> {
  * @param url - The video URL to validate
  * @throws {Error} If the URL is invalid, non-HTTPS, resolves to private IP, or domain not allowed
  */
-export async function validateVideoUrl(url: string): Promise<void> {
+export async function validateVideoUrl(url: string): Promise<string> {
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     throw new Error(`Invalid video URL: ${url}`)
+  }
+
+  // Upgrade http → https for allowlisted domains (e.g., PPTX embeds http:// Google Drive links)
+  if (parsed.protocol === 'http:' && ALLOWED_VIDEO_DOMAINS.has(parsed.hostname)) {
+    parsed.protocol = 'https:'
   }
 
   if (parsed.protocol !== 'https:') {
@@ -160,6 +165,8 @@ export async function validateVideoUrl(url: string): Promise<void> {
   } catch (err) {
     if (err instanceof Error && err.message.includes('private IP')) throw err
   }
+
+  return parsed.href
 }
 
 /**

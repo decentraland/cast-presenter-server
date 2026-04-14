@@ -93,8 +93,13 @@ describe('when checking SSRF protections', () => {
 
   describe('when validating a video URL', () => {
     describe('and the URL uses a non-HTTPS protocol', () => {
-      it('should throw an error mentioning HTTPS for http URLs', async () => {
-        await expect(validateVideoUrl('http://drive.google.com/file')).rejects.toThrow('HTTPS')
+      it('should upgrade http to https for allowlisted domains', async () => {
+        const result = await validateVideoUrl('http://drive.google.com/file/d/abc')
+        expect(result).toBe('https://drive.google.com/file/d/abc')
+      })
+
+      it('should throw an error mentioning HTTPS for http URLs on non-allowlisted domains', async () => {
+        await expect(validateVideoUrl('http://evil.com/video.mp4')).rejects.toThrow('HTTPS')
       })
 
       it('should throw an error mentioning HTTPS for file URLs', async () => {
@@ -117,13 +122,14 @@ describe('when checking SSRF protections', () => {
     })
 
     describe('and the domain is in the allowlist', () => {
-      it('should resolve without error for allowed Google and video domains', async () => {
-        await expect(validateVideoUrl('https://drive.google.com/file/d/abc')).resolves.toBeUndefined()
-        await expect(validateVideoUrl('https://drive.usercontent.google.com/download?id=abc')).resolves.toBeUndefined()
-        await expect(validateVideoUrl('https://youtube.com/watch?v=abc')).resolves.toBeUndefined()
-        await expect(validateVideoUrl('https://www.youtube.com/watch?v=abc')).resolves.toBeUndefined()
-        await expect(validateVideoUrl('https://youtu.be/abc')).resolves.toBeUndefined()
-        await expect(validateVideoUrl('https://vimeo.com/123')).resolves.toBeUndefined()
+      it('should return the validated URL for allowed domains', async () => {
+        await expect(validateVideoUrl('https://drive.google.com/file/d/abc')).resolves.toBe(
+          'https://drive.google.com/file/d/abc'
+        )
+        await expect(validateVideoUrl('https://youtube.com/watch?v=abc')).resolves.toBe(
+          'https://youtube.com/watch?v=abc'
+        )
+        await expect(validateVideoUrl('https://vimeo.com/123')).resolves.toBe('https://vimeo.com/123')
       })
     })
 

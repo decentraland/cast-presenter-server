@@ -139,8 +139,8 @@ function createVideoCompositor(
 
   return {
     async downloadVideo(url: string): Promise<string> {
-      await networkValidator.validateVideoUrl(url)
-      const { downloadUrls } = resolveVideoUrls(url)
+      const validatedUrl = await networkValidator.validateVideoUrl(url)
+      const { downloadUrls } = resolveVideoUrls(validatedUrl)
 
       let lastError: Error | null = null
       for (const downloadUrl of downloadUrls) {
@@ -155,8 +155,8 @@ function createVideoCompositor(
     },
 
     async resolveStreamUrl(url: string): Promise<string> {
-      await networkValidator.validateVideoUrl(url)
-      return resolveVideoUrls(url).streamUrl
+      const validatedUrl = await networkValidator.validateVideoUrl(url)
+      return resolveVideoUrls(validatedUrl).streamUrl
     },
 
     async preTranscode(inputPath: string, width: number, height: number): Promise<string> {

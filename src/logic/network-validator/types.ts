@@ -28,8 +28,11 @@ export interface INetworkValidatorComponent extends IBaseComponent {
    * Validates a video URL against the HTTPS/private-IP checks
    * plus a domain allowlist for known video providers.
    *
+   * Upgrades http:// to https:// for allowlisted domains automatically.
+   *
    * @param url - The video URL to validate
+   * @returns The validated (and possibly https-upgraded) URL
    * @throws {Error} If the URL fails HTTPS, domain, or private IP checks
    */
-  validateVideoUrl(url: string): Promise<void>
+  validateVideoUrl(url: string): Promise<string>
 }
