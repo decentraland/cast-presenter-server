@@ -8,6 +8,8 @@
     "start:dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
     "test": "jest --forceExit --detectOpenHandles --coverage --verbose",
     "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check '{src,test}/**/*.{js,ts}'",
+    "format:fix": "prettier --write '{src,test}/**/*.{js,ts}'",
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {
