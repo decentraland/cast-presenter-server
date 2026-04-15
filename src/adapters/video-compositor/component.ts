@@ -11,12 +11,14 @@ import type { INetworkValidatorComponent } from '../../logic/network-validator/t
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
+import type { IncomingMessage } from 'http'
 
 const FRAME_RATE = 20
 const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
 const AUDIO_SAMPLE_RATE = 48000
 const AUDIO_CHANNELS = 2
 const DOWNLOAD_TIMEOUT_MS = 120_000 // 120 seconds
+const MAX_VIDEO_DOWNLOAD_SIZE = 1024 * 1024 * 1024 // 1 GB — rely on streaming for larger files
 // Frames to skip after seeking — overlay filter passes the slide background
 // through before the video decoder is ready (~10 frames ≈ 500ms at 20fps)
 const SEEK_WARMUP_FRAMES = 10
@@ -51,42 +53,53 @@ function createVideoCompositor(
   let onEndCallback: (() => void) | null = null
   let lastPushedFrame: VideoFrameSnapshot | null = null
 
-  /** Downloads a file via HTTPS with redirect following. */
-  function httpsDownload(url: string, destPath: string): Promise<void> {
+  /** Downloads a video to disk via HTTPS with redirect following, SSRF validation, and size limit. */
+  async function httpsDownload(url: string, destPath: string): Promise<void> {
     const MAX_REDIRECTS = 5
-    return new Promise((resolve, reject) => {
-      let currentUrl = url
+    let currentUrl = url
 
-      function follow(redirectsLeft: number): void {
-        const req = https.get(currentUrl, (res) => {
-          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume()
-            if (redirectsLeft <= 0) {
-              reject(new Error(`Too many redirects downloading ${url}`))
-              return
-            }
-            currentUrl = new URL(res.headers.location, currentUrl).href
-            follow(redirectsLeft - 1)
-            return
-          }
+    for (let i = 0; i < MAX_REDIRECTS; i++) {
+      const res = await new Promise<IncomingMessage>((resolve, reject) => {
+        https.get(currentUrl, resolve).on('error', reject)
+      })
 
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            res.resume()
-            reject(new Error(`HTTP ${res.statusCode} downloading ${currentUrl}`))
-            return
-          }
-
-          const file = fs.createWriteStream(destPath)
-          res.pipe(file)
-          file.on('finish', () => file.close(() => resolve()))
-          file.on('error', (err) => fs.unlink(destPath, () => reject(err)))
-        })
-
-        req.on('error', reject)
+      // Follow redirects — validate each hop to prevent SSRF via open redirect
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume()
+        currentUrl = new URL(res.headers.location, currentUrl).href
+        await networkValidator.validateHttpsUrl(currentUrl)
+        continue
       }
 
-      follow(MAX_REDIRECTS)
-    })
+      if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume()
+        throw new Error(`HTTP ${res.statusCode} downloading ${currentUrl}`)
+      }
+
+      // Pipe to file with size limit
+      await new Promise<void>((resolve, reject) => {
+        let bytesWritten = 0
+        const file = fs.createWriteStream(destPath)
+
+        res.on('data', (chunk: Buffer) => {
+          bytesWritten += chunk.length
+          if (bytesWritten > MAX_VIDEO_DOWNLOAD_SIZE) {
+            res.destroy(new Error(`Video download exceeds ${MAX_VIDEO_DOWNLOAD_SIZE / (1024 * 1024 * 1024)}GB limit`))
+          }
+        })
+
+        res.pipe(file)
+        file.on('finish', () => file.close(() => resolve()))
+        file.on('error', (err) => fs.unlink(destPath, () => reject(err)))
+        res.on('error', (err) => {
+          file.destroy()
+          fs.unlink(destPath, () => reject(err))
+        })
+      })
+      return
+    }
+
+    throw new Error(`Too many redirects downloading ${url}`)
   }
 
   /** Remux a raw download into a clean MP4 with properly indexed streams. */
@@ -118,11 +131,16 @@ function createVideoCompositor(
     const rawPath = path.join(dir, `raw-${Date.now()}`)
     const destPath = path.join(dir, `video-${Date.now()}.mp4`)
 
-    const downloadTimeout = setTimeout(() => {
-      throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)
-    }, DOWNLOAD_TIMEOUT_MS)
+    // eslint-disable-next-line prefer-const -- assigned synchronously inside the Promise constructor
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    const timeoutSignal = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)),
+        DOWNLOAD_TIMEOUT_MS
+      )
+    })
 
-    try {
+    async function doDownload(): Promise<string> {
       // Step 1: Download raw bytes via HTTPS (handles Google Drive redirects)
       await httpsDownload(downloadUrl, rawPath)
 
@@ -136,8 +154,12 @@ function createVideoCompositor(
       await remuxToMp4(rawPath, destPath)
 
       return destPath
+    }
+
+    try {
+      return await Promise.race([doDownload(), timeoutSignal])
     } finally {
-      clearTimeout(downloadTimeout)
+      if (timeoutHandle) clearTimeout(timeoutHandle)
       // Clean up raw file
       try {
         fs.unlinkSync(rawPath)

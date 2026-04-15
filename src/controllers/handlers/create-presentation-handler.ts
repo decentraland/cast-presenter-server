@@ -72,7 +72,13 @@ export async function createPresentationHandler(
         throw new RequestTooLargeError(MAX_FILE_SIZE / (1024 * 1024))
       }
 
+      // Note: request.arrayBuffer() buffers the full body into memory.
+      // Content-Length is client-supplied and may be absent (chunked encoding).
+      // The reverse proxy MUST enforce a request body size limit (see .env.default).
       const rawBody = Buffer.from(await request.arrayBuffer())
+      if (rawBody.length > MAX_FILE_SIZE) {
+        throw new RequestTooLargeError(MAX_FILE_SIZE / (1024 * 1024))
+      }
       const result = await fileProvider.fromMultipart(contentType, rawBody)
 
       const token = result.fields.livekitToken || null

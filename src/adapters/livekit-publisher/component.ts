@@ -109,13 +109,14 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           const isPresenter = presenters.has(identity.toLowerCase())
 
           let message: Record<string, unknown> | undefined
+          let incomingSceneId: string | undefined
 
           // Try protobuf decode first (Packet { Scene { data: [MsgType.CommsData][topicLen][topic][json] } }).
           try {
             const packet = Packet.decode(payload)
             if (packet.message?.$case === 'scene') {
               if (packet.message.scene.sceneId) {
-                lastSceneId = packet.message.scene.sceneId
+                incomingSceneId = packet.message.scene.sceneId
               }
               const decoded = decodeCommsPayload(packet.message.scene.data)
               if (decoded && decoded.topic === PRESENTATION_TOPIC) {
@@ -148,6 +149,11 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
               `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
             )
             return
+          }
+
+          // Only update sceneId from authorized presenter messages
+          if (incomingSceneId) {
+            lastSceneId = incomingSceneId
           }
 
           logger.info(`[DataReceived] Processing command: ${msgType}`)
