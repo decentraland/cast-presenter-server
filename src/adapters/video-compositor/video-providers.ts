@@ -64,23 +64,6 @@ export class GoogleDriveProvider extends VideoProvider {
   }
 }
 
-// --- Dropbox ---
-
-const DROPBOX_DOMAINS = ['dropbox.com', 'dl.dropboxusercontent.com']
-
-export class DropboxProvider extends VideoProvider {
-  readonly name = 'dropbox'
-
-  matches(url: string): boolean {
-    return DROPBOX_DOMAINS.some((domain) => url.includes(domain))
-  }
-
-  resolve(url: string): ResolvedVideoUrls {
-    const directUrl = url.replace(/dl=0/, 'dl=1').replace(/\?.*$/, '?dl=1')
-    return { downloadUrls: [directUrl], streamUrl: directUrl }
-  }
-}
-
 // --- Direct URL (fallback) ---
 
 export class DirectUrlProvider extends VideoProvider {
@@ -98,7 +81,7 @@ export class DirectUrlProvider extends VideoProvider {
 // --- Provider registry ---
 // Order matters: first match wins. DirectUrlProvider must be last (catch-all).
 
-const PROVIDERS: VideoProvider[] = [new GoogleDriveProvider(), new DropboxProvider(), new DirectUrlProvider()]
+const PROVIDERS: VideoProvider[] = [new GoogleDriveProvider(), new DirectUrlProvider()]
 
 export function resolveVideoUrls(url: string): ResolvedVideoUrls {
   const provider = PROVIDERS.find((p) => p.matches(url))
