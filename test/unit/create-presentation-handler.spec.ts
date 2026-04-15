@@ -86,7 +86,9 @@ describe('when handling a create presentation request', () => {
   describe('and the request is JSON-based', () => {
     describe('and the url field is missing', () => {
       beforeEach(async () => {
-        result = await createPresentationHandler(createJsonContext({ livekitToken: 't', livekitUrl: 'u' }))
+        result = await createPresentationHandler(
+          createJsonContext({ livekitToken: 't', livekitUrl: 'wss://lk.example.com' })
+        )
       })
 
       it('should return status 400', () => {
@@ -116,7 +118,7 @@ describe('when handling a create presentation request', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
           createJsonContext(
-            { url: 'http://example.com/file.pdf', livekitToken: 't', livekitUrl: 'u' },
+            { url: 'http://example.com/file.pdf', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
             { fromUrlError: new InvalidUrlError('URL must use HTTPS') }
           )
         )
@@ -135,7 +137,7 @@ describe('when handling a create presentation request', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
           createJsonContext(
-            { url: 'not-a-url', livekitToken: 't', livekitUrl: 'u' },
+            { url: 'not-a-url', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
             { fromUrlError: new InvalidUrlError('Invalid URL: not-a-url') }
           )
         )

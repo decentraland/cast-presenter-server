@@ -6,6 +6,22 @@ import { RequestTooLargeError, ValidationError } from '../errors'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
+const MAX_JSON_BODY_SIZE = 1 * 1024 * 1024 // 1 MB — JSON body only contains URLs and tokens
+
+function validateLivekitUrl(lkUrl: string): void {
+  try {
+    const parsed = new URL(lkUrl)
+    if (parsed.protocol !== 'wss:') {
+      throw new ValidationError('livekitUrl must use wss:// protocol')
+    }
+    if (!parsed.hostname) {
+      throw new ValidationError('livekitUrl must specify a host')
+    }
+  } catch (err) {
+    if (err instanceof ValidationError) throw err
+    throw new ValidationError('livekitUrl is not a valid URL')
+  }
+}
 
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager' | 'fileProvider', '/presentations'>
@@ -26,6 +42,11 @@ export async function createPresentationHandler(
     let livekitUrl: string
 
     if (contentType.includes('application/json')) {
+      const contentLength = request.headers.get('content-length')
+      if (contentLength && parseInt(contentLength, 10) > MAX_JSON_BODY_SIZE) {
+        throw new RequestTooLargeError(MAX_JSON_BODY_SIZE / (1024 * 1024))
+      }
+
       const body = (await request.json()) as Record<string, unknown>
       const url = body.url as string | undefined
       const token = body.livekitToken as string | undefined
@@ -37,6 +58,7 @@ export async function createPresentationHandler(
       if (!token || !lkUrl) {
         throw new ValidationError('Missing livekitToken or livekitUrl')
       }
+      validateLivekitUrl(lkUrl)
 
       livekitToken = token
       livekitUrl = lkUrl
@@ -58,6 +80,7 @@ export async function createPresentationHandler(
       if (!token || !lkUrl) {
         throw new ValidationError('Missing livekitToken or livekitUrl')
       }
+      validateLivekitUrl(lkUrl)
 
       livekitToken = token
       livekitUrl = lkUrl

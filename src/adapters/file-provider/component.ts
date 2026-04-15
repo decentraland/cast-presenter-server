@@ -1,13 +1,16 @@
+import * as https from 'https'
 import { Readable } from 'stream'
 import Busboy = require('busboy')
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from './errors'
 import { resolveFileUrl } from './file-url-providers'
 import type { FileProviderResult, IFileProviderComponent } from './types'
 import type { AppComponents } from '../../types'
+import type { IncomingMessage } from 'http'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
 const DOWNLOAD_TIMEOUT_MS = 60_000 // 60 seconds
+const MAX_REDIRECTS = 5
 
 interface ParsedFormData {
   file: { buffer: Buffer; filename: string } | null
@@ -55,63 +58,121 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
   })
 }
 
+/**
+ * Makes a single HTTPS request with DNS pinned to pre-validated addresses.
+ *
+ * Uses a custom https.Agent lookup to prevent DNS rebinding: the TCP
+ * connection is forced to one of the addresses we already validated,
+ * while TLS still verifies the certificate against the original hostname.
+ */
+function pinnedHttpsRequest(
+  url: string,
+  hostname: string,
+  addresses: string[]
+): Promise<{ response: IncomingMessage; destroy: () => void }> {
+  return new Promise((resolve, reject) => {
+    const agent = new https.Agent({
+      lookup: (_host, _opts, cb) => {
+        const addr = addresses[0]
+        cb(null, addr, addr.includes(':') ? 6 : 4)
+      },
+      maxSockets: 1
+    })
+
+    const req = https.request(url, { agent }, (res) => {
+      resolve({ response: res, destroy: () => req.destroy() })
+    })
+
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 async function downloadFromUrl(
   url: string,
   networkValidator: AppComponents['networkValidator']
 ): Promise<{ buffer: Buffer; filename: string }> {
-  // Validate URL (HTTPS + private IP check) via centralized network validator
-  try {
-    await networkValidator.validateHttpsUrl(url)
-  } catch (err) {
-    throw new InvalidUrlError(err instanceof Error ? err.message : String(err))
-  }
+  let currentUrl = url
+  // eslint-disable-next-line prefer-const -- assigned synchronously inside the Promise constructor
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const timeoutSignal = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(new DownloadError(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)),
+      DOWNLOAD_TIMEOUT_MS
+    )
+  })
 
-  const parsed = new URL(url) // safe — validateHttpsUrl already parsed it
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
-
-  let response: Response
-  try {
-    response = await fetch(url, { redirect: 'follow', signal: controller.signal })
-  } catch (err) {
-    clearTimeout(timeout)
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new DownloadError(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)
-    }
-    throw err
-  }
-
-  if (!response.ok || !response.body) {
-    clearTimeout(timeout)
-    throw new DownloadError(`HTTP ${response.status} downloading ${url}`)
-  }
-
-  const reader = response.body.getReader()
-  const chunks: Buffer[] = []
-  let bytesRead = 0
-
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      bytesRead += value.byteLength
-      if (bytesRead > MAX_FILE_SIZE) {
-        throw new FileTooLargeError(MAX_FILE_SIZE_MB)
+  async function doDownload(): Promise<{ buffer: Buffer; filename: string }> {
+    // Manual redirect loop — each hop is validated for SSRF
+    for (let redirects = 0; redirects < MAX_REDIRECTS; redirects++) {
+      let resolved
+      try {
+        resolved = await networkValidator.resolveAndValidateUrl(currentUrl)
+      } catch (err) {
+        throw new InvalidUrlError(err instanceof Error ? err.message : String(err))
       }
-      chunks.push(Buffer.from(value))
+
+      const { response, destroy } = await pinnedHttpsRequest(resolved.url, resolved.hostname, resolved.addresses)
+
+      const status = response.statusCode ?? 0
+
+      // Handle redirects manually — validate each target
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume() // drain the redirect body
+        destroy()
+        const location = response.headers.location
+        currentUrl = new URL(location, currentUrl).href
+        continue
+      }
+
+      if (status < 200 || status >= 300 || !response.readable) {
+        response.resume()
+        destroy()
+        throw new DownloadError(`HTTP ${status} downloading ${currentUrl}`)
+      }
+
+      // Read the response body with size limit
+      const chunks: Buffer[] = []
+      let bytesRead = 0
+
+      const buffer = await new Promise<Buffer>((resolve, reject) => {
+        response.on('data', (chunk: Buffer) => {
+          bytesRead += chunk.length
+          if (bytesRead > MAX_FILE_SIZE) {
+            response.destroy()
+            reject(new FileTooLargeError(MAX_FILE_SIZE_MB))
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.on('end', () => resolve(Buffer.concat(chunks)))
+        response.on('error', reject)
+      })
+
+      // Prefer filename from Content-Disposition header (Google Drive, S3, etc.)
+      const disposition = response.headers['content-disposition'] || ''
+      const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)"?/)
+      const parsed = new URL(currentUrl)
+      let filename: string
+      try {
+        filename = filenameMatch
+          ? decodeURIComponent(filenameMatch[1])
+          : parsed.pathname.split('/').pop() || 'presentation'
+      } catch {
+        filename = filenameMatch ? filenameMatch[1] : 'presentation'
+      }
+
+      return { buffer, filename }
     }
-  } finally {
-    clearTimeout(timeout)
+
+    throw new DownloadError(`Too many redirects (>${MAX_REDIRECTS})`)
   }
 
-  // Prefer filename from Content-Disposition header (Google Drive, S3, etc.)
-  const disposition = response.headers.get('content-disposition') || ''
-  const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)"?/)
-  const filename = filenameMatch
-    ? decodeURIComponent(filenameMatch[1])
-    : parsed.pathname.split('/').pop() || 'presentation'
-
-  return { buffer: Buffer.concat(chunks), filename }
+  try {
+    return await Promise.race([doDownload(), timeoutSignal])
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+  }
 }
 
 /**

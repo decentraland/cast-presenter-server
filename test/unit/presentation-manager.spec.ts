@@ -36,7 +36,6 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
   return {
     downloadVideo: jest.fn().mockResolvedValue('/tmp/video.mp4'),
     resolveStreamUrl: jest.fn().mockResolvedValue('https://example.com/video.mp4'),
-    preTranscode: jest.fn().mockResolvedValue('/tmp/transcoded.mp4'),
     startPlayback: jest.fn().mockResolvedValue(undefined),
     pausePlayback: jest.fn(),
     resumePlayback: jest.fn(),

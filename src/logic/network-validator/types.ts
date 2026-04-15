@@ -1,5 +1,12 @@
 import type { IBaseComponent } from '@well-known-components/interfaces'
 
+/** Result of resolving and validating a URL, including pinned IP addresses. */
+export interface ResolvedUrl {
+  url: string
+  hostname: string
+  addresses: string[]
+}
+
 /**
  * Network validation component for SSRF protection.
  *
@@ -23,6 +30,18 @@ export interface INetworkValidatorComponent extends IBaseComponent {
    * @throws {Error} If the URL is invalid, non-HTTPS, or resolves to a private IP
    */
   validateHttpsUrl(url: string): Promise<void>
+
+  /**
+   * Validates a URL and returns resolved IP addresses for DNS-pinned connections.
+   *
+   * Use this instead of validateHttpsUrl when you need to make an HTTP request
+   * after validation — the returned addresses prevent DNS rebinding attacks.
+   *
+   * @param url - The URL to validate
+   * @returns Parsed URL with validated, pinned IP addresses
+   * @throws {Error} If the URL is invalid, non-HTTPS, or resolves to a private IP
+   */
+  resolveAndValidateUrl(url: string): Promise<ResolvedUrl>
 
   /**
    * Validates a video URL against the HTTPS/private-IP checks

@@ -56,7 +56,7 @@ export async function driveVideoHandler(
     const range = parseRange(rangeHeader)
 
     const result = await googleDrive.streamFile(fileId, range ?? undefined)
-    const isPartial = range !== null && (result.contentRange !== undefined || range.end !== undefined)
+    const isPartial = result.contentRange !== undefined
     const status = isPartial ? 206 : 200
     const headers: Record<string, string> = {
       'Content-Type': result.contentType,

@@ -109,106 +109,121 @@ export async function createPresentationManager(
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
     await publisher.connect(livekitUrl, livekitToken)
 
-    // Initialize PDF renderer
-    const renderer = pdfRenderer.createRenderer()
-    await renderer.initialize(fileBuffer)
-    const slideCount = renderer.getSlideCount()
+    let renderer: ReturnType<typeof pdfRenderer.createRenderer> | null = null
+    let tempDir: string | null = null
 
-    // Handle data channel commands from participants
-    publisher.setDataHandler(async (message: Record<string, unknown>) => {
-      const session = sessions.get(id)
-      if (!session) return
-      try {
-        switch (message.type) {
-          case 'presentation:navigate':
-            await navigateSession(
-              session,
-              message.action as 'next' | 'prev' | 'goto',
-              message.slideIndex as number | undefined
-            )
-            break
-          case 'presentation:video:play':
-            await playVideoSession(session, message.videoIndex as number)
-            break
-          case 'presentation:video:pause':
-            await pauseVideoSession(session)
-            break
-          case 'presentation:video:stop':
-            await stopVideoSession(session)
-            break
-          case 'presentation:stop':
-            await stopSession(session)
-            break
-          case 'presentation:get-state':
-            await broadcastState(session)
-            break
+    try {
+      // Initialize PDF renderer
+      renderer = pdfRenderer.createRenderer()
+      await renderer.initialize(fileBuffer)
+      const slideCount = renderer.getSlideCount()
+
+      // Handle data channel commands from participants
+      publisher.setDataHandler(async (message: Record<string, unknown>) => {
+        const session = sessions.get(id)
+        if (!session) return
+        try {
+          switch (message.type) {
+            case 'presentation:navigate':
+              await navigateSession(
+                session,
+                message.action as 'next' | 'prev' | 'goto',
+                message.slideIndex as number | undefined
+              )
+              break
+            case 'presentation:video:play':
+              await playVideoSession(session, message.videoIndex as number)
+              break
+            case 'presentation:video:pause':
+              await pauseVideoSession(session)
+              break
+            case 'presentation:video:stop':
+              await stopVideoSession(session)
+              break
+            case 'presentation:stop':
+              await stopSession(session)
+              break
+            case 'presentation:get-state':
+              await broadcastState(session)
+              break
+          }
+        } catch (err) {
+          logger.warn(`Data channel command failed: ${err instanceof Error ? err.message : String(err)}`)
         }
-      } catch (err) {
-        logger.warn(`Data channel command failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })
-
-    // Render first slide
-    const { buffer, width, height } = await renderer.renderSlide(0)
-
-    // Start publishing video track
-    await publisher.startPublishing(width, height)
-
-    publisher.pushFrame(buffer, width, height)
-    publisher.startHeartbeat(buffer, width, height)
-
-    // Get video annotations for first slide
-    const slideVideos = await renderer.getSlideVideos(0)
-
-    // Create shared temp dir for the entire session
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `cast-presenter-${id}-`))
-
-    const presentationName = fileName?.replace(/\.[^.]+$/, '') || 'Presentation'
-
-    const session: InternalSession = {
-      id,
-      roomId: '',
-      fileName: presentationName,
-      fileType,
-      slideCount,
-      currentSlide: 0,
-      createdAt: new Date(),
-      lastFrameBuffer: buffer,
-      lastFrameWidth: width,
-      lastFrameHeight: height,
-      slideVideos,
-      videoState: 'idle',
-      renderer,
-      publisher,
-      compositor: null,
-      cachedVideoPaths: new Map(),
-      tempDir,
-      navigating: false,
-      videoPlaybackStartedAt: 0,
-      videoElapsedBeforePause: 0,
-      pausedVideoIndex: -1,
-      lastActivityAt: Date.now()
-    }
-
-    sessions.set(id, session)
-    await broadcastState(session)
-
-    logger.info(`Presentation ${id} created with ${slideCount} slides`, {
-      width,
-      height,
-      slideVideos: slideVideos.length
-    })
-
-    // Pre-download videos in the background after stream establishes
-    setTimeout(() => {
-      preDownloadVideos(session).catch((err) => {
-        logger.warn(
-          `Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`
-        )
       })
-    }, 3000)
 
-    return { id, fileName: presentationName, slideCount, currentSlide: 0, fileType }
+      // Render first slide
+      const { buffer, width, height } = await renderer.renderSlide(0)
+
+      // Start publishing video track
+      await publisher.startPublishing(width, height)
+
+      publisher.pushFrame(buffer, width, height)
+      publisher.startHeartbeat(buffer, width, height)
+
+      // Get video annotations for first slide
+      const slideVideos = await renderer.getSlideVideos(0)
+
+      // Create shared temp dir for the entire session
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `cast-presenter-${id}-`))
+
+      const presentationName = fileName?.replace(/\.[^.]+$/, '') || 'Presentation'
+
+      const session: InternalSession = {
+        id,
+        roomId: '',
+        fileName: presentationName,
+        fileType,
+        slideCount,
+        currentSlide: 0,
+        createdAt: new Date(),
+        lastFrameBuffer: buffer,
+        lastFrameWidth: width,
+        lastFrameHeight: height,
+        slideVideos,
+        videoState: 'idle',
+        renderer,
+        publisher,
+        compositor: null,
+        cachedVideoPaths: new Map(),
+        tempDir,
+        navigating: false,
+        videoPlaybackStartedAt: 0,
+        videoElapsedBeforePause: 0,
+        pausedVideoIndex: -1,
+        lastActivityAt: Date.now()
+      }
+
+      sessions.set(id, session)
+      await broadcastState(session)
+
+      logger.info(`Presentation ${id} created with ${slideCount} slides`, {
+        width,
+        height,
+        slideVideos: slideVideos.length
+      })
+
+      // Pre-download videos in the background after stream establishes
+      setTimeout(() => {
+        preDownloadVideos(session).catch((err) => {
+          logger.warn(
+            `Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
+      }, 3000)
+
+      return { id, fileName: presentationName, slideCount, currentSlide: 0, fileType }
+    } catch (err) {
+      // Clean up acquired resources in reverse order on failure
+      if (tempDir) {
+        videoCompositor.destroyTempDir(tempDir)
+      }
+      if (renderer) {
+        renderer.destroy()
+      }
+      await publisher.disconnect()
+      throw err
+    }
   }
 
   async function preDownloadVideos(session: InternalSession): Promise<void> {
@@ -322,6 +337,7 @@ export async function createPresentationManager(
   }
 
   async function playVideoSession(session: InternalSession, videoIndex: number): Promise<void> {
+    if (session.navigating) return
     if (session.videoState === 'playing' || session.videoState === 'loading') return
 
     if (videoIndex < 0 || videoIndex >= session.slideVideos.length) {
@@ -409,16 +425,27 @@ export async function createPresentationManager(
     session.pausedVideoIndex = videoIndex
     if (seekSeconds === 0) session.videoElapsedBeforePause = 0
 
-    await compositor.startPlayback(
-      videoPath,
-      videoInfo,
-      session.lastFrameBuffer,
-      session.lastFrameWidth,
-      session.lastFrameHeight,
-      session.publisher,
-      onAudioData,
-      seekSeconds > 0 ? seekSeconds : undefined
-    )
+    try {
+      await compositor.startPlayback(
+        videoPath,
+        videoInfo,
+        session.lastFrameBuffer,
+        session.lastFrameWidth,
+        session.lastFrameHeight,
+        session.publisher,
+        onAudioData,
+        seekSeconds > 0 ? seekSeconds : undefined
+      )
+    } catch (err) {
+      compositor.cleanup()
+      session.compositor = null
+      session.videoState = 'idle'
+      session.publisher.stopAudioPublishing().catch(() => {
+        /* noop */
+      })
+      await broadcastState(session)
+      throw err
+    }
 
     session.videoState = 'playing'
 
@@ -457,6 +484,7 @@ export async function createPresentationManager(
   }
 
   async function stopVideoSession(session: InternalSession): Promise<void> {
+    if (session.navigating) return
     if (session.videoState === 'idle') return
 
     await session.publisher.stopAudioPublishing()
@@ -477,6 +505,7 @@ export async function createPresentationManager(
   }
 
   async function pauseVideoSession(session: InternalSession): Promise<void> {
+    if (session.navigating) return
     if (session.compositor && session.videoState === 'playing') {
       // Record elapsed time, then kill processes — resume will restart with -ss seek
       session.videoElapsedBeforePause += Date.now() - session.videoPlaybackStartedAt

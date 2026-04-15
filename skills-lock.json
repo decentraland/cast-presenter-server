@@ -10,6 +10,11 @@
       "source": "decentraland/ai-toolkit",
       "sourceType": "github",
       "computedHash": "d6fbac079ab680cfe2b1128f52f0b4c651cd53a5c18620a6a99fc6d8865473ff"
+    },
+    "ffmpeg": {
+      "source": "digitalsamba/claude-code-video-toolkit",
+      "sourceType": "github",
+      "computedHash": "51fa05bc18bb2691e622aefd1d8ec6d4d96a9e9c44cdf599003c9d6003d11a07"
     }
   }
 }

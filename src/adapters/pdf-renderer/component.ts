@@ -60,8 +60,9 @@ function createRenderer(): IPdfRenderer {
       const scale = TARGET_WIDTH / baseViewport.width
       const viewport = page.getViewport({ scale })
 
-      const width = Math.round(viewport.width)
-      const height = Math.round(viewport.height)
+      // Force even dimensions — yuv420p chroma planes require it
+      const width = Math.round(viewport.width) & ~1
+      const height = Math.round(viewport.height) & ~1
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d')
 

@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import * as fs from 'fs'
+import * as https from 'https'
 import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
@@ -47,21 +48,52 @@ function createVideoCompositor(
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
 
-  async function tryDownload(downloadUrl: string): Promise<string> {
-    const destPath = path.join(dir, `video-${Date.now()}.mp4`)
-
+  /** Downloads a file via HTTPS with redirect following. */
+  function httpsDownload(url: string, destPath: string): Promise<void> {
+    const MAX_REDIRECTS = 5
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        proc.kill('SIGKILL')
-        reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s: ${downloadUrl}`))
-      }, DOWNLOAD_TIMEOUT_MS)
+      let currentUrl = url
 
-      // Use FFmpeg to download — its HTTP handler follows Google Drive redirects
-      // that Node's fetch cannot (virus scan confirmation pages).
-      // -c copy = no re-encoding, just remux to mp4.
-      const proc = spawn('ffmpeg', ['-threads', '1', '-i', downloadUrl, '-c', 'copy', '-y', destPath], {
-        stdio: ['ignore', 'ignore', 'pipe']
-      })
+      function follow(redirectsLeft: number): void {
+        const req = https.get(currentUrl, (res) => {
+          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume()
+            if (redirectsLeft <= 0) {
+              reject(new Error(`Too many redirects downloading ${url}`))
+              return
+            }
+            currentUrl = new URL(res.headers.location, currentUrl).href
+            follow(redirectsLeft - 1)
+            return
+          }
+
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            res.resume()
+            reject(new Error(`HTTP ${res.statusCode} downloading ${currentUrl}`))
+            return
+          }
+
+          const file = fs.createWriteStream(destPath)
+          res.pipe(file)
+          file.on('finish', () => file.close(() => resolve()))
+          file.on('error', (err) => fs.unlink(destPath, () => reject(err)))
+        })
+
+        req.on('error', reject)
+      }
+
+      follow(MAX_REDIRECTS)
+    })
+  }
+
+  /** Remux a raw download into a clean MP4 with properly indexed streams. */
+  function remuxToMp4(inputPath: string, outputPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(
+        'ffmpeg',
+        ['-protocol_whitelist', 'file', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath],
+        { stdio: ['ignore', 'ignore', 'pipe'] }
+      )
 
       let stderr = ''
       proc.stderr?.on('data', (chunk: Buffer) => {
@@ -69,48 +101,47 @@ function createVideoCompositor(
       })
 
       proc.on('close', (code) => {
-        clearTimeout(timeout)
         if (code !== 0) {
-          reject(new Error(`FFmpeg download failed (code ${code}): ${stderr.slice(-200)}`))
+          reject(new Error(`Remux failed (code ${code}): ${stderr.slice(-300)}`))
           return
         }
-        try {
-          const stat = fs.statSync(destPath)
-          if (stat.size < 1024) {
-            fs.unlinkSync(destPath)
-            reject(new Error(`File too small (${stat.size} bytes), likely not a valid video`))
-            return
-          }
-          resolve(destPath)
-        } catch (err) {
-          reject(err)
-        }
+        resolve()
       })
-
-      proc.on('error', (err) => {
-        clearTimeout(timeout)
-        reject(err)
-      })
+      proc.on('error', reject)
     })
   }
 
-  function probeVideo(filePath: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const proc = spawn(
-        'ffprobe',
-        ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', filePath],
-        { stdio: ['ignore', 'pipe', 'pipe'] }
-      )
+  async function tryDownload(downloadUrl: string): Promise<string> {
+    const rawPath = path.join(dir, `raw-${Date.now()}`)
+    const destPath = path.join(dir, `video-${Date.now()}.mp4`)
 
-      let output = ''
-      proc.stdout?.on('data', (chunk: Buffer) => {
-        output += chunk.toString()
-      })
-      proc.on('close', (code) => {
-        resolve(code === 0 && output.trim().includes('video'))
-      })
-      proc.on('error', () => resolve(false))
-    })
+    const downloadTimeout = setTimeout(() => {
+      throw new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)
+    }, DOWNLOAD_TIMEOUT_MS)
+
+    try {
+      // Step 1: Download raw bytes via HTTPS (handles Google Drive redirects)
+      await httpsDownload(downloadUrl, rawPath)
+
+      const stat = fs.statSync(rawPath)
+      if (stat.size < 1024) {
+        fs.unlinkSync(rawPath)
+        throw new Error(`File too small (${stat.size} bytes), likely not a valid video`)
+      }
+
+      // Step 2: Remux into a clean MP4 with faststart + proper stream indexing
+      await remuxToMp4(rawPath, destPath)
+
+      return destPath
+    } finally {
+      clearTimeout(downloadTimeout)
+      // Clean up raw file
+      try {
+        fs.unlinkSync(rawPath)
+      } catch {
+        /* already deleted or never created */
+      }
+    }
   }
 
   function stopPlayback(
@@ -129,6 +160,11 @@ function createVideoCompositor(
       }
       compositeProcess.kill('SIGKILL')
       compositeProcess = null
+    }
+
+    if (audioProcess) {
+      audioProcess.kill('SIGKILL')
+      audioProcess = null
     }
 
     frameAccumulator = Buffer.alloc(0)
@@ -157,61 +193,6 @@ function createVideoCompositor(
     async resolveStreamUrl(url: string): Promise<string> {
       const validatedUrl = await networkValidator.validateVideoUrl(url)
       return resolveVideoUrls(validatedUrl).streamUrl
-    },
-
-    async preTranscode(inputPath: string, width: number, height: number): Promise<string> {
-      validateFilterParam(width, 'width')
-      validateFilterParam(height, 'height')
-
-      const isValid = await probeVideo(inputPath)
-      if (!isValid) {
-        throw new Error(`Not a valid video file: ${inputPath}`)
-      }
-
-      const outputPath = path.join(dir, `transcoded-${Date.now()}-${width}x${height}.mp4`)
-
-      return new Promise((resolve, reject) => {
-        const proc = spawn(
-          'ffmpeg',
-          [
-            '-threads',
-            '1',
-            '-i',
-            inputPath,
-            '-vf',
-            `scale=${width}:${height}`,
-            '-c:v',
-            'libx264',
-            '-preset',
-            'fast',
-            '-threads',
-            '1',
-            '-r',
-            String(FRAME_RATE),
-            '-c:a',
-            'copy',
-            '-y',
-            outputPath
-          ],
-          { stdio: ['ignore', 'ignore', 'pipe'] }
-        )
-
-        let stderr = ''
-        proc.stderr?.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString()
-        })
-
-        proc.on('close', (code) => {
-          if (code === 0) {
-            logger.info(`Pre-transcoded video to ${width}x${height}`)
-            resolve(outputPath)
-          } else {
-            reject(new Error(`Pre-transcode failed (code ${code}): ${stderr.slice(-200)}`))
-          }
-        })
-
-        proc.on('error', reject)
-      })
     },
 
     async startPlayback(
@@ -246,8 +227,14 @@ function createVideoCompositor(
       // jumps to the nearest keyframe then decodes forward to the exact timestamp.
       const seekArgs = seekSeconds ? ['-ss', String(seekSeconds)] : []
 
+      // videoPath may be a local file (cached) or HTTPS URL (streaming);
+      // include network protocols since the URL was already validated via validateVideoUrl
+      const protocols = videoPath.startsWith('http') ? 'file,pipe,http,https,tcp,tls,crypto' : 'file,pipe'
+
       // Video composite — -re on video input for real-time pacing
       const ffmpegArgs = [
+        '-protocol_whitelist',
+        protocols,
         '-threads',
         '1',
         '-stream_loop',
@@ -282,8 +269,9 @@ function createVideoCompositor(
 
       compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
-      compositeProcess.stderr?.on('data', () => {
-        /* noop */
+      let compositeStderr = ''
+      compositeProcess.stderr?.on('data', (chunk: Buffer) => {
+        compositeStderr = (compositeStderr + chunk.toString()).slice(-500)
       })
 
       // Audio process — uses -re for real-time pacing (killed on pause, restarted on resume)
@@ -291,6 +279,8 @@ function createVideoCompositor(
         audioProcess = spawn(
           'ffmpeg',
           [
+            '-protocol_whitelist',
+            protocols,
             '-threads',
             '1',
             '-re',
@@ -309,8 +299,9 @@ function createVideoCompositor(
           { stdio: ['ignore', 'pipe', 'pipe'] }
         )
 
-        audioProcess.stderr?.on('data', () => {
-          /* noop */
+        let audioStderr = ''
+        audioProcess.stderr?.on('data', (chunk: Buffer) => {
+          audioStderr = (audioStderr + chunk.toString()).slice(-500)
         })
 
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
@@ -319,7 +310,10 @@ function createVideoCompositor(
           }
         })
 
-        audioProcess.on('close', () => {
+        audioProcess.on('close', (code) => {
+          if (code && code !== 0 && !cleanedUp) {
+            logger.warn(`Audio process exited with error`, { code, stderr: audioStderr })
+          }
           audioProcess = null
         })
       }
@@ -346,7 +340,10 @@ function createVideoCompositor(
       }
       compositeProcess.stdout?.on('data', dataListener)
 
-      compositeProcess.on('close', () => {
+      compositeProcess.on('close', (code) => {
+        if (code && code !== 0 && !cleanedUp) {
+          logger.warn(`Composite process exited with error`, { code, stderr: compositeStderr })
+        }
         if (!cleanedUp && isPlaying) {
           stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
           if (onEndCallback) onEndCallback()

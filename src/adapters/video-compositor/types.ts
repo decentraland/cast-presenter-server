@@ -14,7 +14,6 @@ export interface SlideVideoInfo {
 export interface IVideoCompositor {
   downloadVideo(url: string): Promise<string>
   resolveStreamUrl(url: string): Promise<string>
-  preTranscode(inputPath: string, width: number, height: number): Promise<string>
   startPlayback(
     videoPath: string,
     videoInfo: SlideVideoInfo,

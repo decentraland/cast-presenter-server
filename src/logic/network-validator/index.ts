@@ -1,2 +1,8 @@
-export { createNetworkValidatorComponent, isPrivateIP, validateHttpsUrl, validateVideoUrl } from './component'
-export type { INetworkValidatorComponent } from './types'
+export {
+  createNetworkValidatorComponent,
+  isPrivateIP,
+  resolveAndValidateUrl,
+  validateHttpsUrl,
+  validateVideoUrl
+} from './component'
+export type { INetworkValidatorComponent, ResolvedUrl } from './types'
