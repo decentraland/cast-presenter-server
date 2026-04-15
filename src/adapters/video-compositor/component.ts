@@ -52,6 +52,7 @@ function createVideoCompositor(
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
   let lastPushedFrame: VideoFrameSnapshot | null = null
+  let currentSlidePath: string | null = null
 
   /** Downloads a video to disk via HTTPS with redirect following, SSRF validation, and size limit. */
   async function httpsDownload(url: string, destPath: string): Promise<void> {
@@ -241,8 +242,16 @@ function createVideoCompositor(
 
       const compositeFrameSize = i420FrameSize(slideWidth, slideHeight)
 
-      const slidePath = path.join(dir, `slide-${Date.now()}.rgba`)
-      fs.writeFileSync(slidePath, slideBuffer)
+      // Clean up previous slide file before writing a new one (pause/resume cycle)
+      if (currentSlidePath) {
+        try {
+          fs.unlinkSync(currentSlidePath)
+        } catch {
+          /* already deleted */
+        }
+      }
+      currentSlidePath = path.join(dir, `slide-${Date.now()}.rgba`)
+      fs.writeFileSync(currentSlidePath, slideBuffer)
 
       // Overlay video at PDF geometry coordinates
       const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
@@ -273,7 +282,7 @@ function createVideoCompositor(
         '-r',
         String(FRAME_RATE),
         '-i',
-        slidePath,
+        currentSlidePath,
         '-threads',
         '1',
         ...seekArgs,
