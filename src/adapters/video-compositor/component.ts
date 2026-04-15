@@ -6,7 +6,7 @@ import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
-import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo } from './types'
+import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo, VideoFrameSnapshot } from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
@@ -17,6 +17,9 @@ const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
 const AUDIO_SAMPLE_RATE = 48000
 const AUDIO_CHANNELS = 2
 const DOWNLOAD_TIMEOUT_MS = 120_000 // 120 seconds
+// Frames to skip after seeking — overlay filter passes the slide background
+// through before the video decoder is ready (~10 frames ≈ 500ms at 20fps)
+const SEEK_WARMUP_FRAMES = 10
 
 /**
  * Validates an ffmpeg filter parameter is a safe integer within bounds.
@@ -44,9 +47,9 @@ function createVideoCompositor(
   let frameAccumLength = 0
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
-  let isPaused = false
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
+  let lastPushedFrame: VideoFrameSnapshot | null = null
 
   /** Downloads a file via HTTPS with redirect following. */
   function httpsDownload(url: string, destPath: string): Promise<void> {
@@ -305,7 +308,7 @@ function createVideoCompositor(
         })
 
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
-          if (isPlaying && !isPaused) {
+          if (isPlaying) {
             onAudioData(Buffer.from(chunk))
           }
         })
@@ -318,9 +321,17 @@ function createVideoCompositor(
         })
       }
 
-      publisher.stopHeartbeat()
+      // Push video frames as complete frames arrive — FFmpeg -re handles pacing.
+      // Defer stopHeartbeat() until the first composite frame is ready so the
+      // heartbeat (started on pause) keeps the stream alive during FFmpeg startup.
+      //
+      // When resuming from seek, the overlay filter passes through the slide
+      // background before the video decoder is ready. Skip those initial frames
+      // so the heartbeat's frozen video frame stays visible until real composites arrive.
+      let firstFrameDelivered = false
+      const seekWarmupFrames = seekSeconds ? SEEK_WARMUP_FRAMES : 0
+      let framesReceived = 0
 
-      // Push video frames as complete frames arrive — FFmpeg -re handles pacing
       dataListener = (chunk: Buffer) => {
         if (frameAccumLength === 0) {
           frameAccumulator = chunk
@@ -331,9 +342,29 @@ function createVideoCompositor(
         }
 
         while (frameAccumLength >= compositeFrameSize) {
-          if (!isPlaying || isPaused) break
+          if (!isPlaying) break
+
+          // During seek warmup, discard slide-only pass-through frames
+          if (framesReceived < seekWarmupFrames) {
+            framesReceived++
+            frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
+            frameAccumLength = frameAccumulator.length
+            continue
+          }
+
+          if (!firstFrameDelivered) {
+            publisher.stopHeartbeat()
+            firstFrameDelivered = true
+          }
           const frame = frameAccumulator.subarray(0, compositeFrameSize)
-          publisher.pushFrame(Buffer.from(frame), slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
+          const frameCopy = Buffer.from(frame)
+          lastPushedFrame = {
+            buffer: frameCopy,
+            width: slideWidth,
+            height: slideHeight,
+            bufferType: VIDEO_BUFFER_TYPE_I420
+          }
+          publisher.pushFrame(frameCopy, slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
           frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
           frameAccumLength = frameAccumulator.length
         }
@@ -359,20 +390,16 @@ function createVideoCompositor(
       })
     },
 
-    pausePlayback(): void {
-      isPaused = true
-    },
-
-    resumePlayback(): void {
-      isPaused = false
-    },
-
     onEnd(callback: () => void): void {
       onEndCallback = callback
     },
 
     getIsPlaying(): boolean {
       return isPlaying
+    },
+
+    getLastFrame(): VideoFrameSnapshot | null {
+      return lastPushedFrame
     },
 
     cleanup(): void {

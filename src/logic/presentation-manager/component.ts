@@ -390,13 +390,15 @@ export async function createPresentationManager(
       return
     }
 
-    // Start audio publishing — wrapped in try/catch so video works even if audio fails
-    try {
-      await session.publisher.startAudioPublishing(48000, 2)
-    } catch (err) {
-      logger.warn(
-        `Failed to start audio publishing for ${session.id}: ${err instanceof Error ? err.message : String(err)}`
-      )
+    // Start audio publishing — skip if resuming from pause (track is still published)
+    if (seekSeconds === 0) {
+      try {
+        await session.publisher.startAudioPublishing(48000, 2)
+      } catch (err) {
+        logger.warn(
+          `Failed to start audio publishing for ${session.id}: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
     }
 
     // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
@@ -507,11 +509,24 @@ export async function createPresentationManager(
   async function pauseVideoSession(session: InternalSession): Promise<void> {
     if (session.navigating) return
     if (session.compositor && session.videoState === 'playing') {
-      // Record elapsed time, then kill processes — resume will restart with -ss seek
+      // Record elapsed time, then kill processes — resume will restart with -ss seek.
+      // Keep the LiveKit audio track published during pause — only the FFmpeg audio
+      // process is killed. On resume, the new FFmpeg feeds into the existing audioSource.
       session.videoElapsedBeforePause += Date.now() - session.videoPlaybackStartedAt
-      await session.publisher.stopAudioPublishing()
+      // Capture the last video frame before killing FFmpeg so we can freeze on it
+      const lastFrame = session.compositor.getLastFrame()
       session.compositor.cleanup()
       session.compositor = null
+
+      // Keep pushing the last video frame so viewers see a frozen video, not the slide placeholder
+      if (lastFrame) {
+        session.publisher.pushFrame(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
+        session.publisher.startHeartbeat(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
+      } else if (session.lastFrameBuffer) {
+        session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+        session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      }
+
       session.videoState = 'paused'
       await broadcastState(session)
       logger.info(`Video paused for presentation ${session.id}`, {

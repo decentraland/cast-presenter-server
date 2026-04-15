@@ -66,6 +66,12 @@ remote control through LiveKit data channels.
 - **Idle cleanup:** Sessions with no remote participants for 5
   minutes are automatically stopped and cleaned up.
 
+**Video playback lifecycle:**
+
+See [video-playback-lifecycle.md](video-playback-lifecycle.md) for the
+full play/pause/resume/stop lifecycle, FFmpeg process architecture,
+heartbeat mechanism, seek warmup logic, and video caching flow.
+
 **Architecture notes:**
 
 - The server is stateless across restarts (all sessions are

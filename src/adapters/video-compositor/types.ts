@@ -7,6 +7,14 @@ export interface SlideVideoInfo {
   geometry: { x: number; y: number; width: number; height: number }
 }
 
+/** A captured video frame with its pixel format, used to freeze the last frame on pause. */
+export interface VideoFrameSnapshot {
+  buffer: Buffer
+  width: number
+  height: number
+  bufferType: number
+}
+
 /**
  * A video compositor instance that handles downloading, transcoding,
  * and overlaying video onto slide frames via ffmpeg.
@@ -24,10 +32,9 @@ export interface IVideoCompositor {
     onAudioData?: (pcmChunk: Buffer) => void,
     seekSeconds?: number
   ): Promise<void>
-  pausePlayback(): void
-  resumePlayback(): void
   onEnd(callback: () => void): void
   getIsPlaying(): boolean
+  getLastFrame(): VideoFrameSnapshot | null
   cleanup(): void
 }
 

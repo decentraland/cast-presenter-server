@@ -37,10 +37,9 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
     downloadVideo: jest.fn().mockResolvedValue('/tmp/video.mp4'),
     resolveStreamUrl: jest.fn().mockResolvedValue('https://example.com/video.mp4'),
     startPlayback: jest.fn().mockResolvedValue(undefined),
-    pausePlayback: jest.fn(),
-    resumePlayback: jest.fn(),
     onEnd: jest.fn(),
     getIsPlaying: jest.fn().mockReturnValue(false),
+    getLastFrame: jest.fn().mockReturnValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080, bufferType: 5 }),
     cleanup: jest.fn()
   }
 }
@@ -213,6 +212,156 @@ describe('when managing video playback in a presentation', () => {
       it('should throw PresentationNotFoundError', async () => {
         await expect(manager.stopVideo('non-existent-id')).rejects.toThrow(PresentationNotFoundError)
       })
+    })
+  })
+
+  describe('when pausing video playback', () => {
+    describe('and a video is currently playing', () => {
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+        const renderer = createMockRenderer()
+        renderer.getSlideVideos.mockResolvedValue([
+          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+        ])
+        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        await manager.playVideo(presentationId, 0)
+        publisher.pushFrame.mockClear()
+        publisher.startHeartbeat.mockClear()
+
+        await manager.pauseVideo(presentationId)
+      })
+
+      it('should push the last video frame immediately to avoid any gap', () => {
+        expect(publisher.pushFrame).toHaveBeenCalledWith(
+          expect.any(Buffer),
+          expect.any(Number),
+          expect.any(Number),
+          5 // VIDEO_BUFFER_TYPE_I420
+        )
+      })
+
+      it('should start a heartbeat with the last video frame', () => {
+        expect(publisher.startHeartbeat).toHaveBeenCalledWith(
+          expect.any(Buffer),
+          expect.any(Number),
+          expect.any(Number),
+          5 // VIDEO_BUFFER_TYPE_I420
+        )
+      })
+
+      it('should get the last frame before cleanup', () => {
+        expect(compositor.getLastFrame).toHaveBeenCalled()
+        const getFrameOrder = compositor.getLastFrame.mock.invocationCallOrder[0]
+        const cleanupOrder = compositor.cleanup.mock.invocationCallOrder[0]
+        expect(getFrameOrder).toBeLessThan(cleanupOrder)
+      })
+
+      it('should broadcast state with videoState paused', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'paused'
+          })
+        )
+      })
+    })
+  })
+
+  describe('when resuming a paused video', () => {
+    let dateSpy: jest.SpyInstance
+
+    beforeEach(async () => {
+      compositor = createMockCompositor()
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+      const result = await createManagerWithSession(components)
+      manager = result.manager
+      presentationId = result.info.id
+
+      // Simulate 5 seconds of playback before pausing
+      let now = 1000
+      dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => now)
+      await manager.playVideo(presentationId, 0)
+      now = 6000
+      await manager.pauseVideo(presentationId)
+      publisher.startAudioPublishing.mockClear()
+      compositor.startPlayback.mockClear()
+
+      await manager.playVideo(presentationId, 0)
+    })
+
+    afterEach(() => {
+      dateSpy.mockRestore()
+    })
+
+    it('should not re-create the audio track (it stays published during pause)', () => {
+      expect(publisher.startAudioPublishing).not.toHaveBeenCalled()
+    })
+
+    it('should pass a non-zero seekSeconds to startPlayback', () => {
+      const seekArg = compositor.startPlayback.mock.calls[0][7]
+      expect(seekArg).toBeGreaterThan(0)
+    })
+
+    it('should broadcast state with videoState playing', () => {
+      expect(publisher.publishData).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'presentation:state',
+          videoState: 'playing'
+        })
+      )
+    })
+  })
+
+  describe('when playing a video after a full stop', () => {
+    beforeEach(async () => {
+      compositor = createMockCompositor()
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+      const result = await createManagerWithSession(components)
+      manager = result.manager
+      presentationId = result.info.id
+
+      await manager.playVideo(presentationId, 0)
+      await manager.stopVideo(presentationId)
+      publisher.startAudioPublishing.mockClear()
+      compositor.startPlayback.mockClear()
+
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should create a fresh audio track', () => {
+      expect(publisher.startAudioPublishing).toHaveBeenCalledWith(48000, 2)
+    })
+
+    it('should start playback without seekSeconds', () => {
+      const seekArg = compositor.startPlayback.mock.calls[0][7]
+      expect(seekArg).toBeUndefined()
     })
   })
 
