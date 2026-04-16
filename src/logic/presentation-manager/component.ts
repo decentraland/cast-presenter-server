@@ -27,6 +27,7 @@ interface InternalSession extends PresentationSession {
   pausedVideoIndex: number
   stoppingPromise: Promise<void> | null
   videoErrorReason: string | null
+  preDownloadTimer: ReturnType<typeof setTimeout> | null
 }
 
 /** Maps download/playback errors to user-friendly reasons. */
@@ -139,6 +140,9 @@ export async function createPresentationManager(
       renderer = pdfRenderer.createRenderer()
       await renderer.initialize(fileBuffer)
       const slideCount = renderer.getSlideCount()
+      if (slideCount === 0) {
+        throw new Error('PDF contains no pages')
+      }
 
       // Handle data channel commands from participants
       publisher.setDataHandler(async (message: Record<string, unknown>) => {
@@ -146,16 +150,18 @@ export async function createPresentationManager(
         if (!session) return
         try {
           switch (message.type) {
-            case 'presentation:navigate':
-              await navigateSession(
-                session,
-                message.action as 'next' | 'prev' | 'goto',
-                message.slideIndex as number | undefined
-              )
+            case 'presentation:navigate': {
+              const action = message.action
+              if (action !== 'next' && action !== 'prev' && action !== 'goto') break
+              const slideIndex = typeof message.slideIndex === 'number' ? message.slideIndex : undefined
+              await navigateSession(session, action, slideIndex)
               break
-            case 'presentation:video:play':
-              await playVideoSession(session, message.videoIndex as number)
+            }
+            case 'presentation:video:play': {
+              const videoIndex = typeof message.videoIndex === 'number' ? message.videoIndex : -1
+              await playVideoSession(session, videoIndex)
               break
+            }
             case 'presentation:video:pause':
               await pauseVideoSession(session)
               break
@@ -215,7 +221,8 @@ export async function createPresentationManager(
         pausedVideoIndex: -1,
         lastActivityAt: Date.now(),
         stoppingPromise: null,
-        videoErrorReason: null
+        videoErrorReason: null,
+        preDownloadTimer: null
       }
 
       sessions.set(id, session)
@@ -230,7 +237,8 @@ export async function createPresentationManager(
       })
 
       // Pre-download videos in the background after stream establishes
-      setTimeout(() => {
+      session.preDownloadTimer = setTimeout(() => {
+        session.preDownloadTimer = null
         preDownloadVideos(session).catch((err) => {
           logger.warn(
             `Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`
@@ -343,6 +351,8 @@ export async function createPresentationManager(
         session.compositor = null
       }
       session.videoState = 'idle'
+      session.pausedVideoIndex = -1
+      session.videoElapsedBeforePause = 0
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
@@ -468,8 +478,12 @@ export async function createPresentationManager(
     const AUDIO_FRAME_BYTES = 1920
     let audioRemainder = Buffer.alloc(0)
 
+    const MAX_AUDIO_REMAINDER = AUDIO_FRAME_BYTES * 4
     const onAudioData = (pcmChunk: Buffer) => {
       audioRemainder = audioRemainder.length === 0 ? pcmChunk : Buffer.concat([audioRemainder, pcmChunk])
+      if (audioRemainder.length > MAX_AUDIO_REMAINDER) {
+        audioRemainder = audioRemainder.subarray(audioRemainder.length - MAX_AUDIO_REMAINDER)
+      }
 
       while (audioRemainder.length >= AUDIO_FRAME_BYTES) {
         // Use Buffer.alloc for dedicated ArrayBuffer with guaranteed 2-byte alignment
@@ -516,7 +530,9 @@ export async function createPresentationManager(
 
     logger.info(`Video seek: ${seekSeconds.toFixed(2)}s, elapsed tracked: ${session.videoElapsedBeforePause}ms`)
 
+    const endedCompositor = compositor
     compositor.onEnd(async () => {
+      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
       session.videoState = 'idle'
       session.compositor = null
       session.publisher.stopAudioPublishing().catch(() => {
@@ -593,6 +609,12 @@ export async function createPresentationManager(
     sessions.delete(session.id)
     metrics.decrement('active_sessions')
 
+    // Cancel pending pre-download timer to prevent downloads against a destroyed temp dir
+    if (session.preDownloadTimer) {
+      clearTimeout(session.preDownloadTimer)
+      session.preDownloadTimer = null
+    }
+
     session.stoppingPromise = (async () => {
       logger.info(`Stopping presentation ${session.id}`)
 
@@ -607,9 +629,21 @@ export async function createPresentationManager(
         logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
       }
 
-      await session.publisher.disconnect()
-      session.renderer.destroy()
-      videoCompositor.destroyTempDir(session.tempDir)
+      try {
+        await session.publisher.disconnect()
+      } catch (err) {
+        logger.warn(`Failed to disconnect publisher: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      try {
+        session.renderer.destroy()
+      } catch (err) {
+        logger.warn(`Failed to destroy renderer: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      try {
+        videoCompositor.destroyTempDir(session.tempDir)
+      } catch (err) {
+        logger.warn(`Failed to remove temp dir: ${err instanceof Error ? err.message : String(err)}`)
+      }
 
       logger.info(`Presentation ${session.id} stopped and cleaned up`)
     })()

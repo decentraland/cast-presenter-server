@@ -44,8 +44,8 @@ function createVideoCompositor(
   let compositeProcess: ChildProcess | null = null
   let audioProcess: ChildProcess | null = null
   let dataListener: ((chunk: Buffer) => void) | null = null
-  let frameAccumulator: Buffer = Buffer.alloc(0)
-  let frameAccumLength = 0
+  let frameBuffer: Buffer = Buffer.alloc(0)
+  let writeOffset = 0
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
   let cleanedUp = false
@@ -241,8 +241,8 @@ function createVideoCompositor(
       audioProcess = null
     }
 
-    frameAccumulator = Buffer.alloc(0)
-    frameAccumLength = 0
+    frameBuffer = Buffer.alloc(0)
+    writeOffset = 0
     publisher.pushFrame(slideBuffer, slideWidth, slideHeight)
     publisher.startHeartbeat(slideBuffer, slideWidth, slideHeight)
   }
@@ -284,6 +284,11 @@ function createVideoCompositor(
       validateFilterParam(vh, 'vh')
 
       const compositeFrameSize = i420FrameSize(slideWidth, slideHeight)
+      if (compositeFrameSize === 0) {
+        throw new Error('Cannot composite video with zero-dimension slide')
+      }
+      frameBuffer = Buffer.allocUnsafe(compositeFrameSize * 2)
+      writeOffset = 0
 
       // Clean up previous slide file before writing a new one (pause/resume cycle)
       if (currentSlidePath) {
@@ -408,22 +413,26 @@ function createVideoCompositor(
       let framesReceived = 0
 
       dataListener = (chunk: Buffer) => {
-        if (frameAccumLength === 0) {
-          frameAccumulator = chunk
-          frameAccumLength = chunk.length
-        } else {
-          frameAccumulator = Buffer.concat([frameAccumulator, chunk])
-          frameAccumLength = frameAccumulator.length
+        // Grow buffer if chunk won't fit in remaining space
+        if (writeOffset + chunk.length > frameBuffer.length) {
+          const needed = writeOffset + chunk.length
+          const newSize = Math.max(frameBuffer.length * 2, needed)
+          const newBuf = Buffer.allocUnsafe(newSize)
+          frameBuffer.copy(newBuf, 0, 0, writeOffset)
+          frameBuffer = newBuf
         }
 
-        while (frameAccumLength >= compositeFrameSize) {
+        chunk.copy(frameBuffer, writeOffset)
+        writeOffset += chunk.length
+
+        while (writeOffset >= compositeFrameSize) {
           if (!isPlaying) break
 
           // During seek warmup, discard slide-only pass-through frames
           if (framesReceived < seekWarmupFrames) {
             framesReceived++
-            frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
-            frameAccumLength = frameAccumulator.length
+            frameBuffer.copy(frameBuffer, 0, compositeFrameSize, writeOffset)
+            writeOffset -= compositeFrameSize
             continue
           }
 
@@ -431,8 +440,8 @@ function createVideoCompositor(
             publisher.stopHeartbeat()
             firstFrameDelivered = true
           }
-          const frame = frameAccumulator.subarray(0, compositeFrameSize)
-          const frameCopy = Buffer.from(frame)
+          const frameCopy = Buffer.allocUnsafe(compositeFrameSize)
+          frameBuffer.copy(frameCopy, 0, 0, compositeFrameSize)
           lastPushedFrame = {
             buffer: frameCopy,
             width: slideWidth,
@@ -440,8 +449,8 @@ function createVideoCompositor(
             bufferType: VIDEO_BUFFER_TYPE_I420
           }
           publisher.pushFrame(frameCopy, slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
-          frameAccumulator = frameAccumulator.subarray(compositeFrameSize)
-          frameAccumLength = frameAccumulator.length
+          frameBuffer.copy(frameBuffer, 0, compositeFrameSize, writeOffset)
+          writeOffset -= compositeFrameSize
         }
       }
       compositeProcess.stdout?.on('data', dataListener)
@@ -492,8 +501,9 @@ function createVideoCompositor(
         audioProcess.kill('SIGKILL')
         audioProcess = null
       }
-      frameAccumulator = Buffer.alloc(0)
-      frameAccumLength = 0
+      frameBuffer = Buffer.alloc(0)
+      writeOffset = 0
+      lastPushedFrame = null
       if (currentSlidePath) {
         try {
           fs.unlinkSync(currentSlidePath)

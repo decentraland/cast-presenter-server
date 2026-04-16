@@ -64,7 +64,7 @@ export async function driveVideoHandler(
       ...cors
     }
     if (result.contentLength !== undefined) headers['Content-Length'] = String(result.contentLength)
-    if (result.contentRange) headers['Content-Range'] = result.contentRange
+    if (result.contentRange) headers['Content-Range'] = result.contentRange.replace(/[\r\n\0]/g, '')
     return { status, headers, body: result.stream }
   } catch (err) {
     if (err instanceof ValidationError) {

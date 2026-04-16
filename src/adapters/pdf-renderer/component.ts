@@ -111,7 +111,10 @@ function createRenderer(): IPdfRenderer {
 
       return annotations
         .filter((a) => a.subtype === 'Link' && a.url && isMediaUrl(a.url))
-        .filter((a): a is PDFAnnotation & { url: string; rect: number[] } => !!a.url && !!a.rect)
+        .filter(
+          (a): a is PDFAnnotation & { url: string; rect: number[] } =>
+            !!a.url && Array.isArray(a.rect) && a.rect.length >= 4
+        )
         .map((a) => ({
           url: a.url,
           geometry: pdfRectToCanvas(a.rect, viewport, baseViewport.width)

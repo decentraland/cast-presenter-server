@@ -100,6 +100,24 @@ async function createManagerWithSession(components: ReturnType<typeof createMock
 describe('when creating a presentation', () => {
   let components: ReturnType<typeof createMockComponents>
 
+  describe('and the PDF has zero pages', () => {
+    beforeEach(() => {
+      components = createMockComponents()
+      const renderer = createMockRenderer()
+      renderer.getSlideCount.mockReturnValue(0)
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    })
+
+    it('should throw an error about no pages', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+      await expect(
+        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token', 'wss://lk.example.com')
+      ).rejects.toThrow('PDF contains no pages')
+    })
+  })
+
   describe('and publisher.connect() throws', () => {
     let publisher: jest.Mocked<ILiveKitPublisher>
 
@@ -142,6 +160,59 @@ describe('when creating a presentation', () => {
       ).rejects.toThrow()
 
       expect(components.metrics.increment).toHaveBeenCalledWith('session_created_total', { status: 'error' })
+    })
+  })
+})
+
+describe('when handling data channel messages', () => {
+  let components: ReturnType<typeof createMockComponents>
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let dataHandler: (message: Record<string, unknown>) => Promise<void>
+
+  beforeEach(async () => {
+    publisher = createMockPublisher()
+    components = createMockComponents({ publisher })
+
+    const renderer = createMockRenderer()
+    renderer.getSlideVideos.mockResolvedValue([
+      { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+    ])
+    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+    await createManagerWithSession(components)
+    dataHandler = publisher.setDataHandler.mock.calls[0][0] as (message: Record<string, unknown>) => Promise<void>
+  })
+
+  describe('when the navigate action is a non-string value', () => {
+    beforeEach(async () => {
+      publisher.publishData.mockClear()
+      await dataHandler({ type: 'presentation:navigate', action: 42, slideIndex: 0 })
+    })
+
+    it('should not broadcast any state update', () => {
+      expect(publisher.publishData).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when the navigate action is an invalid string', () => {
+    beforeEach(async () => {
+      publisher.publishData.mockClear()
+      await dataHandler({ type: 'presentation:navigate', action: 'delete', slideIndex: 0 })
+    })
+
+    it('should not broadcast any state update', () => {
+      expect(publisher.publishData).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when the videoIndex is a non-number value', () => {
+    beforeEach(async () => {
+      publisher.publishData.mockClear()
+      await dataHandler({ type: 'presentation:video:play', videoIndex: 'not-a-number' })
+    })
+
+    it('should not broadcast video loading state', () => {
+      expect(publisher.publishData).not.toHaveBeenCalledWith(expect.objectContaining({ videoState: 'loading' }))
     })
   })
 })
