@@ -25,6 +25,7 @@ interface InternalSession extends PresentationSession {
   videoPlaybackStartedAt: number
   videoElapsedBeforePause: number
   pausedVideoIndex: number
+  stoppingPromise: Promise<void> | null
 }
 
 /**
@@ -47,18 +48,18 @@ export async function createPresentationManager(
   const { config, logs, liveKitPublisher, pdfRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
 
-  // Resolve config at component creation
+  // Resolve config at component creation (0 = unlimited per .env.default docs)
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
-  const maxConcurrent = maxConcurrentRaw
-    ? parseInt(maxConcurrentRaw, 10) || DEFAULT_MAX_CONCURRENT
-    : DEFAULT_MAX_CONCURRENT
+  const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
+  const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
 
   const sessions = new Map<string, InternalSession>()
+  let inFlightCreations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
 
   async function cleanupIdleSessions(): Promise<void> {
     const now = Date.now()
-    for (const [id, session] of sessions) {
+    for (const [id, session] of [...sessions.entries()]) {
       const participantCount = session.publisher.getRemoteParticipantCount()
       if (participantCount > 0) {
         session.lastActivityAt = now
@@ -97,10 +98,11 @@ export async function createPresentationManager(
     livekitUrl: string,
     fileName?: string
   ): Promise<PresentationInfo> {
-    if (sessions.size >= maxConcurrent) {
+    if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
     }
 
+    inFlightCreations++
     const id = randomUUID()
     logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length })
 
@@ -191,7 +193,8 @@ export async function createPresentationManager(
         videoPlaybackStartedAt: 0,
         videoElapsedBeforePause: 0,
         pausedVideoIndex: -1,
-        lastActivityAt: Date.now()
+        lastActivityAt: Date.now(),
+        stoppingPromise: null
       }
 
       sessions.set(id, session)
@@ -223,47 +226,55 @@ export async function createPresentationManager(
       }
       await publisher.disconnect()
       throw err
+    } finally {
+      inFlightCreations--
     }
   }
 
   async function preDownloadVideos(session: InternalSession): Promise<void> {
     const downloader = videoCompositor.createCompositor(logger, session.tempDir)
 
-    const videoTargets = new Map<string, { width: number; height: number }>()
-    for (let i = 0; i < session.slideCount; i++) {
-      const videos = await session.renderer.getSlideVideos(i)
-      for (const v of videos) {
-        if (!videoTargets.has(v.url)) {
-          videoTargets.set(v.url, { width: v.geometry.width, height: v.geometry.height })
+    try {
+      const videoTargets = new Map<string, { width: number; height: number }>()
+      for (let i = 0; i < session.slideCount; i++) {
+        const videos = await session.renderer.getSlideVideos(i)
+        for (const v of videos) {
+          if (!videoTargets.has(v.url)) {
+            videoTargets.set(v.url, { width: v.geometry.width, height: v.geometry.height })
+          }
         }
       }
-    }
 
-    const MAX_PRE_DOWNLOADS = 10
-    logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
+      const MAX_PRE_DOWNLOADS = 10
+      logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
 
-    let downloaded = 0
-    for (const [url] of videoTargets) {
-      if (downloaded >= MAX_PRE_DOWNLOADS) {
-        logger.info(`Pre-download limit reached (${MAX_PRE_DOWNLOADS}), remaining videos will be downloaded on demand`)
-        break
+      let downloaded = 0
+      for (const [url] of videoTargets) {
+        if (downloaded >= MAX_PRE_DOWNLOADS) {
+          logger.info(
+            `Pre-download limit reached (${MAX_PRE_DOWNLOADS}), remaining videos will be downloaded on demand`
+          )
+          break
+        }
+        if (!sessions.has(session.id)) {
+          logger.info('Session ended, aborting pre-download queue')
+          break
+        }
+        if (session.cachedVideoPaths.has(url)) continue
+        try {
+          logger.info(`Pre-downloading video: ${url}`)
+          const rawPath = await downloader.downloadVideo(url)
+          session.cachedVideoPaths.set(url, rawPath)
+          logger.info(`Pre-downloaded video: ${url}`)
+          downloaded++
+        } catch (err) {
+          logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
+        }
       }
-      if (!sessions.has(session.id)) {
-        logger.info('Session ended, aborting pre-download queue')
-        break
-      }
-      if (session.cachedVideoPaths.has(url)) continue
-      try {
-        logger.info(`Pre-downloading video: ${url}`)
-        const rawPath = await downloader.downloadVideo(url)
-        session.cachedVideoPaths.set(url, rawPath)
-        logger.info(`Pre-downloaded video: ${url}`)
-        downloaded++
-      } catch (err) {
-        logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
-      }
+      logger.info(`Pre-download queue complete. Cached: ${session.cachedVideoPaths.size} videos`)
+    } finally {
+      downloader.cleanup()
     }
-    logger.info(`Pre-download queue complete. Cached: ${session.cachedVideoPaths.size} videos`)
   }
 
   async function navigateSession(
@@ -467,6 +478,9 @@ export async function createPresentationManager(
             `Background download failed (resume will use stream): ${err instanceof Error ? err.message : String(err)}`
           )
         })
+        .finally(() => {
+          downloadCompositor.cleanup()
+        })
     }
 
     compositor.onEnd(async () => {
@@ -536,25 +550,33 @@ export async function createPresentationManager(
   }
 
   async function stopSession(session: InternalSession): Promise<void> {
-    logger.info(`Stopping presentation ${session.id}`)
+    if (session.stoppingPromise) return session.stoppingPromise
 
-    if (session.compositor) {
-      session.compositor.cleanup()
-      session.compositor = null
-    }
-
-    try {
-      await session.publisher.publishData({ type: 'presentation:stopped', id: session.id })
-    } catch (err) {
-      logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
-    }
-
-    await session.publisher.disconnect()
-    session.renderer.destroy()
-    videoCompositor.destroyTempDir(session.tempDir)
+    // Remove from map immediately to prevent re-entry from other lookup paths
     sessions.delete(session.id)
 
-    logger.info(`Presentation ${session.id} stopped and cleaned up`)
+    session.stoppingPromise = (async () => {
+      logger.info(`Stopping presentation ${session.id}`)
+
+      if (session.compositor) {
+        session.compositor.cleanup()
+        session.compositor = null
+      }
+
+      try {
+        await session.publisher.publishData({ type: 'presentation:stopped', id: session.id })
+      } catch (err) {
+        logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
+      }
+
+      await session.publisher.disconnect()
+      session.renderer.destroy()
+      videoCompositor.destroyTempDir(session.tempDir)
+
+      logger.info(`Presentation ${session.id} stopped and cleaned up`)
+    })()
+
+    return session.stoppingPromise
   }
 
   function getStateFromSession(session: InternalSession): PresentationState {
@@ -628,7 +650,7 @@ export async function createPresentationManager(
         idleCheckInterval = null
       }
       // Stop all active sessions
-      for (const session of sessions.values()) {
+      for (const session of [...sessions.values()]) {
         try {
           await stopSession(session)
         } catch (err) {
