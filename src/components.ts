@@ -43,6 +43,8 @@ export async function initComponents(): Promise<AppComponents> {
     'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
     'Content-Security-Policy': "default-src 'none'"
   }
+  // Note: If next() throws, security headers won't be applied to the WKC
+  // framework's error response. The reverse proxy should add security headers at the edge.
   server.use(async (_ctx, next) => {
     const res = await next()
     return {
@@ -75,6 +77,7 @@ export async function initComponents(): Promise<AppComponents> {
   const presentationManager = await createPresentationManager({
     config,
     logs,
+    metrics,
     liveKitPublisher,
     pdfRenderer,
     videoCompositor

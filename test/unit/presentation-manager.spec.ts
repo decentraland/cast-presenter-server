@@ -72,6 +72,14 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       createCompositor: jest.fn().mockReturnValue(createMockCompositor()),
       destroyTempDir: jest.fn()
     },
+    metrics: {
+      increment: jest.fn(),
+      decrement: jest.fn(),
+      observe: jest.fn(),
+      reset: jest.fn(),
+      getValue: jest.fn(),
+      startTimer: jest.fn()
+    },
     _publisher: publisher
   }
 }
@@ -236,6 +244,8 @@ describe('when managing video playback in a presentation', () => {
         await manager.playVideo(presentationId, 0)
         publisher.pushFrame.mockClear()
         publisher.startHeartbeat.mockClear()
+        compositor.getLastFrame.mockClear()
+        compositor.cleanup.mockClear()
 
         await manager.pauseVideo(presentationId)
       })

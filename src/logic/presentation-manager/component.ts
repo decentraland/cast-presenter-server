@@ -43,9 +43,12 @@ interface InternalSession extends PresentationSession {
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
-  components: Pick<AppComponents, 'config' | 'logs' | 'liveKitPublisher' | 'pdfRenderer' | 'videoCompositor'>
+  components: Pick<
+    AppComponents,
+    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'videoCompositor'
+  >
 ): Promise<IPresentationManager> {
-  const { config, logs, liveKitPublisher, pdfRenderer, videoCompositor } = components
+  const { config, logs, metrics, liveKitPublisher, pdfRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
 
   // Resolve config at component creation (0 = unlimited per .env.default docs)
@@ -67,6 +70,7 @@ export async function createPresentationManager(
         logger.info(`Session ${id} idle for ${DEFAULT_IDLE_TIMEOUT_MS / 1000}s with no participants, cleaning up`)
         try {
           await stopSession(session)
+          metrics.increment('idle_session_cleanups_total')
         } catch (err) {
           logger.warn(`Failed to stop idle session ${id}: ${err instanceof Error ? err.message : String(err)}`)
         }
@@ -198,6 +202,8 @@ export async function createPresentationManager(
       }
 
       sessions.set(id, session)
+      metrics.increment('session_created_total', { status: 'success' })
+      metrics.increment('active_sessions')
       await broadcastState(session)
 
       logger.info(`Presentation ${id} created with ${slideCount} slides`, {
@@ -217,6 +223,10 @@ export async function createPresentationManager(
 
       return { id, fileName: presentationName, slideCount, currentSlide: 0, fileType }
     } catch (err) {
+      metrics.increment('session_created_total', { status: 'error' })
+      if (err instanceof Error && err.message.includes('LiveKit')) {
+        metrics.increment('livekit_connection_errors_total')
+      }
       // Clean up acquired resources in reverse order on failure
       if (tempDir) {
         videoCompositor.destroyTempDir(tempDir)
@@ -330,6 +340,7 @@ export async function createPresentationManager(
       session.lastFrameHeight = height
       session.slideVideos = slideVideos
 
+      metrics.increment('slide_navigations_total', { action })
       logger.info(`Navigated presentation ${session.id} to slide ${targetSlide}`, {
         slideVideos: slideVideos.length
       })
@@ -489,12 +500,14 @@ export async function createPresentationManager(
       session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
+      metrics.increment('video_playback_total', { action: 'end' })
       broadcastState(session).catch(() => {
         /* noop */
       })
       logger.info(`Video ended naturally for presentation ${session.id}`)
     })
 
+    metrics.increment('video_playback_total', { action: 'play' })
     await broadcastState(session)
     logger.info(`Video playback started for presentation ${session.id}`, { videoIndex })
   }
@@ -516,6 +529,7 @@ export async function createPresentationManager(
       session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
     }
 
+    metrics.increment('video_playback_total', { action: 'stop' })
     await broadcastState(session)
     logger.info(`Video stopped for presentation ${session.id}`)
   }
@@ -542,6 +556,7 @@ export async function createPresentationManager(
       }
 
       session.videoState = 'paused'
+      metrics.increment('video_playback_total', { action: 'pause' })
       await broadcastState(session)
       logger.info(`Video paused for presentation ${session.id}`, {
         elapsedMs: session.videoElapsedBeforePause
@@ -554,6 +569,7 @@ export async function createPresentationManager(
 
     // Remove from map immediately to prevent re-entry from other lookup paths
     sessions.delete(session.id)
+    metrics.decrement('active_sessions')
 
     session.stoppingPromise = (async () => {
       logger.info(`Stopping presentation ${session.id}`)
