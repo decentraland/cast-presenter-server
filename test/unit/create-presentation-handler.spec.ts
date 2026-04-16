@@ -30,6 +30,7 @@ function createMockPresentationManager() {
 }
 
 function createJsonContext(body: Record<string, unknown>, overrides?: { fromUrlError?: Error }) {
+  const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
   return {
     request: {
       headers: {
@@ -38,7 +39,7 @@ function createJsonContext(body: Record<string, unknown>, overrides?: { fromUrlE
           return null
         }
       },
-      json: async () => body
+      arrayBuffer: async () => jsonBytes.buffer.slice(jsonBytes.byteOffset, jsonBytes.byteOffset + jsonBytes.byteLength)
     },
     components: {
       logs: createMockLogger(),
@@ -57,6 +58,33 @@ function createBadContentTypeContext() {
           return null
         }
       }
+    },
+    components: {
+      logs: createMockLogger(),
+      presentationManager: createMockPresentationManager(),
+      fileProvider: createMockFileProvider()
+    }
+  } as unknown as Parameters<typeof createPresentationHandler>[0]
+}
+
+function createOversizedJsonContext(bodySize: number) {
+  // Create a JSON body that exceeds the size limit
+  const body = {
+    url: 'https://example.com/f.pdf',
+    livekitToken: 't',
+    livekitUrl: 'wss://lk.example.com',
+    pad: 'x'.repeat(bodySize)
+  }
+  const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
+  return {
+    request: {
+      headers: {
+        get: (name: string) => {
+          if (name === 'content-type') return 'application/json'
+          return null
+        }
+      },
+      arrayBuffer: async () => jsonBytes.buffer.slice(jsonBytes.byteOffset, jsonBytes.byteOffset + jsonBytes.byteLength)
     },
     components: {
       logs: createMockLogger(),
@@ -149,6 +177,72 @@ describe('when handling a create presentation request', () => {
 
       it('should return an error message containing "Invalid URL"', () => {
         expect((result.body as Record<string, string>).error).toContain('Invalid URL')
+      })
+    })
+
+    describe('and the JSON body exceeds MAX_JSON_BODY_SIZE without Content-Length header', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(createOversizedJsonContext(2 * 1024 * 1024))
+      })
+
+      it('should return status 413', () => {
+        expect(result.status).toBe(413)
+      })
+
+      it('should return an error message about size limit', () => {
+        expect((result.body as Record<string, string>).error).toContain('size')
+      })
+    })
+
+    describe('and the livekitUrl uses ws:// instead of wss://', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext({
+            url: 'https://example.com/file.pdf',
+            livekitToken: 't',
+            livekitUrl: 'ws://lk.example.com'
+          })
+        )
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about wss:// protocol', () => {
+        expect((result.body as Record<string, string>).error).toContain('wss://')
+      })
+    })
+
+    describe('and the livekitUrl uses https:// instead of wss://', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext({
+            url: 'https://example.com/file.pdf',
+            livekitToken: 't',
+            livekitUrl: 'https://lk.example.com'
+          })
+        )
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+    })
+
+    describe('and the livekitUrl is malformed', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext({ url: 'https://example.com/file.pdf', livekitToken: 't', livekitUrl: 'not-a-url' })
+        )
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about invalid URL', () => {
+        expect((result.body as Record<string, string>).error).toContain('valid URL')
       })
     })
   })

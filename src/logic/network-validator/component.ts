@@ -82,6 +82,9 @@ function expandIPv6(ip: string): string[] {
 function isPrivateIPv6(ip: string): boolean {
   const normalized = ip.toLowerCase().trim()
 
+  // Malformed: multiple '::' — fail-closed (treat as private/blocked)
+  if ((normalized.match(/::/g) || []).length > 1) return true
+
   // Dotted-notation IPv6-mapped IPv4 — e.g. ::ffff:127.0.0.1
   const mappedDotted = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
   if (mappedDotted) return isPrivateIPv4(mappedDotted[1])

@@ -83,6 +83,43 @@ describe('when checking SSRF protections', () => {
         expect(isPrivateIP('2001:4860:4860::8888')).toBe(false)
         expect(isPrivateIP('2607:f8b0:4004:800::200e')).toBe(false)
       })
+
+      it('should identify hex-form IPv6-mapped private IPv4 as private', () => {
+        expect(isPrivateIP('::ffff:7f00:1')).toBe(true) // 127.0.0.1
+        expect(isPrivateIP('::ffff:0a00:1')).toBe(true) // 10.0.0.1
+        expect(isPrivateIP('::ffff:c0a8:101')).toBe(true) // 192.168.1.1
+      })
+
+      it('should return false for hex-form IPv6-mapped public IPv4', () => {
+        expect(isPrivateIP('::ffff:0808:0808')).toBe(false) // 8.8.8.8
+      })
+
+      it('should identify dotted IPv4-compatible addresses as private', () => {
+        expect(isPrivateIP('::127.0.0.1')).toBe(true)
+        expect(isPrivateIP('::10.0.0.1')).toBe(true)
+      })
+
+      it('should identify hex IPv4-compatible addresses as private', () => {
+        expect(isPrivateIP('::7f00:1')).toBe(true) // 127.0.0.1
+        expect(isPrivateIP('::0a00:1')).toBe(true) // 10.0.0.1
+      })
+
+      it('should identify 6to4 addresses embedding private IPv4 as private', () => {
+        expect(isPrivateIP('2002:0a00:0001::')).toBe(true) // embeds 10.0.0.1
+        expect(isPrivateIP('2002:7f00:0001::')).toBe(true) // embeds 127.0.0.1
+        expect(isPrivateIP('2002:c0a8:0101::')).toBe(true) // embeds 192.168.1.1
+        expect(isPrivateIP('2002:ac10:0001::')).toBe(true) // embeds 172.16.0.1
+      })
+
+      it('should return false for 6to4 addresses embedding public IPv4', () => {
+        expect(isPrivateIP('2002:0808:0808::')).toBe(false) // embeds 8.8.8.8
+      })
+
+      it('should treat malformed IPv6 with multiple :: as private (fail-closed)', () => {
+        expect(isPrivateIP('::1::2')).toBe(true)
+        expect(isPrivateIP('::::')).toBe(true)
+        expect(isPrivateIP('::ffff::127.0.0.1')).toBe(true)
+      })
     })
 
     describe('and the IP is public', () => {

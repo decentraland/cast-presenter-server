@@ -35,7 +35,6 @@ function createMockRenderer(): jest.Mocked<IPdfRenderer> {
 function createMockCompositor(): jest.Mocked<IVideoCompositor> {
   return {
     downloadVideo: jest.fn().mockResolvedValue('/tmp/video.mp4'),
-    resolveStreamUrl: jest.fn().mockResolvedValue('https://example.com/video.mp4'),
     startPlayback: jest.fn().mockResolvedValue(undefined),
     onEnd: jest.fn(),
     getIsPlaying: jest.fn().mockReturnValue(false),
@@ -97,6 +96,55 @@ async function createManagerWithSession(components: ReturnType<typeof createMock
   )
   return { manager, info }
 }
+
+describe('when creating a presentation', () => {
+  let components: ReturnType<typeof createMockComponents>
+
+  describe('and publisher.connect() throws', () => {
+    let publisher: jest.Mocked<ILiveKitPublisher>
+
+    beforeEach(() => {
+      publisher = createMockPublisher()
+      publisher.connect.mockRejectedValue(new Error('LiveKit auth failed'))
+      components = createMockComponents({ publisher })
+    })
+
+    it('should still allow subsequent creations (inFlightCreations is decremented)', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+
+      // First creation fails
+      await expect(
+        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token', 'wss://lk.example.com')
+      ).rejects.toThrow('LiveKit auth failed')
+
+      // Reset mock so next connect succeeds
+      publisher.connect.mockResolvedValue(undefined)
+
+      // Second creation should succeed — proves inFlightCreations was decremented
+      const info = await manager.createPresentation(
+        Buffer.from('%PDF-1.7'),
+        'pdf',
+        'good-token',
+        'wss://lk.example.com'
+      )
+      expect(info.id).toBeDefined()
+    })
+
+    it('should record the error metric', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+
+      await expect(
+        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token', 'wss://lk.example.com')
+      ).rejects.toThrow()
+
+      expect(components.metrics.increment).toHaveBeenCalledWith('session_created_total', { status: 'error' })
+    })
+  })
+})
 
 describe('when managing video playback in a presentation', () => {
   let manager: IPresentationManager
@@ -536,6 +584,154 @@ describe('when managing video playback in a presentation', () => {
 
       it('should stop audio publishing', () => {
         expect(publisher.stopAudioPublishing).toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe('when a video download fails', () => {
+    describe('and the server returns HTTP 403', () => {
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        compositor.downloadVideo.mockRejectedValue(new Error('HTTP 403 downloading https://example.com/video.mp4'))
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+        const renderer = createMockRenderer()
+        renderer.getSlideVideos.mockResolvedValue([
+          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+        ])
+        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast videoState error', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'error',
+            videoErrorReason: expect.stringContaining('not authorized')
+          })
+        )
+      })
+
+      it('should clean up the compositor', () => {
+        expect(compositor.cleanup).toHaveBeenCalled()
+      })
+    })
+
+    describe('and the download times out', () => {
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        compositor.downloadVideo.mockRejectedValue(new Error('Download timed out after 120s'))
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+        const renderer = createMockRenderer()
+        renderer.getSlideVideos.mockResolvedValue([
+          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+        ])
+        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast videoState error with timeout reason', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'error',
+            videoErrorReason: expect.stringContaining('timed out')
+          })
+        )
+      })
+    })
+
+    describe('and the video is not found (404)', () => {
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        compositor.downloadVideo.mockRejectedValue(new Error('HTTP 404 downloading https://example.com/video.mp4'))
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+        const renderer = createMockRenderer()
+        renderer.getSlideVideos.mockResolvedValue([
+          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+        ])
+        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast videoState error with not found reason', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'error',
+            videoErrorReason: expect.stringContaining('not found')
+          })
+        )
+      })
+    })
+
+    describe('and the error is cleared on retry', () => {
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        compositor.downloadVideo
+          .mockRejectedValueOnce(new Error('HTTP 403 downloading https://example.com/video.mp4'))
+          .mockResolvedValue('/tmp/video.mp4')
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+
+        const renderer = createMockRenderer()
+        renderer.getSlideVideos.mockResolvedValue([
+          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+        ])
+        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        // First play fails
+        await manager.playVideo(presentationId, 0)
+
+        publisher.publishData.mockClear()
+
+        // Second play succeeds (downloadVideo mock resets to default success)
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast loading state without error reason on retry', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'loading'
+          })
+        )
+        const loadingCall = publisher.publishData.mock.calls.find(
+          (call) => (call[0] as Record<string, unknown>).videoState === 'loading'
+        )
+        expect(loadingCall).toBeDefined()
+        if (loadingCall) {
+          expect((loadingCall[0] as Record<string, unknown>).videoErrorReason).toBeUndefined()
+        }
       })
     })
   })

@@ -53,8 +53,17 @@ function createVideoCompositor(
   let lastPushedFrame: VideoFrameSnapshot | null = null
   let currentSlidePath: string | null = null
 
-  /** Downloads a video to disk via HTTPS with redirect following, DNS-pinned SSRF protection, and size limit. */
-  async function httpsDownload(url: string, destPath: string): Promise<void> {
+  /**
+   * Downloads a video to disk via HTTPS with redirect following, DNS-pinned SSRF protection, and size limit.
+   *
+   * @param connectionRef - Optional ref updated with the active connection's destroy callback,
+   *   allowing the caller (e.g. timeout handler) to abort the in-flight request.
+   */
+  async function httpsDownload(
+    url: string,
+    destPath: string,
+    connectionRef?: { destroy: (() => void) | null }
+  ): Promise<void> {
     const MAX_REDIRECTS = 5
     let currentUrl = url
 
@@ -62,6 +71,7 @@ function createVideoCompositor(
       // Validate and pin DNS on every hop (including the initial request)
       const resolved = await networkValidator.resolveAndValidateUrl(currentUrl)
       const { response: res, destroy } = await pinnedHttpsRequest(resolved.url, resolved.hostname, resolved.addresses)
+      if (connectionRef) connectionRef.destroy = destroy
 
       // Follow redirects — each new target is validated at the top of the loop
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -143,14 +153,18 @@ function createVideoCompositor(
   async function tryDownload(downloadUrl: string): Promise<string> {
     const rawPath = path.join(dir, `raw-${Date.now()}`)
     const destPath = path.join(dir, `video-${Date.now()}.mp4`)
+    let succeeded = false
 
     // eslint-disable-next-line prefer-const -- assigned synchronously inside the Promise constructor
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    const activeConnection: { destroy: (() => void) | null } = { destroy: null }
+
     const timeoutSignal = new Promise<never>((_resolve, reject) => {
-      timeoutHandle = setTimeout(
-        () => reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)),
-        DOWNLOAD_TIMEOUT_MS
-      )
+      timeoutHandle = setTimeout(() => {
+        // Abort the in-flight HTTPS connection so it stops accumulating data
+        if (activeConnection.destroy) activeConnection.destroy()
+        reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`))
+      }, DOWNLOAD_TIMEOUT_MS)
     })
 
     // Object wrapper prevents TypeScript from narrowing killRemux to `never`
@@ -159,7 +173,7 @@ function createVideoCompositor(
 
     async function doDownload(): Promise<string> {
       // Step 1: Download raw bytes via HTTPS (handles Google Drive redirects)
-      await httpsDownload(downloadUrl, rawPath)
+      await httpsDownload(downloadUrl, rawPath, activeConnection)
 
       const stat = fs.statSync(rawPath)
       if (stat.size < 1024) {
@@ -176,7 +190,14 @@ function createVideoCompositor(
     }
 
     try {
-      return await Promise.race([doDownload(), timeoutSignal])
+      const download = doDownload()
+      // Suppress unhandled rejection if timeout wins the race and doDownload rejects later
+      download.catch(() => {
+        /* suppressed — timeout won the race */
+      })
+      const result = await Promise.race([download, timeoutSignal])
+      succeeded = true
+      return result
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle)
       if (remuxState.kill) remuxState.kill()
@@ -185,6 +206,14 @@ function createVideoCompositor(
         fs.unlinkSync(rawPath)
       } catch {
         /* already deleted or never created */
+      }
+      // Clean up partial dest file on failure (timeout or remux error)
+      if (!succeeded) {
+        try {
+          fs.unlinkSync(destPath)
+        } catch {
+          /* never created or already deleted */
+        }
       }
     }
   }
@@ -235,11 +264,6 @@ function createVideoCompositor(
       throw lastError || new Error(`Failed to download video: ${url}`)
     },
 
-    async resolveStreamUrl(url: string): Promise<string> {
-      const validatedUrl = await networkValidator.validateVideoUrl(url)
-      return resolveVideoUrls(validatedUrl).streamUrl
-    },
-
     async startPlayback(
       videoPath: string,
       videoInfo: SlideVideoInfo,
@@ -280,9 +304,10 @@ function createVideoCompositor(
       // jumps to the nearest keyframe then decodes forward to the exact timestamp.
       const seekArgs = seekSeconds ? ['-ss', String(seekSeconds)] : []
 
-      // videoPath may be a local file (cached) or HTTPS URL (streaming);
-      // include network protocols since the URL was already validated via validateVideoUrl
-      const protocols = videoPath.startsWith('http') ? 'file,pipe,http,https,tcp,tls,crypto' : 'file,pipe'
+      // videoPath is always a local file (downloaded before playback) —
+      // no network protocols are exposed to FFmpeg, preventing HLS/DASH
+      // playlist attacks that reference file:// URIs
+      const protocols = 'file,pipe'
 
       // Video composite — -re on video input for real-time pacing
       const ffmpegArgs = [

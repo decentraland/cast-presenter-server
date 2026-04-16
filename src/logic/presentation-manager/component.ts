@@ -26,6 +26,21 @@ interface InternalSession extends PresentationSession {
   videoElapsedBeforePause: number
   pausedVideoIndex: number
   stoppingPromise: Promise<void> | null
+  videoErrorReason: string | null
+}
+
+/** Maps download/playback errors to user-friendly reasons. */
+function classifyVideoError(err: Error): string {
+  const msg = err.message
+  if (/HTTP 40[13]/.test(msg)) return 'Video not authorized — check sharing permissions'
+  if (/HTTP 404/.test(msg)) return 'Video not found or no longer available'
+  if (/HTTP [45]\d\d/.test(msg)) return 'Video server error — try again later'
+  if (/timed out/i.test(msg)) return 'Video download timed out — file may be too large'
+  if (/exceeds.*limit/i.test(msg)) return 'Video exceeds maximum size limit'
+  if (/too many redirects/i.test(msg)) return 'Video URL has too many redirects'
+  if (/too small/i.test(msg)) return 'File is not a valid video'
+  if (/remux failed/i.test(msg)) return 'Video format is not supported'
+  return 'Video unavailable'
 }
 
 /**
@@ -110,15 +125,16 @@ export async function createPresentationManager(
     const id = randomUUID()
     logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length })
 
-    // Connect to LiveKit FIRST — validates the token
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
-    await publisher.connect(livekitUrl, livekitToken)
 
     let renderer: ReturnType<typeof pdfRenderer.createRenderer> | null = null
     let tempDir: string | null = null
 
     try {
+      // Connect to LiveKit FIRST — validates the token (fail-fast auth)
+      await publisher.connect(livekitUrl, livekitToken)
+
       // Initialize PDF renderer
       renderer = pdfRenderer.createRenderer()
       await renderer.initialize(fileBuffer)
@@ -198,7 +214,8 @@ export async function createPresentationManager(
         videoElapsedBeforePause: 0,
         pausedVideoIndex: -1,
         lastActivityAt: Date.now(),
-        stoppingPromise: null
+        stoppingPromise: null,
+        videoErrorReason: null
       }
 
       sessions.set(id, session)
@@ -376,6 +393,7 @@ export async function createPresentationManager(
 
     const requestedSlide = session.currentSlide
     session.videoState = 'loading'
+    session.videoErrorReason = null
     await broadcastState(session)
 
     if (session.compositor) {
@@ -387,16 +405,26 @@ export async function createPresentationManager(
     const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
 
     let videoPath = session.cachedVideoPaths.get(videoInfo.url)
-    let isStreaming = false
-    if (videoPath && fs.existsSync(videoPath)) {
-      logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
+    if (!videoPath || !fs.existsSync(videoPath)) {
+      // Download before playback — FFmpeg must only use file protocol
+      try {
+        videoPath = await compositor.downloadVideo(videoInfo.url)
+        session.cachedVideoPaths.set(videoInfo.url, videoPath)
+        logger.info(`Downloaded video for presentation ${session.id}`, { path: videoPath })
+      } catch (err) {
+        compositor.cleanup()
+        session.videoState = 'error'
+        session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
+        await broadcastState(session)
+        logger.warn(`Video download failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
     } else {
-      videoPath = await compositor.resolveStreamUrl(videoInfo.url)
-      isStreaming = true
-      logger.info(`Streaming video from URL for presentation ${session.id}`, { url: videoPath })
+      logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     }
 
-    if (session.currentSlide !== requestedSlide) {
+    // Re-check after download — navigation may have interleaved
+    if (session.navigating || session.currentSlide !== requestedSlide) {
       compositor.cleanup()
       session.videoState = 'idle'
       await broadcastState(session)
@@ -421,6 +449,18 @@ export async function createPresentationManager(
           `Failed to start audio publishing for ${session.id}: ${err instanceof Error ? err.message : String(err)}`
         )
       }
+    }
+
+    // Re-check after audio setup — navigation may have interleaved
+    if (session.navigating || session.currentSlide !== requestedSlide) {
+      compositor.cleanup()
+      session.compositor = null
+      session.videoState = 'idle'
+      session.publisher.stopAudioPublishing().catch(() => {
+        /* noop */
+      })
+      await broadcastState(session)
+      return
     }
 
     // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
@@ -463,7 +503,8 @@ export async function createPresentationManager(
     } catch (err) {
       compositor.cleanup()
       session.compositor = null
-      session.videoState = 'idle'
+      session.videoState = 'error'
+      session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
       session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
@@ -474,25 +515,6 @@ export async function createPresentationManager(
     session.videoState = 'playing'
 
     logger.info(`Video seek: ${seekSeconds.toFixed(2)}s, elapsed tracked: ${session.videoElapsedBeforePause}ms`)
-
-    // Cache the video in the background so pause/resume uses a local file
-    if (isStreaming) {
-      const downloadCompositor = videoCompositor.createCompositor(logger, session.tempDir)
-      downloadCompositor
-        .downloadVideo(videoInfo.url)
-        .then((localPath) => {
-          session.cachedVideoPaths.set(videoInfo.url, localPath)
-          logger.info(`Background download complete for resume cache`, { url: videoInfo.url, path: localPath })
-        })
-        .catch((err) => {
-          logger.warn(
-            `Background download failed (resume will use stream): ${err instanceof Error ? err.message : String(err)}`
-          )
-        })
-        .finally(() => {
-          downloadCompositor.cleanup()
-        })
-    }
 
     compositor.onEnd(async () => {
       session.videoState = 'idle'
@@ -603,7 +625,10 @@ export async function createPresentationManager(
       currentSlide: session.currentSlide,
       fileType: session.fileType,
       slideVideos: session.slideVideos,
-      videoState: session.videoState
+      videoState: session.videoState,
+      ...(session.videoState === 'error' && session.videoErrorReason
+        ? { videoErrorReason: session.videoErrorReason }
+        : {})
     }
   }
 

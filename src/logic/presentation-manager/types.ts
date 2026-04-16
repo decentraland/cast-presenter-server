@@ -14,7 +14,7 @@ export interface PresentationSession {
   lastFrameWidth: number
   lastFrameHeight: number
   slideVideos: SlideVideoInfo[]
-  videoState: 'idle' | 'loading' | 'playing' | 'paused'
+  videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 }
 
 /** Metadata returned after creating a presentation. */
@@ -34,7 +34,8 @@ export interface PresentationState {
   currentSlide: number
   fileType: 'pdf' | 'pptx'
   slideVideos: SlideVideoInfo[]
-  videoState: 'idle' | 'loading' | 'playing' | 'paused'
+  videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
+  videoErrorReason?: string
 }
 
 /**

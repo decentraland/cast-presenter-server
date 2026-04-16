@@ -64,11 +64,14 @@ async function downloadFromUrl(
   let currentUrl = url
   // eslint-disable-next-line prefer-const -- assigned synchronously inside the Promise constructor
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const activeConnection: { destroy: (() => void) | null } = { destroy: null }
+
   const timeoutSignal = new Promise<never>((_resolve, reject) => {
-    timeoutHandle = setTimeout(
-      () => reject(new DownloadError(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`)),
-      DOWNLOAD_TIMEOUT_MS
-    )
+    timeoutHandle = setTimeout(() => {
+      // Abort the in-flight HTTPS connection so it stops accumulating data
+      if (activeConnection.destroy) activeConnection.destroy()
+      reject(new DownloadError(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`))
+    }, DOWNLOAD_TIMEOUT_MS)
   })
 
   async function doDownload(): Promise<{ buffer: Buffer; filename: string }> {
@@ -82,6 +85,7 @@ async function downloadFromUrl(
       }
 
       const { response, destroy } = await pinnedHttpsRequest(resolved.url, resolved.hostname, resolved.addresses)
+      activeConnection.destroy = destroy
 
       const status = response.statusCode ?? 0
 
@@ -139,7 +143,12 @@ async function downloadFromUrl(
   }
 
   try {
-    return await Promise.race([doDownload(), timeoutSignal])
+    const download = doDownload()
+    // Suppress unhandled rejection if timeout wins the race and doDownload rejects later
+    download.catch(() => {
+      /* suppressed — timeout won the race */
+    })
+    return await Promise.race([download, timeoutSignal])
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle)
   }

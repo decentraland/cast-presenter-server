@@ -42,12 +42,14 @@ export async function createPresentationHandler(
     let livekitUrl: string
 
     if (contentType.includes('application/json')) {
-      const contentLength = request.headers.get('content-length')
-      if (contentLength && parseInt(contentLength, 10) > MAX_JSON_BODY_SIZE) {
+      // Buffer the full body and check actual size — Content-Length is client-supplied
+      // and may be absent (chunked encoding) or lie about the real size
+      const rawBody = Buffer.from(await request.arrayBuffer())
+      if (rawBody.length > MAX_JSON_BODY_SIZE) {
         throw new RequestTooLargeError(MAX_JSON_BODY_SIZE / (1024 * 1024))
       }
 
-      const body = (await request.json()) as Record<string, unknown>
+      const body = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>
       const url = body.url as string | undefined
       const token = body.livekitToken as string | undefined
       const lkUrl = body.livekitUrl as string | undefined

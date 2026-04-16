@@ -21,7 +21,6 @@ export interface VideoFrameSnapshot {
  */
 export interface IVideoCompositor {
   downloadVideo(url: string): Promise<string>
-  resolveStreamUrl(url: string): Promise<string>
   startPlayback(
     videoPath: string,
     videoInfo: SlideVideoInfo,
