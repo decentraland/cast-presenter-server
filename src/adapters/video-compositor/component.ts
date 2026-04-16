@@ -1,17 +1,16 @@
 import { spawn } from 'child_process'
 import * as fs from 'fs'
-import * as https from 'https'
 import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
+import { pinnedHttpsRequest } from '../../logic/network-validator'
 import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo, VideoFrameSnapshot } from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
 import type { ChildProcess } from 'child_process'
-import type { IncomingMessage } from 'http'
 
 const FRAME_RATE = 20
 const VIDEO_BUFFER_TYPE_I420 = 5 // VideoBufferType.I420 from @livekit/rtc-node
@@ -54,26 +53,27 @@ function createVideoCompositor(
   let lastPushedFrame: VideoFrameSnapshot | null = null
   let currentSlidePath: string | null = null
 
-  /** Downloads a video to disk via HTTPS with redirect following, SSRF validation, and size limit. */
+  /** Downloads a video to disk via HTTPS with redirect following, DNS-pinned SSRF protection, and size limit. */
   async function httpsDownload(url: string, destPath: string): Promise<void> {
     const MAX_REDIRECTS = 5
     let currentUrl = url
 
     for (let i = 0; i < MAX_REDIRECTS; i++) {
-      const res = await new Promise<IncomingMessage>((resolve, reject) => {
-        https.get(currentUrl, resolve).on('error', reject)
-      })
+      // Validate and pin DNS on every hop (including the initial request)
+      const resolved = await networkValidator.resolveAndValidateUrl(currentUrl)
+      const { response: res, destroy } = await pinnedHttpsRequest(resolved.url, resolved.hostname, resolved.addresses)
 
-      // Follow redirects — validate each hop to prevent SSRF via open redirect
+      // Follow redirects — each new target is validated at the top of the loop
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume()
+        destroy()
         currentUrl = new URL(res.headers.location, currentUrl).href
-        await networkValidator.validateHttpsUrl(currentUrl)
         continue
       }
 
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
         res.resume()
+        destroy()
         throw new Error(`HTTP ${res.statusCode} downloading ${currentUrl}`)
       }
 
@@ -86,6 +86,7 @@ function createVideoCompositor(
           bytesWritten += chunk.length
           if (bytesWritten > MAX_VIDEO_DOWNLOAD_SIZE) {
             res.destroy(new Error(`Video download exceeds ${MAX_VIDEO_DOWNLOAD_SIZE / (1024 * 1024 * 1024)}GB limit`))
+            destroy()
           }
         })
 
@@ -104,19 +105,19 @@ function createVideoCompositor(
   }
 
   /** Remux a raw download into a clean MP4 with properly indexed streams. */
-  function remuxToMp4(inputPath: string, outputPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn(
-        'ffmpeg',
-        ['-protocol_whitelist', 'file', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath],
-        { stdio: ['ignore', 'ignore', 'pipe'] }
-      )
+  function remuxToMp4(inputPath: string, outputPath: string): { promise: Promise<void>; kill: () => void } {
+    const proc = spawn(
+      'ffmpeg',
+      ['-protocol_whitelist', 'file', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath],
+      { stdio: ['ignore', 'ignore', 'pipe'] }
+    )
 
-      let stderr = ''
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString()
-      })
+    let stderr = ''
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
 
+    const promise = new Promise<void>((resolve, reject) => {
       proc.on('close', (code) => {
         if (code !== 0) {
           reject(new Error(`Remux failed (code ${code}): ${stderr.slice(-300)}`))
@@ -126,6 +127,17 @@ function createVideoCompositor(
       })
       proc.on('error', reject)
     })
+
+    return {
+      promise,
+      kill: () => {
+        try {
+          proc.kill('SIGKILL')
+        } catch {
+          /* already exited */
+        }
+      }
+    }
   }
 
   async function tryDownload(downloadUrl: string): Promise<string> {
@@ -141,6 +153,10 @@ function createVideoCompositor(
       )
     })
 
+    // Object wrapper prevents TypeScript from narrowing killRemux to `never`
+    // across the async Promise.race boundary
+    const remuxState: { kill: (() => void) | null } = { kill: null }
+
     async function doDownload(): Promise<string> {
       // Step 1: Download raw bytes via HTTPS (handles Google Drive redirects)
       await httpsDownload(downloadUrl, rawPath)
@@ -152,7 +168,9 @@ function createVideoCompositor(
       }
 
       // Step 2: Remux into a clean MP4 with faststart + proper stream indexing
-      await remuxToMp4(rawPath, destPath)
+      const remux = remuxToMp4(rawPath, destPath)
+      remuxState.kill = remux.kill
+      await remux.promise
 
       return destPath
     }
@@ -161,6 +179,7 @@ function createVideoCompositor(
       return await Promise.race([doDownload(), timeoutSignal])
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle)
+      if (remuxState.kill) remuxState.kill()
       // Clean up raw file
       try {
         fs.unlinkSync(rawPath)
@@ -450,6 +469,14 @@ function createVideoCompositor(
       }
       frameAccumulator = Buffer.alloc(0)
       frameAccumLength = 0
+      if (currentSlidePath) {
+        try {
+          fs.unlinkSync(currentSlidePath)
+        } catch {
+          /* ignore */
+        }
+        currentSlidePath = null
+      }
     }
   }
 }

@@ -1,11 +1,10 @@
-import * as https from 'https'
 import { Readable } from 'stream'
 import Busboy = require('busboy')
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from './errors'
 import { resolveFileUrl } from './file-url-providers'
+import { pinnedHttpsRequest } from '../../logic/network-validator'
 import type { FileProviderResult, IFileProviderComponent } from './types'
 import type { AppComponents } from '../../types'
-import type { IncomingMessage } from 'http'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
@@ -55,36 +54,6 @@ function parseMultipart(contentType: string, body: Buffer): Promise<ParsedFormDa
     readable.push(body)
     readable.push(null)
     readable.pipe(busboy)
-  })
-}
-
-/**
- * Makes a single HTTPS request with DNS pinned to pre-validated addresses.
- *
- * Uses a custom https.Agent lookup to prevent DNS rebinding: the TCP
- * connection is forced to one of the addresses we already validated,
- * while TLS still verifies the certificate against the original hostname.
- */
-function pinnedHttpsRequest(
-  url: string,
-  hostname: string,
-  addresses: string[]
-): Promise<{ response: IncomingMessage; destroy: () => void }> {
-  return new Promise((resolve, reject) => {
-    const agent = new https.Agent({
-      lookup: (_host, _opts, cb) => {
-        const addr = addresses[0]
-        cb(null, addr, addr.includes(':') ? 6 : 4)
-      },
-      maxSockets: 1
-    })
-
-    const req = https.request(url, { agent }, (res) => {
-      resolve({ response: res, destroy: () => req.destroy() })
-    })
-
-    req.on('error', reject)
-    req.end()
   })
 }
 
@@ -140,6 +109,7 @@ async function downloadFromUrl(
           bytesRead += chunk.length
           if (bytesRead > MAX_FILE_SIZE) {
             response.destroy()
+            destroy()
             reject(new FileTooLargeError(MAX_FILE_SIZE_MB))
             return
           }
