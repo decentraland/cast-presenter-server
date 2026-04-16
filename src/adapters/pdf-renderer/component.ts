@@ -1,21 +1,13 @@
 import { createCanvas } from '@napi-rs/canvas'
 import type { IPdfRenderer, IPdfRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
+import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 
-// pdfjs-dist types
-interface PDFDocumentProxy {
-  numPages: number
-  getPage(pageNumber: number): Promise<PDFPageProxy>
-  destroy(): void
-}
-
-interface PDFPageProxy {
-  getViewport(params: { scale: number }): { width: number; height: number }
-  render(params: { canvasContext: unknown; viewport: { width: number; height: number } }): { promise: Promise<void> }
-  getAnnotations(): Promise<PDFAnnotation[]>
-}
-
-interface PDFAnnotation {
+/**
+ * Narrowed shape for link annotations. pdfjs-dist types `getAnnotations()` as
+ * `Promise<Array<any>>`, so we keep a local interface for the fields we use.
+ */
+interface PDFLinkAnnotation {
   subtype: string
   url?: string
   rect?: number[]
@@ -45,6 +37,18 @@ function pdfRectToCanvas(
 
 function createRenderer(): IPdfRenderer {
   let doc: PDFDocumentProxy | null = null
+  // Per-page annotation cache. renderSlide and getSlideVideos are both called
+  // for every slide viewed, and getAnnotations() is a relatively expensive
+  // parse — cache once per slide index. Cleared in destroy().
+  const annotationsCache = new Map<number, PDFLinkAnnotation[]>()
+
+  async function getCachedAnnotations(index: number, page: PDFPageProxy): Promise<PDFLinkAnnotation[]> {
+    const cached = annotationsCache.get(index)
+    if (cached) return cached
+    const annotations = (await page.getAnnotations()) as PDFLinkAnnotation[]
+    annotationsCache.set(index, annotations)
+    return annotations
+  }
 
   return {
     async initialize(fileBuffer: Buffer): Promise<void> {
@@ -66,9 +70,12 @@ function createRenderer(): IPdfRenderer {
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d')
 
-      await page.render({ canvasContext: ctx as unknown, viewport }).promise
+      // pdfjs-dist types `canvasContext` as the DOM `CanvasRenderingContext2D`, but
+      // @napi-rs/canvas exports its own structurally-compatible context type. Cast
+      // through `unknown` to bridge the nominal mismatch.
+      await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise
 
-      const annotations = await page.getAnnotations()
+      const annotations = await getCachedAnnotations(index, page)
       for (const a of annotations) {
         if (a.subtype !== 'Link' || !a.url || !isMediaUrl(a.url) || !a.rect) continue
         const geo = pdfRectToCanvas(a.rect, viewport, baseViewport.width)
@@ -104,7 +111,7 @@ function createRenderer(): IPdfRenderer {
       if (!doc) throw new Error('PDF not initialized')
 
       const page = await doc.getPage(index + 1)
-      const annotations = await page.getAnnotations()
+      const annotations = await getCachedAnnotations(index, page)
       const baseViewport = page.getViewport({ scale: 1 })
       const scale = TARGET_WIDTH / baseViewport.width
       const viewport = page.getViewport({ scale })
@@ -112,7 +119,7 @@ function createRenderer(): IPdfRenderer {
       return annotations
         .filter((a) => a.subtype === 'Link' && a.url && isMediaUrl(a.url))
         .filter(
-          (a): a is PDFAnnotation & { url: string; rect: number[] } =>
+          (a): a is PDFLinkAnnotation & { url: string; rect: number[] } =>
             !!a.url && Array.isArray(a.rect) && a.rect.length >= 4
         )
         .map((a) => ({
@@ -127,8 +134,11 @@ function createRenderer(): IPdfRenderer {
     },
 
     destroy(): void {
+      annotationsCache.clear()
       if (doc) {
-        doc.destroy()
+        // Fire-and-forget: pdfjs destroy() is async but our lifecycle is sync;
+        // callers are already in stop/error cleanup paths that ignore the outcome.
+        void doc.destroy()
         doc = null
       }
     }
