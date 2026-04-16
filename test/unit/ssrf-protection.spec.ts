@@ -45,6 +45,31 @@ describe('when checking SSRF protections', () => {
       it('should identify 255.255.255.255 as private (broadcast)', () => {
         expect(isPrivateIP('255.255.255.255')).toBe(true)
       })
+
+      it('should identify 100.64-127.x.x as private (CGNAT, RFC 6598)', () => {
+        expect(isPrivateIP('100.64.0.1')).toBe(true)
+        expect(isPrivateIP('100.127.255.255')).toBe(true)
+      })
+
+      it('should not identify IPs just outside the CGNAT range as private', () => {
+        expect(isPrivateIP('100.63.255.255')).toBe(false)
+        expect(isPrivateIP('100.128.0.0')).toBe(false)
+      })
+
+      it('should identify 198.18-19.x.x as private (benchmarking, RFC 2544)', () => {
+        expect(isPrivateIP('198.18.0.0')).toBe(true)
+        expect(isPrivateIP('198.19.255.255')).toBe(true)
+      })
+
+      it('should not identify IPs just outside the benchmarking range as private', () => {
+        expect(isPrivateIP('198.17.255.255')).toBe(false)
+        expect(isPrivateIP('198.20.0.0')).toBe(false)
+      })
+
+      it('should identify 240.x.x.x as private (reserved)', () => {
+        expect(isPrivateIP('240.0.0.0')).toBe(true)
+        expect(isPrivateIP('255.255.255.254')).toBe(true)
+      })
     })
 
     describe('and the IP is an IPv6 address', () => {
@@ -113,6 +138,16 @@ describe('when checking SSRF protections', () => {
 
       it('should return false for 6to4 addresses embedding public IPv4', () => {
         expect(isPrivateIP('2002:0808:0808::')).toBe(false) // embeds 8.8.8.8
+      })
+
+      it('should identify NAT64 addresses embedding private IPv4 as private (64:ff9b::/96)', () => {
+        expect(isPrivateIP('64:ff9b::7f00:1')).toBe(true) // 127.0.0.1
+        expect(isPrivateIP('64:ff9b::0a00:1')).toBe(true) // 10.0.0.1
+        expect(isPrivateIP('64:ff9b::c0a8:101')).toBe(true) // 192.168.1.1
+      })
+
+      it('should return false for NAT64 addresses embedding public IPv4', () => {
+        expect(isPrivateIP('64:ff9b::0808:0808')).toBe(false) // 8.8.8.8
       })
 
       it('should treat malformed IPv6 with multiple :: as private (fail-closed)', () => {

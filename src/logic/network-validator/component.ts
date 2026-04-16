@@ -17,8 +17,9 @@ const ALLOWED_VIDEO_DOMAINS = new Set([
  * Checks whether an IPv4 address falls within a private or reserved range.
  *
  * Covers RFC 1918 (10/8, 172.16/12, 192.168/16), loopback (127/8),
- * link-local / cloud metadata (169.254/16), multicast (224/4),
- * broadcast (255.255.255.255), and the zero address.
+ * link-local / cloud metadata (169.254/16), CGNAT (100.64/10, RFC 6598),
+ * benchmarking (198.18/15, RFC 2544), multicast (224/4),
+ * reserved (240/4), broadcast (255.255.255.255), and the zero address.
  */
 function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split('.').map(Number)
@@ -31,6 +32,9 @@ function isPrivateIPv4(ip: string): boolean {
   if (parts[0] >= 224 && parts[0] <= 239) return true // multicast
   if (parts.every((p) => p === 255)) return true // broadcast
   if (parts.every((p) => p === 0)) return true
+  if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true // CGNAT (RFC 6598)
+  if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return true // benchmarking (RFC 2544)
+  if (parts[0] >= 240) return true // reserved
   return false
 }
 
@@ -77,7 +81,8 @@ function expandIPv6(ip: string): string[] {
  * Covers loopback (::1), unspecified (::), link-local (fe80::/10),
  * unique local (fc00::/7), IPv6-mapped IPv4 in both dotted and hex form
  * (::ffff:x.x.x.x, ::ffff:7f00:1), IPv4-compatible (::x.x.x.x),
- * and 6to4 addresses (2002::/16 with embedded private IPv4).
+ * 6to4 addresses (2002::/16 with embedded private IPv4),
+ * and NAT64 (64:ff9b::/96, RFC 6052) with embedded private IPv4.
  */
 function isPrivateIPv6(ip: string): boolean {
   const normalized = ip.toLowerCase().trim()
@@ -114,6 +119,12 @@ function isPrivateIPv6(ip: string): boolean {
   // 6to4 — 2002:XXYY:ZZWW::/48 embeds the IPv4 in groups 1-2
   if (g[0] === 0x2002) {
     const ipv4 = `${g[1] >> 8}.${g[1] & 0xff}.${g[2] >> 8}.${g[2] & 0xff}`
+    return isPrivateIPv4(ipv4)
+  }
+
+  // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) — embeds IPv4 in last 32 bits
+  if (g[0] === 0x0064 && g[1] === 0xff9b && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0) {
+    const ipv4 = `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`
     return isPrivateIPv4(ipv4)
   }
 
