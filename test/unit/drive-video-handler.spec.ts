@@ -26,8 +26,7 @@ function createMockGoogleDrive(overrides?: { allowedIds?: string; streamError?: 
         contentRange: undefined,
         contentType: 'video/mp4'
       }
-    }),
-    isVideoMime: (mime: string) => mime.startsWith('video/')
+    })
   }
 }
 

@@ -58,19 +58,6 @@ describe('when using the google drive component', () => {
         expect(googleDrive.isFileAllowed('file-c')).toBe(false)
       })
     })
-
-    describe('when checking MIME types', () => {
-      it('should accept video MIME types regardless of case', () => {
-        expect(googleDrive.isVideoMime('video/mp4')).toBe(true)
-        expect(googleDrive.isVideoMime('video/webm')).toBe(true)
-        expect(googleDrive.isVideoMime('Video/MP4')).toBe(true)
-      })
-
-      it('should reject non-video MIME types', () => {
-        expect(googleDrive.isVideoMime('text/html')).toBe(false)
-        expect(googleDrive.isVideoMime('application/pdf')).toBe(false)
-      })
-    })
   })
 
   describe('and the allowlist is empty (default-deny)', () => {

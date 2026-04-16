@@ -45,12 +45,12 @@ function encodeCommsPayload(topic: string, jsonData: string): Uint8Array {
 function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: string } | null {
   // sceneData[0] is MsgType — check it, then skip it.
   if (sceneData.length < 1 || sceneData[0] !== MSG_TYPE_COMMS_DATA) return null
-  const inner = sceneData.slice(1)
+  const inner = sceneData.subarray(1)
   if (inner.length < 2) return null
   const topicLen = inner[0] | (inner[1] << 8)
   if (inner.length < 2 + topicLen) return null
-  const topic = new TextDecoder().decode(inner.slice(2, 2 + topicLen))
-  const data = new TextDecoder().decode(inner.slice(2 + topicLen))
+  const topic = new TextDecoder().decode(inner.subarray(2, 2 + topicLen))
+  const data = new TextDecoder().decode(inner.subarray(2 + topicLen))
   return { topic, data }
 }
 
@@ -246,7 +246,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       dataHandler = handler
     },
 
-    async updateMetadataState(state: Record<string, unknown>): Promise<void> {
+    async updateMetadataState(state: object): Promise<void> {
       if (!room?.localParticipant) return
       await room.localParticipant.updateMetadata(JSON.stringify({ role: 'presentation', presentationId, ...state }))
     },

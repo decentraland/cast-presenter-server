@@ -16,7 +16,7 @@ export interface ILiveKitPublisher {
   pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void
   stopAudioPublishing(): Promise<void>
   setDataHandler(handler: (data: Record<string, unknown>) => void): void
-  updateMetadataState(state: Record<string, unknown>): Promise<void>
+  updateMetadataState(state: object): Promise<void>
   publishData(message: Record<string, unknown>): Promise<void>
   getRemoteParticipantCount(): number
   disconnect(): Promise<void>

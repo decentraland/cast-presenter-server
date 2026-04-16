@@ -6,8 +6,6 @@ import type { AppComponents } from '../../types'
 /** Allow only Drive file ID characters: alphanumeric, hyphen, underscore */
 const FILE_ID_REGEX = /^[a-zA-Z0-9_-]+$/
 
-const VIDEO_MIME_PREFIX = 'video/'
-
 export function getPublicDriveDownloadUrl(fileId: string): string {
   return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&authuser=0`
 }
@@ -102,10 +100,6 @@ export async function createGoogleDriveComponent(
 
     isValidFileId(fileId: string): boolean {
       return FILE_ID_REGEX.test(fileId)
-    },
-
-    isVideoMime(mimeType: string): boolean {
-      return mimeType.toLowerCase().startsWith(VIDEO_MIME_PREFIX)
     }
   }
 }

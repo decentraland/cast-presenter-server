@@ -42,12 +42,4 @@ export interface IGoogleDriveComponent extends IBaseComponent {
    * @returns true if the ID format is valid
    */
   isValidFileId(fileId: string): boolean
-
-  /**
-   * Checks if a MIME type is a video type.
-   *
-   * @param mimeType - MIME type string to check
-   * @returns true if it starts with "video/"
-   */
-  isVideoMime(mimeType: string): boolean
 }
