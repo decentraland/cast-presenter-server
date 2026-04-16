@@ -194,6 +194,42 @@ describe('when handling a create presentation request', () => {
       })
     })
 
+    describe('and the url field is a non-string value', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext({ url: 123, livekitToken: 't', livekitUrl: 'wss://lk.example.com' })
+        )
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about missing url', () => {
+        expect((result.body as Record<string, string>).error).toContain('Missing url')
+      })
+    })
+
+    describe('and the livekitToken field is a non-string value', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext({
+            url: 'https://example.com/file.pdf',
+            livekitToken: true,
+            livekitUrl: 'wss://lk.example.com'
+          })
+        )
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about missing livekitToken', () => {
+        expect((result.body as Record<string, string>).error).toContain('Missing livekitToken')
+      })
+    })
+
     describe('and the livekitUrl uses ws:// instead of wss://', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(

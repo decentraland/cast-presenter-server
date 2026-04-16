@@ -50,9 +50,9 @@ export async function createPresentationHandler(
       }
 
       const body = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>
-      const url = body.url as string | undefined
-      const token = body.livekitToken as string | undefined
-      const lkUrl = body.livekitUrl as string | undefined
+      const url = typeof body.url === 'string' ? body.url : undefined
+      const token = typeof body.livekitToken === 'string' ? body.livekitToken : undefined
+      const lkUrl = typeof body.livekitUrl === 'string' ? body.livekitUrl : undefined
 
       if (!url) {
         throw new ValidationError('Missing url')
