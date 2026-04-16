@@ -5,12 +5,18 @@ info:
   description: |
     Real-time presentation streaming server for Decentraland. Accepts
     PDF/PPTX uploads, renders slides as video frames, and publishes
-    them to a LiveKit room. Supports slide navigation, embedded video
-    playback, and a Google Drive video proxy.
+    them to a LiveKit room. A Google Drive proxy exposes public Drive
+    files over HTTP with Range support.
 
     Authentication relies on LiveKit tokens issued by comms-gatekeeper.
     A valid token is required to create a presentation; the server
-    validates it by connecting to the LiveKit room.
+    validates it by connecting to the LiveKit room (fail-fast auth).
+
+    **Presentation control is not exposed over HTTP.** Once a session
+    is created, slide navigation, video playback, stop, and state
+    queries all flow through the LiveKit data channel. See
+    `docs/architecture.md` for the data-channel message schema
+    (`presentation:navigate`, `presentation:video:play`, …).
   contact:
     name: Decentraland Foundation
   license:
@@ -27,7 +33,7 @@ tags:
   - name: Health
     description: Health check
   - name: Presentations
-    description: Presentation lifecycle and control
+    description: Presentation session creation (control flows via LiveKit data channel)
   - name: Drive proxy
     description: Google Drive public video proxy
 
@@ -52,12 +58,18 @@ paths:
       tags: [Presentations]
       summary: Create a presentation
       description: |
-        Create a presentation from a file upload or a public URL.
-        Accepts either `multipart/form-data` (file upload) or
-        `application/json` (URL download). The server connects to
-        the LiveKit room, renders the first slide, and begins
-        publishing a video track. Rate-limited to 5 requests per
-        minute per IP.
+        Creates a presentation from a file upload (`multipart/form-data`)
+        or a public URL (`application/json`). The server connects to
+        the LiveKit room first to validate the token, then renders the
+        first slide and begins publishing a video track. On success,
+        all subsequent control (navigate, play, pause, stop) happens
+        over the LiveKit data channel — there is no further HTTP.
+
+        Body size limits: the multipart request must be ≤100 MB; the
+        JSON request must be ≤1 MB (the downloaded file itself may be
+        up to 100 MB). Actual body size is measured server-side; the
+        `Content-Length` header is not trusted. The reverse proxy
+        should also enforce a request body cap.
       requestBody:
         required: true
         content:
@@ -75,7 +87,7 @@ paths:
                   description: LiveKit JWT issued by comms-gatekeeper
                 livekitUrl:
                   type: string
-                  description: LiveKit server WebSocket URL
+                  description: LiveKit server WebSocket URL (must be `wss://`)
           application/json:
             schema:
               type: object
@@ -86,13 +98,15 @@ paths:
                   format: uri
                   description: >
                     Public HTTPS URL to a PDF or PPTX file (max
-                    100 MB). Private IPs are blocked.
+                    100 MB). Private, loopback, link-local, CGNAT,
+                    benchmarking, and reserved IP ranges (IPv4 + IPv6)
+                    are blocked via SSRF protection.
                 livekitToken:
                   type: string
                   description: LiveKit JWT issued by comms-gatekeeper
                 livekitUrl:
                   type: string
-                  description: LiveKit server WebSocket URL
+                  description: LiveKit server WebSocket URL (must be `wss://`)
       responses:
         "201":
           description: Presentation created
@@ -101,151 +115,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/PresentationInfo"
         "400":
-          description: Invalid file type, missing fields, or bad magic bytes
+          description: >
+            Invalid content type, missing fields, invalid LiveKit URL,
+            bad file magic bytes, or unsupported file type.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "413":
-          description: File exceeds 100 MB limit
+          description: Request body exceeds the configured size limit
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "429":
-          description: Rate limit exceeded
+          description: Maximum concurrent presentations reached
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /presentations/{id}:
-    get:
-      tags: [Presentations]
-      summary: Get presentation state
-      parameters:
-        - $ref: "#/components/parameters/PresentationId"
-      responses:
-        "200":
-          description: Current presentation state
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PresentationState"
-        "404":
-          description: Presentation not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-    delete:
-      tags: [Presentations]
-      summary: Stop a presentation
-      description: |
-        Disconnects from LiveKit, cleans up temporary files, and
-        removes the session.
-      parameters:
-        - $ref: "#/components/parameters/PresentationId"
-      responses:
-        "200":
-          description: Presentation stopped
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: stopped
-
-  /presentations/{id}/navigate:
-    post:
-      tags: [Presentations]
-      summary: Navigate slides
-      parameters:
-        - $ref: "#/components/parameters/PresentationId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [action]
-              properties:
-                action:
-                  type: string
-                  enum: [next, prev, goto]
-                slideIndex:
-                  type: integer
-                  description: Required when action is "goto"
-      responses:
-        "200":
-          description: Updated presentation state
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PresentationState"
-        "404":
-          description: Presentation not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
-  /presentations/{id}/video/play:
-    post:
-      tags: [Presentations]
-      summary: Play an embedded video
-      parameters:
-        - $ref: "#/components/parameters/PresentationId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [videoIndex]
-              properties:
-                videoIndex:
-                  type: integer
-                  description: Index into the current slide's video list
-      responses:
-        "200":
-          description: Playback started
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: playing
-        "404":
-          description: Presentation not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
-  /presentations/{id}/video/pause:
-    post:
-      tags: [Presentations]
-      summary: Pause video playback
-      parameters:
-        - $ref: "#/components/parameters/PresentationId"
-      responses:
-        "200":
-          description: Playback paused
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: paused
-        "404":
-          description: Presentation not found
+        "500":
+          description: >
+            Unhandled server error (e.g., LiveKit connection failure,
+            PDF render failure, or unexpected exception). The response
+            body contains a generic message; inspect server logs for
+            details.
           content:
             application/json:
               schema:
@@ -259,8 +153,7 @@ paths:
         Proxies a public Google Drive file as a binary stream.
         Supports HTTP Range requests for seek. The file ID must
         appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist;
-        an empty allowlist denies all requests. Rate-limited to
-        30 requests per minute per IP.
+        an empty or unset allowlist denies all requests.
       parameters:
         - name: fileId
           in: query
@@ -294,6 +187,12 @@ paths:
               schema:
                 type: string
                 format: binary
+        "400":
+          description: Missing or invalid fileId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           description: File ID not in allowlist
           content:
@@ -306,24 +205,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "429":
-          description: Rate limit exceeded
+        "502":
+          description: Upstream Drive request failed
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
 
 components:
-  parameters:
-    PresentationId:
-      name: id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-      description: Presentation session ID
-
   schemas:
     Error:
       type: object
@@ -333,6 +222,7 @@ components:
 
     PresentationInfo:
       type: object
+      description: Returned from `POST /presentations` on success.
       properties:
         id:
           type: string
@@ -349,6 +239,10 @@ components:
 
     PresentationState:
       type: object
+      description: >
+        State payload published on the LiveKit data channel as
+        `{ "type": "presentation:state", ...PresentationState }`
+        and mirrored into room metadata. Not returned over HTTP.
       properties:
         id:
           type: string
@@ -368,7 +262,15 @@ components:
             $ref: "#/components/schemas/SlideVideoInfo"
         videoState:
           type: string
-          enum: [idle, loading, playing, paused]
+          enum: [idle, loading, playing, paused, error]
+        videoErrorReason:
+          type: string
+          description: >
+            Present only when `videoState` is `error`. A short,
+            user-facing reason (e.g. "Video not authorized — check
+            sharing permissions", "Video download timed out — file
+            may be too large", or "Presentation has exceeded its
+            video disk budget").
 
     SlideVideoInfo:
       type: object
