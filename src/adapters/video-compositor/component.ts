@@ -6,7 +6,13 @@ import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
 import { pinnedHttpsRequest } from '../../logic/network-validator'
-import type { IVideoCompositor, IVideoCompositorComponent, SlideVideoInfo, VideoFrameSnapshot } from './types'
+import type {
+  IVideoCompositor,
+  IVideoCompositorComponent,
+  SlideVideoInfo,
+  VideoDownloadResult,
+  VideoFrameSnapshot
+} from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
@@ -45,7 +51,11 @@ function createVideoCompositor(
   let audioProcess: ChildProcess | null = null
   let dataListener: ((chunk: Buffer) => void) | null = null
   let frameBuffer: Buffer = Buffer.alloc(0)
+  // Read/write pointers into frameBuffer. Emitting a frame advances readOffset;
+  // pointers reset to 0 when drained. Avoids the per-frame self-compaction
+  // memmove (~1-3 MB × 20 fps) that the buffer-shift approach required.
   let writeOffset = 0
+  let readOffset = 0
   const dir = tempDir || fs.mkdtempSync(path.join(os.tmpdir(), 'cast-presenter-'))
   let isPlaying = false
   let cleanedUp = false
@@ -150,7 +160,8 @@ function createVideoCompositor(
     }
   }
 
-  async function tryDownload(downloadUrl: string): Promise<string> {
+  async function tryDownload(downloadUrl: string, signal?: AbortSignal): Promise<VideoDownloadResult> {
+    signal?.throwIfAborted()
     const rawPath = path.join(dir, `raw-${Date.now()}`)
     const destPath = path.join(dir, `video-${Date.now()}.mp4`)
     let succeeded = false
@@ -171,7 +182,26 @@ function createVideoCompositor(
     // across the async Promise.race boundary
     const remuxState: { kill: (() => void) | null } = { kill: null }
 
-    async function doDownload(): Promise<string> {
+    // Caller-driven cancellation (session stop): destroy the HTTPS connection
+    // and kill any in-flight remux so this promise rejects promptly.
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      if (!signal) return
+      if (signal.aborted) {
+        reject(signal.reason ?? new Error('Aborted'))
+        return
+      }
+      signal.addEventListener(
+        'abort',
+        () => {
+          if (activeConnection.destroy) activeConnection.destroy()
+          if (remuxState.kill) remuxState.kill()
+          reject(signal.reason ?? new Error('Aborted'))
+        },
+        { once: true }
+      )
+    })
+
+    async function doDownload(): Promise<VideoDownloadResult> {
       // Step 1: Download raw bytes via HTTPS (handles Google Drive redirects)
       await httpsDownload(downloadUrl, rawPath, activeConnection)
 
@@ -186,16 +216,17 @@ function createVideoCompositor(
       remuxState.kill = remux.kill
       await remux.promise
 
-      return destPath
+      const remuxedSize = fs.statSync(destPath).size
+      return { path: destPath, bytes: remuxedSize }
     }
 
     try {
       const download = doDownload()
-      // Suppress unhandled rejection if timeout wins the race and doDownload rejects later
+      // Suppress unhandled rejection if timeout/abort wins the race and doDownload rejects later
       download.catch(() => {
-        /* suppressed — timeout won the race */
+        /* suppressed — timeout or abort won the race */
       })
-      const result = await Promise.race([download, timeoutSignal])
+      const result = await Promise.race([download, timeoutSignal, abortPromise])
       succeeded = true
       return result
     } finally {
@@ -207,7 +238,7 @@ function createVideoCompositor(
       } catch {
         /* already deleted or never created */
       }
-      // Clean up partial dest file on failure (timeout or remux error)
+      // Clean up partial dest file on failure (timeout, abort, or remux error)
       if (!succeeded) {
         try {
           fs.unlinkSync(destPath)
@@ -243,20 +274,24 @@ function createVideoCompositor(
 
     frameBuffer = Buffer.alloc(0)
     writeOffset = 0
+    readOffset = 0
     publisher.pushFrame(slideBuffer, slideWidth, slideHeight)
     publisher.startHeartbeat(slideBuffer, slideWidth, slideHeight)
   }
 
   return {
-    async downloadVideo(url: string): Promise<string> {
+    async downloadVideo(url: string, signal?: AbortSignal): Promise<VideoDownloadResult> {
+      signal?.throwIfAborted()
       const validatedUrl = await networkValidator.validateVideoUrl(url)
       const { downloadUrls } = resolveVideoUrls(validatedUrl)
 
       let lastError: Error | null = null
       for (const downloadUrl of downloadUrls) {
+        signal?.throwIfAborted()
         try {
-          return await tryDownload(downloadUrl)
+          return await tryDownload(downloadUrl, signal)
         } catch (err) {
+          if (signal?.aborted) throw err
           lastError = err instanceof Error ? err : new Error(String(err))
           logger.warn(`Download attempt failed: ${lastError.message}`)
         }
@@ -289,6 +324,7 @@ function createVideoCompositor(
       }
       frameBuffer = Buffer.allocUnsafe(compositeFrameSize * 2)
       writeOffset = 0
+      readOffset = 0
 
       // Clean up previous slide file before writing a new one (pause/resume cycle)
       if (currentSlidePath) {
@@ -389,7 +425,8 @@ function createVideoCompositor(
 
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
           if (isPlaying) {
-            onAudioData(Buffer.from(chunk))
+            // chunk is already a Buffer from stdout — no need to copy.
+            onAudioData(chunk)
           }
         })
 
@@ -413,26 +450,33 @@ function createVideoCompositor(
       let framesReceived = 0
 
       dataListener = (chunk: Buffer) => {
-        // Grow buffer if chunk won't fit in remaining space
+        // Ensure room at the tail. If not, shift unread bytes to index 0 (cheap —
+        // usually 0 bytes at steady state because drain below resets pointers).
+        // Grow only if even after compaction the chunk still won't fit.
         if (writeOffset + chunk.length > frameBuffer.length) {
-          const needed = writeOffset + chunk.length
-          const newSize = Math.max(frameBuffer.length * 2, needed)
-          const newBuf = Buffer.allocUnsafe(newSize)
-          frameBuffer.copy(newBuf, 0, 0, writeOffset)
-          frameBuffer = newBuf
+          const unread = writeOffset - readOffset
+          if (unread + chunk.length <= frameBuffer.length) {
+            if (unread > 0) frameBuffer.copy(frameBuffer, 0, readOffset, writeOffset)
+          } else {
+            const newSize = Math.max(frameBuffer.length * 2, unread + chunk.length)
+            const newBuf = Buffer.allocUnsafe(newSize)
+            if (unread > 0) frameBuffer.copy(newBuf, 0, readOffset, writeOffset)
+            frameBuffer = newBuf
+          }
+          readOffset = 0
+          writeOffset = unread
         }
 
         chunk.copy(frameBuffer, writeOffset)
         writeOffset += chunk.length
 
-        while (writeOffset >= compositeFrameSize) {
+        while (writeOffset - readOffset >= compositeFrameSize) {
           if (!isPlaying) break
 
           // During seek warmup, discard slide-only pass-through frames
           if (framesReceived < seekWarmupFrames) {
             framesReceived++
-            frameBuffer.copy(frameBuffer, 0, compositeFrameSize, writeOffset)
-            writeOffset -= compositeFrameSize
+            readOffset += compositeFrameSize
             continue
           }
 
@@ -441,7 +485,7 @@ function createVideoCompositor(
             firstFrameDelivered = true
           }
           const frameCopy = Buffer.allocUnsafe(compositeFrameSize)
-          frameBuffer.copy(frameCopy, 0, 0, compositeFrameSize)
+          frameBuffer.copy(frameCopy, 0, readOffset, readOffset + compositeFrameSize)
           lastPushedFrame = {
             buffer: frameCopy,
             width: slideWidth,
@@ -449,8 +493,13 @@ function createVideoCompositor(
             bufferType: VIDEO_BUFFER_TYPE_I420
           }
           publisher.pushFrame(frameCopy, slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
-          frameBuffer.copy(frameBuffer, 0, compositeFrameSize, writeOffset)
-          writeOffset -= compositeFrameSize
+          readOffset += compositeFrameSize
+        }
+
+        // Drain: reset pointers when fully consumed — avoids tail-full compaction
+        if (readOffset === writeOffset) {
+          readOffset = 0
+          writeOffset = 0
         }
       }
       compositeProcess.stdout?.on('data', dataListener)
@@ -503,6 +552,7 @@ function createVideoCompositor(
       }
       frameBuffer = Buffer.alloc(0)
       writeOffset = 0
+      readOffset = 0
       lastPushedFrame = null
       if (currentSlidePath) {
         try {

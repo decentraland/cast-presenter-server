@@ -13,6 +13,17 @@ import type { AppComponents } from '../../types'
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
+// Total disk a single session may consume across all its downloaded videos.
+// Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
+// This bound protects tempDir capacity when a deck references many videos.
+export const SESSION_DISK_QUOTA_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
+
+class SessionDiskQuotaExceededError extends Error {
+  constructor(used: number, requested: number) {
+    super(`Session disk quota exceeded (used=${used}, adding=${requested}, limit=${SESSION_DISK_QUOTA_BYTES})`)
+    this.name = 'SessionDiskQuotaExceededError'
+  }
+}
 
 interface InternalSession extends PresentationSession {
   renderer: IPdfRenderer
@@ -28,10 +39,19 @@ interface InternalSession extends PresentationSession {
   stoppingPromise: Promise<void> | null
   videoErrorReason: string | null
   preDownloadTimer: ReturnType<typeof setTimeout> | null
+  // Signalled when the session stops; cancels in-flight downloads so we don't
+  // race with tempDir cleanup or write to a deleted directory.
+  abortController: AbortController
+  // Cumulative bytes written to tempDir across all downloads; enforced against
+  // SESSION_DISK_QUOTA_BYTES to bound disk usage per session.
+  bytesDownloaded: number
 }
 
 /** Maps download/playback errors to user-friendly reasons. */
 function classifyVideoError(err: Error): string {
+  if (err instanceof SessionDiskQuotaExceededError) {
+    return 'Presentation has exceeded its video disk budget — stop other videos or restart the session'
+  }
   const msg = err.message
   if (/HTTP 40[13]/.test(msg)) return 'Video not authorized — check sharing permissions'
   if (/HTTP 404/.test(msg)) return 'Video not found or no longer available'
@@ -105,7 +125,7 @@ export async function createPresentationManager(
       logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
     }
     try {
-      await session.publisher.updateMetadataState(state as unknown as Record<string, unknown>)
+      await session.publisher.updateMetadataState(state)
     } catch (err) {
       logger.warn(`Failed to update metadata: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -222,7 +242,9 @@ export async function createPresentationManager(
         lastActivityAt: Date.now(),
         stoppingPromise: null,
         videoErrorReason: null,
-        preDownloadTimer: null
+        preDownloadTimer: null,
+        abortController: new AbortController(),
+        bytesDownloaded: 0
       }
 
       sessions.set(id, session)
@@ -268,10 +290,12 @@ export async function createPresentationManager(
 
   async function preDownloadVideos(session: InternalSession): Promise<void> {
     const downloader = videoCompositor.createCompositor(logger, session.tempDir)
+    const { signal } = session.abortController
 
     try {
       const videoTargets = new Map<string, { width: number; height: number }>()
       for (let i = 0; i < session.slideCount; i++) {
+        if (signal.aborted) return
         const videos = await session.renderer.getSlideVideos(i)
         for (const v of videos) {
           if (!videoTargets.has(v.url)) {
@@ -291,18 +315,42 @@ export async function createPresentationManager(
           )
           break
         }
-        if (!sessions.has(session.id)) {
+        if (signal.aborted || !sessions.has(session.id)) {
           logger.info('Session ended, aborting pre-download queue')
           break
         }
         if (session.cachedVideoPaths.has(url)) continue
+        if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
+          logger.info(
+            `Pre-download stopped: session disk quota reached (${session.bytesDownloaded}/${SESSION_DISK_QUOTA_BYTES} bytes)`
+          )
+          break
+        }
         try {
           logger.info(`Pre-downloading video: ${url}`)
-          const rawPath = await downloader.downloadVideo(url)
+          const { path: rawPath, bytes } = await downloader.downloadVideo(url, signal)
+          // Enforce quota post-download: per-file cap already bounds one download,
+          // and aborting a live HTTPS stream at an exact byte count is awkward.
+          if (session.bytesDownloaded + bytes > SESSION_DISK_QUOTA_BYTES) {
+            try {
+              fs.unlinkSync(rawPath)
+            } catch {
+              /* ignore */
+            }
+            logger.warn(
+              `Pre-download dropped ${url}: would exceed session quota (${session.bytesDownloaded + bytes}/${SESSION_DISK_QUOTA_BYTES} bytes)`
+            )
+            break
+          }
           session.cachedVideoPaths.set(url, rawPath)
+          session.bytesDownloaded += bytes
           logger.info(`Pre-downloaded video: ${url}`)
           downloaded++
         } catch (err) {
+          if (signal.aborted) {
+            logger.info('Pre-download aborted')
+            break
+          }
           logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
         }
       }
@@ -387,6 +435,10 @@ export async function createPresentationManager(
 
   async function playVideoSession(session: InternalSession, videoIndex: number): Promise<void> {
     if (session.navigating) return
+    // The check below and the `videoState = 'loading'` write a few lines down
+    // form an atomic guard against concurrent play commands. Keep them synchronous —
+    // do not introduce any `await` between them, or two rapid calls can both pass
+    // the check and allocate duplicate compositors.
     if (session.videoState === 'playing' || session.videoState === 'loading') return
 
     if (videoIndex < 0 || videoIndex >= session.slideVideos.length) {
@@ -416,13 +468,32 @@ export async function createPresentationManager(
 
     let videoPath = session.cachedVideoPaths.get(videoInfo.url)
     if (!videoPath || !fs.existsSync(videoPath)) {
+      if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
+        compositor.cleanup()
+        session.videoState = 'error'
+        session.videoErrorReason = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
+        await broadcastState(session)
+        logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
+        return
+      }
       // Download before playback — FFmpeg must only use file protocol
       try {
-        videoPath = await compositor.downloadVideo(videoInfo.url)
+        const result = await compositor.downloadVideo(videoInfo.url, session.abortController.signal)
+        if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
+          try {
+            fs.unlinkSync(result.path)
+          } catch {
+            /* ignore */
+          }
+          throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
+        }
+        videoPath = result.path
         session.cachedVideoPaths.set(videoInfo.url, videoPath)
-        logger.info(`Downloaded video for presentation ${session.id}`, { path: videoPath })
+        session.bytesDownloaded += result.bytes
+        logger.info(`Downloaded video for presentation ${session.id}`, { path: videoPath, bytes: result.bytes })
       } catch (err) {
         compositor.cleanup()
+        if (session.abortController.signal.aborted) return
         session.videoState = 'error'
         session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
         await broadcastState(session)
@@ -476,23 +547,49 @@ export async function createPresentationManager(
     // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
     // Prevents overfilling AudioSource's internal buffer which causes tail latency on pause
     const AUDIO_FRAME_BYTES = 1920
-    let audioRemainder = Buffer.alloc(0)
-
     const MAX_AUDIO_REMAINDER = AUDIO_FRAME_BYTES * 4
+    // Pre-sized ring-style buffer: holds up to MAX_AUDIO_REMAINDER of leftover bytes
+    // plus one typical FFmpeg chunk (~16 KB observed). Sized generously; never grows.
+    const AUDIO_BUFFER_BYTES = MAX_AUDIO_REMAINDER + 32 * 1024
+    const audioBuf = Buffer.allocUnsafe(AUDIO_BUFFER_BYTES)
+    let audioRead = 0
+    let audioWrite = 0
+
     const onAudioData = (pcmChunk: Buffer) => {
-      audioRemainder = audioRemainder.length === 0 ? pcmChunk : Buffer.concat([audioRemainder, pcmChunk])
-      if (audioRemainder.length > MAX_AUDIO_REMAINDER) {
-        audioRemainder = audioRemainder.subarray(audioRemainder.length - MAX_AUDIO_REMAINDER)
+      // Make room at the tail by shifting unread bytes to index 0 when needed.
+      if (audioWrite + pcmChunk.length > AUDIO_BUFFER_BYTES) {
+        const unread = audioWrite - audioRead
+        if (unread > 0 && audioRead > 0) audioBuf.copy(audioBuf, 0, audioRead, audioWrite)
+        audioRead = 0
+        audioWrite = unread
+        // Should never happen with the sizing above, but cap the backlog just in case
+        if (audioWrite + pcmChunk.length > AUDIO_BUFFER_BYTES) {
+          // Drop the oldest MAX_AUDIO_REMAINDER worth of bytes, same behavior as the
+          // previous subarray-trim fallback.
+          const drop = audioWrite - MAX_AUDIO_REMAINDER
+          if (drop > 0) {
+            audioBuf.copy(audioBuf, 0, drop, audioWrite)
+            audioWrite -= drop
+          }
+        }
       }
 
-      while (audioRemainder.length >= AUDIO_FRAME_BYTES) {
+      pcmChunk.copy(audioBuf, audioWrite)
+      audioWrite += pcmChunk.length
+
+      while (audioWrite - audioRead >= AUDIO_FRAME_BYTES) {
         // Use Buffer.alloc for dedicated ArrayBuffer with guaranteed 2-byte alignment
         // (Buffer pool may have odd byteOffset which breaks Int16Array)
         const frame = Buffer.alloc(AUDIO_FRAME_BYTES)
-        audioRemainder.copy(frame, 0, 0, AUDIO_FRAME_BYTES)
+        audioBuf.copy(frame, 0, audioRead, audioRead + AUDIO_FRAME_BYTES)
         const int16 = new Int16Array(frame.buffer, 0, AUDIO_FRAME_BYTES / 2)
         session.publisher.pushAudioFrame(int16, 48000, 2, 480)
-        audioRemainder = audioRemainder.subarray(AUDIO_FRAME_BYTES)
+        audioRead += AUDIO_FRAME_BYTES
+      }
+
+      if (audioRead === audioWrite) {
+        audioRead = 0
+        audioWrite = 0
       }
     }
 
@@ -561,6 +658,10 @@ export async function createPresentationManager(
       session.compositor = null
     }
     session.videoState = 'idle'
+    // Clear pause bookmarks so replaying the same video starts from the beginning
+    // (parity with navigateSession; seek is gated on state='paused' so this is defense-in-depth)
+    session.pausedVideoIndex = -1
+    session.videoElapsedBeforePause = 0
 
     if (session.lastFrameBuffer) {
       session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
@@ -614,6 +715,9 @@ export async function createPresentationManager(
       clearTimeout(session.preDownloadTimer)
       session.preDownloadTimer = null
     }
+
+    // Abort any in-flight downloads so they don't race with tempDir cleanup below
+    session.abortController.abort()
 
     session.stoppingPromise = (async () => {
       logger.info(`Stopping presentation ${session.id}`)

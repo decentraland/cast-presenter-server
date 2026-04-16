@@ -34,7 +34,7 @@ function createMockRenderer(): jest.Mocked<IPdfRenderer> {
 
 function createMockCompositor(): jest.Mocked<IVideoCompositor> {
   return {
-    downloadVideo: jest.fn().mockResolvedValue('/tmp/video.mp4'),
+    downloadVideo: jest.fn().mockResolvedValue({ path: '/tmp/video.mp4', bytes: 1024 }),
     startPlayback: jest.fn().mockResolvedValue(undefined),
     onEnd: jest.fn(),
     getIsPlaying: jest.fn().mockReturnValue(false),
@@ -765,7 +765,7 @@ describe('when managing video playback in a presentation', () => {
         compositor = createMockCompositor()
         compositor.downloadVideo
           .mockRejectedValueOnce(new Error('HTTP 403 downloading https://example.com/video.mp4'))
-          .mockResolvedValue('/tmp/video.mp4')
+          .mockResolvedValue({ path: '/tmp/video.mp4', bytes: 1024 })
         publisher = createMockPublisher()
         components = createMockComponents({ publisher })
         components.videoCompositor.createCompositor.mockReturnValue(compositor)

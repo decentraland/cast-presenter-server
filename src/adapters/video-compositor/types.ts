@@ -19,8 +19,20 @@ export interface VideoFrameSnapshot {
  * A video compositor instance that handles downloading, transcoding,
  * and overlaying video onto slide frames via ffmpeg.
  */
+/** Result of a successful video download. */
+export interface VideoDownloadResult {
+  /** Absolute path to the remuxed MP4 on disk. */
+  path: string
+  /** Size of the downloaded file in bytes, used by the caller for per-session disk accounting. */
+  bytes: number
+}
+
 export interface IVideoCompositor {
-  downloadVideo(url: string): Promise<string>
+  /**
+   * Downloads a video to disk. If `signal` aborts, the in-flight HTTPS request
+   * and remux process are cancelled and any partial files are cleaned up.
+   */
+  downloadVideo(url: string, signal?: AbortSignal): Promise<VideoDownloadResult>
   startPlayback(
     videoPath: string,
     videoInfo: SlideVideoInfo,
