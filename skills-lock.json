@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "dcl-backend-standards": {
+      "source": "decentraland/ai-toolkit",
+      "sourceType": "github",
+      "computedHash": "21156cdc0fa1e645e24f47cb873f5abb74f0c8bb6313871e9efd93151093e5b8"
+    },
     "dcl-testing": {
       "source": "decentraland/ai-toolkit",
       "sourceType": "github",

@@ -1,6 +1,12 @@
 import { validateFilterParam } from '../../src/adapters/video-compositor'
 import { isPrivateIP, validateVideoUrl } from '../../src/logic/network-validator'
 
+// Mock DNS to avoid real network calls in CI (validateVideoUrl triggers dns.resolve4/resolve6)
+jest.mock('dns/promises', () => ({
+  resolve4: jest.fn().mockResolvedValue(['142.250.80.46']),
+  resolve6: jest.fn().mockResolvedValue([])
+}))
+
 describe('when checking SSRF protections', () => {
   describe('when evaluating an IP address', () => {
     describe('and the IP is in a private range', () => {
