@@ -322,6 +322,11 @@ function createVideoCompositor(
       if (compositeFrameSize === 0) {
         throw new Error('Cannot composite video with zero-dimension slide')
       }
+      // Hard cap on the decode-side backlog: under sustained backpressure we
+      // prefer to drop stale frames (real-time video degrades gracefully) over
+      // growing memory without bound. 6 frames gives headroom for a brief GC
+      // pause without triggering drops.
+      const maxFrameBufferSize = compositeFrameSize * 6
       frameBuffer = Buffer.allocUnsafe(compositeFrameSize * 2)
       writeOffset = 0
       readOffset = 0
@@ -452,19 +457,34 @@ function createVideoCompositor(
       dataListener = (chunk: Buffer) => {
         // Ensure room at the tail. If not, shift unread bytes to index 0 (cheap —
         // usually 0 bytes at steady state because drain below resets pointers).
-        // Grow only if even after compaction the chunk still won't fit.
+        // Grow only if even after compaction the chunk still won't fit, and only
+        // up to maxFrameBufferSize. At the cap we drop oldest unread bytes to
+        // keep the newest chunk (real-time video degrades gracefully).
         if (writeOffset + chunk.length > frameBuffer.length) {
           const unread = writeOffset - readOffset
           if (unread + chunk.length <= frameBuffer.length) {
             if (unread > 0) frameBuffer.copy(frameBuffer, 0, readOffset, writeOffset)
-          } else {
-            const newSize = Math.max(frameBuffer.length * 2, unread + chunk.length)
+            readOffset = 0
+            writeOffset = unread
+          } else if (frameBuffer.length < maxFrameBufferSize) {
+            const newSize = Math.min(maxFrameBufferSize, Math.max(frameBuffer.length * 2, unread + chunk.length))
             const newBuf = Buffer.allocUnsafe(newSize)
             if (unread > 0) frameBuffer.copy(newBuf, 0, readOffset, writeOffset)
             frameBuffer = newBuf
+            readOffset = 0
+            writeOffset = unread
+          } else if (chunk.length < frameBuffer.length) {
+            const keep = frameBuffer.length - chunk.length
+            const dropped = unread - keep
+            logger.warn(`Frame buffer saturated, dropping ${dropped} stale bytes`)
+            frameBuffer.copy(frameBuffer, 0, writeOffset - keep, writeOffset)
+            readOffset = 0
+            writeOffset = keep
+          } else {
+            logger.warn(`Chunk (${chunk.length}) exceeds frame cap (${maxFrameBufferSize}), resetting`)
+            readOffset = 0
+            writeOffset = 0
           }
-          readOffset = 0
-          writeOffset = unread
         }
 
         chunk.copy(frameBuffer, writeOffset)
