@@ -561,7 +561,7 @@ export async function createPresentationManager(
       compositor.cleanup()
       session.compositor = null
       if (session.videoState === 'loading') session.videoState = 'idle'
-      session.publisher.stopAudioPublishing().catch(() => {
+      await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
       await broadcastState(session)
@@ -640,7 +640,7 @@ export async function createPresentationManager(
       session.compositor = null
       session.videoState = 'error'
       session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
-      session.publisher.stopAudioPublishing().catch(() => {
+      await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
       await broadcastState(session)
@@ -666,7 +666,7 @@ export async function createPresentationManager(
       if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
       session.videoState = 'idle'
       session.compositor = null
-      session.publisher.stopAudioPublishing().catch(() => {
+      await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
       metrics.increment('video_playback_total', { action: 'end' })

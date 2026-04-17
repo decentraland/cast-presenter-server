@@ -246,21 +246,26 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
     },
 
     async stopAudioPublishing(): Promise<void> {
-      if (audioTrack) {
+      // Null the closure refs synchronously before awaiting close(). If a
+      // concurrent startAudioPublishing runs during the await, it rebinds
+      // audioTrack/audioSource to its new refs — and nulling them after
+      // the await would silently wipe out the new track.
+      const track = audioTrack
+      const source = audioSource
+      audioTrack = null
+      audioSource = null
+      if (track) {
         try {
-          await audioTrack.close(true)
+          await track.close(true)
         } catch (err) {
           logger.warn(`Failed to close audio track: ${err instanceof Error ? err.message : String(err)}`)
         }
-        audioTrack = null
-        audioSource = null
-      } else if (audioSource) {
+      } else if (source) {
         try {
-          await audioSource.close()
+          await source.close()
         } catch (err) {
           logger.warn(`Failed to close audio source: ${err instanceof Error ? err.message : String(err)}`)
         }
-        audioSource = null
       }
     },
 
