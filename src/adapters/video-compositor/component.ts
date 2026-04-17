@@ -433,6 +433,13 @@ function createVideoCompositor(
         compositeStderr = (compositeStderr + chunk.toString()).slice(-500)
       })
 
+      // Prevents crash on spawn failure (ENOENT / EACCES). ChildProcess is an
+      // EventEmitter — an unhandled 'error' event throws and takes down the process.
+      compositeProcess.on('error', (err) => {
+        logger.warn(`Composite FFmpeg process error: ${err.message}`)
+        if (!cleanedUp && isPlaying) stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+      })
+
       // Audio process — uses -re for real-time pacing (killed on pause, restarted on resume)
       if (onAudioData) {
         audioProcess = spawn(
@@ -461,6 +468,12 @@ function createVideoCompositor(
         let audioStderr = ''
         audioProcess.stderr?.on('data', (chunk: Buffer) => {
           audioStderr = (audioStderr + chunk.toString()).slice(-500)
+        })
+
+        // See compositeProcess note — unhandled 'error' on ChildProcess crashes
+        // the server. Audio is non-critical, so we just log and leave video running.
+        audioProcess.on('error', (err) => {
+          logger.warn(`Audio FFmpeg process error: ${err.message}`)
         })
 
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
