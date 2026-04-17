@@ -1023,6 +1023,13 @@ describe('when managing video playback in a presentation', () => {
       it('should not increment the play metric', () => {
         expect(components.metrics.increment).not.toHaveBeenCalledWith('video_playback_total', { action: 'play' })
       })
+
+      // Without this the FFmpegs spawned inside startPlayback after stopVideo's
+      // cleanup are orphaned — the compositor's close handler is gated on
+      // `!cleanedUp && isPlaying` and wouldn't kill them either.
+      it('should cleanup the orphaned compositor once the post-startPlayback guard trips', () => {
+        expect(compositor.cleanup).toHaveBeenCalledTimes(2)
+      })
     })
   })
 })

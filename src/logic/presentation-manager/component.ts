@@ -650,7 +650,10 @@ export async function createPresentationManager(
     // Re-check after startPlayback — stopVideoSession may have cleaned up the compositor
     // while the promise was resolving. The compositor's close handler is gated by
     // `!cleanedUp && isPlaying`, so the onEnd latch doesn't cover this path.
+    // cleanup() here also kills FFmpegs that startPlayback spawned after an
+    // external cleanup ran during its internal fs.writeFile yield.
     if (session.compositor !== compositor) {
+      compositor.cleanup()
       return
     }
 
