@@ -5,10 +5,6 @@ coverage
 .vscode
 .env
 .cursor/
-
-# Gas Town (added by gt)
-.runtime/
 .claude/
-.logs/
-__pycache__/
-state.json
+.serena/
+.agents/
