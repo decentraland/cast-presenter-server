@@ -60,6 +60,9 @@ function createVideoCompositor(
   let isPlaying = false
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
+  // Latches a natural-end event if FFmpeg closes before onEnd() is registered.
+  // Replayed on the next onEnd() call via microtask. Cleared on cleanup().
+  let endLatched = false
   let lastPushedFrame: VideoFrameSnapshot | null = null
   let currentSlidePath: string | null = null
 
@@ -111,9 +114,18 @@ function createVideoCompositor(
         })
 
         res.pipe(file)
-        file.on('finish', () => file.close(() => resolve()))
-        file.on('error', (err) => fs.unlink(destPath, () => reject(err)))
+        file.on('finish', () =>
+          file.close(() => {
+            destroy()
+            resolve()
+          })
+        )
+        file.on('error', (err) => {
+          destroy()
+          fs.unlink(destPath, () => reject(err))
+        })
         res.on('error', (err) => {
+          destroy()
           file.destroy()
           fs.unlink(destPath, () => reject(err))
         })
@@ -126,6 +138,7 @@ function createVideoCompositor(
 
   /** Remux a raw download into a clean MP4 with properly indexed streams. */
   function remuxToMp4(inputPath: string, outputPath: string): { promise: Promise<void>; kill: () => void } {
+    const REMUX_TIMEOUT_MS = 60_000
     const proc = spawn(
       'ffmpeg',
       ['-protocol_whitelist', 'file', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', '-y', outputPath],
@@ -137,20 +150,42 @@ function createVideoCompositor(
       stderr += chunk.toString()
     })
 
+    // Dedicated remux timeout — the outer download timeout covers the whole
+    // download+remux flow, but a stuck remux on a pathological input should
+    // fail with its own signal rather than drag out the full 120s budget.
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      try {
+        proc.kill('SIGKILL')
+      } catch {
+        /* already exited */
+      }
+    }, REMUX_TIMEOUT_MS)
+
     const promise = new Promise<void>((resolve, reject) => {
       proc.on('close', (code) => {
+        clearTimeout(timeout)
+        if (timedOut) {
+          reject(new Error(`Remux timed out after ${REMUX_TIMEOUT_MS / 1000}s`))
+          return
+        }
         if (code !== 0) {
           reject(new Error(`Remux failed (code ${code}): ${stderr.slice(-300)}`))
           return
         }
         resolve()
       })
-      proc.on('error', reject)
+      proc.on('error', (err) => {
+        clearTimeout(timeout)
+        reject(err)
+      })
     })
 
     return {
       promise,
       kill: () => {
+        clearTimeout(timeout)
         try {
           proc.kill('SIGKILL')
         } catch {
@@ -340,7 +375,7 @@ function createVideoCompositor(
         }
       }
       currentSlidePath = path.join(dir, `slide-${Date.now()}.rgba`)
-      fs.writeFileSync(currentSlidePath, slideBuffer)
+      await fs.promises.writeFile(currentSlidePath, slideBuffer)
 
       // Overlay video at PDF geometry coordinates
       const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
@@ -530,7 +565,11 @@ function createVideoCompositor(
         }
         if (!cleanedUp && isPlaying) {
           stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
-          if (onEndCallback) onEndCallback()
+          if (onEndCallback) {
+            onEndCallback()
+          } else {
+            endLatched = true
+          }
         }
       })
 
@@ -545,6 +584,14 @@ function createVideoCompositor(
 
     onEnd(callback: () => void): void {
       onEndCallback = callback
+      if (endLatched) {
+        endLatched = false
+        // Defer to a microtask so onEnd() returns before cb runs — matches the
+        // behavior of the non-latched path (close event is always async).
+        queueMicrotask(() => {
+          if (onEndCallback === callback) callback()
+        })
+      }
     },
 
     getIsPlaying(): boolean {
@@ -558,6 +605,10 @@ function createVideoCompositor(
     cleanup(): void {
       cleanedUp = true
       isPlaying = false
+      // Swallow any pending natural-end: a cleaned-up compositor has no semantic
+      // "end" event to deliver, and we don't want to leak the session callback closure.
+      endLatched = false
+      onEndCallback = null
       if (compositeProcess) {
         if (dataListener) {
           compositeProcess.stdout?.removeListener('data', dataListener)

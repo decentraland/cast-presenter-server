@@ -119,8 +119,14 @@ async function downloadFromUrl(
           }
           chunks.push(chunk)
         })
-        response.on('end', () => resolve(Buffer.concat(chunks)))
-        response.on('error', reject)
+        response.on('end', () => {
+          destroy()
+          resolve(Buffer.concat(chunks))
+        })
+        response.on('error', (err) => {
+          destroy()
+          reject(err)
+        })
       })
 
       // Prefer filename from Content-Disposition header (Google Drive, S3, etc.)
