@@ -59,7 +59,7 @@ export async function driveVideoHandler(
     const isPartial = result.contentRange !== undefined
     const status = isPartial ? 206 : 200
     const headers: Record<string, string> = {
-      'Content-Type': result.contentType,
+      'Content-Type': result.contentType.replace(/[\r\n\0]/g, ''),
       'Accept-Ranges': 'bytes',
       ...cors
     }

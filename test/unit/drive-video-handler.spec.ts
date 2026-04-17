@@ -3,8 +3,8 @@ import { FileNotFoundError } from '../../src/adapters/google-drive'
 import { driveVideoHandler } from '../../src/controllers/handlers/drive-video-handler'
 import { createMockLogger } from '../mocks/context'
 
-function createMockGoogleDrive(overrides?: { allowedIds?: string; streamError?: Error }) {
-  const { allowedIds = 'valid-id', streamError } = overrides ?? {}
+function createMockGoogleDrive(overrides?: { allowedIds?: string; streamError?: Error; contentType?: string }) {
+  const { allowedIds = 'valid-id', streamError, contentType = 'video/mp4' } = overrides ?? {}
 
   return {
     isValidFileId: (id: string) => /^[a-zA-Z0-9_-]+$/.test(id),
@@ -24,7 +24,7 @@ function createMockGoogleDrive(overrides?: { allowedIds?: string; streamError?: 
         stream,
         contentLength: 1024,
         contentRange: undefined,
-        contentType: 'video/mp4'
+        contentType
       }
     })
   }
@@ -36,13 +36,15 @@ function createMockContext(overrides?: {
   corsOrigin?: string
   rangeHeader?: string | null
   streamError?: Error
+  contentType?: string
 }) {
   const {
     fileId = 'valid-id',
     allowedIds = 'valid-id',
     corsOrigin = '',
     rangeHeader = null,
-    streamError
+    streamError,
+    contentType
   } = overrides ?? {}
 
   const url = new URL('http://localhost/api/drive-video')
@@ -68,7 +70,7 @@ function createMockContext(overrides?: {
         requireString: async (key: string) => key,
         requireNumber: async (key: string) => parseInt(key, 10)
       },
-      googleDrive: createMockGoogleDrive({ allowedIds, streamError }),
+      googleDrive: createMockGoogleDrive({ allowedIds, streamError, contentType }),
       logs: createMockLogger()
     }
   } as unknown as Parameters<typeof driveVideoHandler>[0]
@@ -154,6 +156,17 @@ describe('when handling a drive video proxy request', () => {
 
     it('should return status 404', () => {
       expect(result.status).toBe(404)
+    })
+  })
+
+  describe('and Drive returns a Content-Type with CRLF injection attempt', () => {
+    beforeEach(async () => {
+      result = await driveVideoHandler(createMockContext({ contentType: 'video/mp4\r\nX-Injected: evil\r\n\0junk' }))
+    })
+
+    it('should strip CR/LF/NUL bytes from the Content-Type header', () => {
+      expect(result.headers['Content-Type']).toBe('video/mp4X-Injected: eviljunk')
+      expect(result.headers['Content-Type']).not.toMatch(/[\r\n\0]/)
     })
   })
 })
