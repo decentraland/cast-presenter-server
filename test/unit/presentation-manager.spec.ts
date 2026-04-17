@@ -258,6 +258,37 @@ describe('when handling data channel messages', () => {
       expect(publisher.publishData).not.toHaveBeenCalledWith(expect.objectContaining({ videoState: 'loading' }))
     })
   })
+
+  describe.each([
+    { label: 'NaN', slideIndex: NaN },
+    { label: 'a float', slideIndex: 1.5 },
+    { label: 'Infinity', slideIndex: Infinity },
+    { label: 'a numeric string', slideIndex: '2' }
+  ])('when the navigate slideIndex is $label on a goto action', ({ slideIndex }) => {
+    beforeEach(async () => {
+      publisher.publishData.mockClear()
+      await dataHandler({ type: 'presentation:navigate', action: 'goto', slideIndex })
+    })
+
+    it('should not broadcast any state update (rejected as invalid index)', () => {
+      expect(publisher.publishData).not.toHaveBeenCalled()
+    })
+  })
+
+  describe.each([
+    { label: 'NaN', videoIndex: NaN },
+    { label: 'a float', videoIndex: 0.5 },
+    { label: 'Infinity', videoIndex: Infinity }
+  ])('when the videoIndex is $label', ({ videoIndex }) => {
+    beforeEach(async () => {
+      publisher.publishData.mockClear()
+      await dataHandler({ type: 'presentation:video:play', videoIndex })
+    })
+
+    it('should not broadcast video loading state', () => {
+      expect(publisher.publishData).not.toHaveBeenCalledWith(expect.objectContaining({ videoState: 'loading' }))
+    })
+  })
 })
 
 describe('when managing video playback in a presentation', () => {

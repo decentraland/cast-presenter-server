@@ -189,12 +189,18 @@ export async function createPresentationManager(
             case 'presentation:navigate': {
               const action = message.action
               if (action !== 'next' && action !== 'prev' && action !== 'goto') break
-              const slideIndex = typeof message.slideIndex === 'number' ? message.slideIndex : undefined
+              // Number.isInteger rejects NaN, Infinity, floats and non-numbers.
+              // Without this, NaN slips past `< 0` and `>= slideCount` checks
+              // (both are false for NaN) and propagates as a silently broken index.
+              const slideIndex =
+                Number.isInteger(message.slideIndex) && (message.slideIndex as number) >= 0
+                  ? (message.slideIndex as number)
+                  : undefined
               await navigateSession(session, action, slideIndex)
               break
             }
             case 'presentation:video:play': {
-              const videoIndex = typeof message.videoIndex === 'number' ? message.videoIndex : -1
+              const videoIndex = Number.isInteger(message.videoIndex) ? (message.videoIndex as number) : -1
               await playVideoSession(session, videoIndex)
               break
             }
