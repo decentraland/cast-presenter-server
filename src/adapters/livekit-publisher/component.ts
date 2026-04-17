@@ -80,7 +80,29 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   return {
     async connect(url: string, token: string): Promise<void> {
       room = new Room()
-      await room.connect(url, token)
+      const CONNECT_TIMEOUT_MS = 20_000
+      let connectTimer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          room.connect(url, token),
+          new Promise<never>((_, reject) => {
+            connectTimer = setTimeout(
+              () => reject(new Error(`LiveKit connect timed out after ${CONNECT_TIMEOUT_MS / 1000}s`)),
+              CONNECT_TIMEOUT_MS
+            )
+          })
+        ])
+      } catch (err) {
+        try {
+          await room.disconnect()
+        } catch {
+          /* noop — best-effort cleanup of partial connection */
+        }
+        room = null
+        throw err
+      } finally {
+        if (connectTimer) clearTimeout(connectTimer)
+      }
 
       const localParticipant = room.localParticipant
       if (localParticipant) {
