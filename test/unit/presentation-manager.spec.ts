@@ -87,6 +87,20 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+async function flushMicrotasks() {
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
 async function createManagerWithSession(components: ReturnType<typeof createMockComponents>) {
   const manager = await createPresentationManager(
     components as unknown as Parameters<typeof createPresentationManager>[0]
@@ -877,6 +891,137 @@ describe('when managing video playback in a presentation', () => {
         if (loadingCall) {
           expect((loadingCall[0] as Record<string, unknown>).videoErrorReason).toBeUndefined()
         }
+      })
+    })
+  })
+
+  describe('when stopVideo races with an in-flight playVideo', () => {
+    function setupRenderer(components: ReturnType<typeof createMockComponents>) {
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    }
+
+    function lastBroadcastVideoState(pub: jest.Mocked<ILiveKitPublisher>): string | undefined {
+      const stateCalls = pub.publishData.mock.calls.filter(
+        (call) => (call[0] as Record<string, unknown>).type === 'presentation:state'
+      )
+      const last = stateCalls[stateCalls.length - 1]
+      return last ? ((last[0] as Record<string, unknown>).videoState as string | undefined) : undefined
+    }
+
+    describe('and stopVideo is called while the download is pending', () => {
+      let downloadDeferred: ReturnType<typeof createDeferred<{ path: string; bytes: number }>>
+      let playPromise: Promise<void>
+
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        downloadDeferred = createDeferred<{ path: string; bytes: number }>()
+        compositor.downloadVideo.mockReturnValue(downloadDeferred.promise)
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+        setupRenderer(components)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        playPromise = manager.playVideo(presentationId, 0)
+        await flushMicrotasks() // let playVideoSession reach the download await
+
+        await manager.stopVideo(presentationId)
+
+        downloadDeferred.resolve({ path: '/tmp/video.mp4', bytes: 1024 })
+        await playPromise
+      })
+
+      it('should not call startPlayback', () => {
+        expect(compositor.startPlayback).not.toHaveBeenCalled()
+      })
+
+      it('should not register onEnd', () => {
+        expect(compositor.onEnd).not.toHaveBeenCalled()
+      })
+
+      it('should leave videoState idle (not revert to playing)', () => {
+        expect(lastBroadcastVideoState(publisher)).toBe('idle')
+      })
+    })
+
+    describe('and stopVideo is called while audio publishing is pending', () => {
+      let audioDeferred: ReturnType<typeof createDeferred<void>>
+      let playPromise: Promise<void>
+
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        audioDeferred = createDeferred<void>()
+        publisher = createMockPublisher()
+        publisher.startAudioPublishing.mockReturnValue(audioDeferred.promise)
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+        setupRenderer(components)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        playPromise = manager.playVideo(presentationId, 0)
+        await flushMicrotasks() // let playVideoSession reach the startAudioPublishing await
+
+        await manager.stopVideo(presentationId)
+
+        audioDeferred.resolve()
+        await playPromise
+      })
+
+      it('should not call startPlayback', () => {
+        expect(compositor.startPlayback).not.toHaveBeenCalled()
+      })
+
+      it('should leave videoState idle', () => {
+        expect(lastBroadcastVideoState(publisher)).toBe('idle')
+      })
+    })
+
+    describe('and stopVideo is called while startPlayback is pending', () => {
+      let startDeferred: ReturnType<typeof createDeferred<void>>
+      let playPromise: Promise<void>
+
+      beforeEach(async () => {
+        compositor = createMockCompositor()
+        startDeferred = createDeferred<void>()
+        compositor.startPlayback.mockReturnValue(startDeferred.promise)
+        publisher = createMockPublisher()
+        components = createMockComponents({ publisher })
+        components.videoCompositor.createCompositor.mockReturnValue(compositor)
+        setupRenderer(components)
+
+        const result = await createManagerWithSession(components)
+        manager = result.manager
+        presentationId = result.info.id
+
+        playPromise = manager.playVideo(presentationId, 0)
+        await flushMicrotasks() // let playVideoSession reach the startPlayback await
+
+        await manager.stopVideo(presentationId)
+
+        startDeferred.resolve()
+        await playPromise
+      })
+
+      it('should leave videoState idle (the post-startPlayback guard trips)', () => {
+        expect(lastBroadcastVideoState(publisher)).toBe('idle')
+      })
+
+      it('should not register onEnd (play returned before reaching that line)', () => {
+        expect(compositor.onEnd).not.toHaveBeenCalled()
+      })
+
+      it('should not increment the play metric', () => {
+        expect(components.metrics.increment).not.toHaveBeenCalledWith('video_playback_total', { action: 'play' })
       })
     })
   })

@@ -526,10 +526,11 @@ export async function createPresentationManager(
       logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
     }
 
-    // Re-check after download — navigation may have interleaved
-    if (session.navigating || session.currentSlide !== requestedSlide) {
+    // Re-check after download — navigation or stopVideoSession may have interleaved.
+    // stopVideoSession sets videoState='idle'; don't overwrite that transition.
+    if (session.navigating || session.currentSlide !== requestedSlide || session.videoState !== 'loading') {
       compositor.cleanup()
-      session.videoState = 'idle'
+      if (session.videoState === 'loading') session.videoState = 'idle'
       await broadcastState(session)
       return
     }
@@ -554,11 +555,12 @@ export async function createPresentationManager(
       }
     }
 
-    // Re-check after audio setup — navigation may have interleaved
-    if (session.navigating || session.currentSlide !== requestedSlide) {
+    // Re-check after audio setup — navigation or stopVideoSession may have interleaved.
+    // stopVideoSession sets videoState='idle'; don't overwrite that transition.
+    if (session.navigating || session.currentSlide !== requestedSlide || session.videoState !== 'loading') {
       compositor.cleanup()
       session.compositor = null
-      session.videoState = 'idle'
+      if (session.videoState === 'loading') session.videoState = 'idle'
       session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
@@ -643,6 +645,13 @@ export async function createPresentationManager(
       })
       await broadcastState(session)
       throw err
+    }
+
+    // Re-check after startPlayback — stopVideoSession may have cleaned up the compositor
+    // while the promise was resolving. The compositor's close handler is gated by
+    // `!cleanedUp && isPlaying`, so the onEnd latch doesn't cover this path.
+    if (session.compositor !== compositor) {
+      return
     }
 
     session.videoState = 'playing'
