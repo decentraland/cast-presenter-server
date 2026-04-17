@@ -49,6 +49,26 @@ function createJsonContext(body: Record<string, unknown>, overrides?: { fromUrlE
   } as unknown as Parameters<typeof createPresentationHandler>[0]
 }
 
+function createRawJsonContext(raw: string) {
+  const bytes = Buffer.from(raw, 'utf-8')
+  return {
+    request: {
+      headers: {
+        get: (name: string) => {
+          if (name === 'content-type') return 'application/json'
+          return null
+        }
+      },
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    },
+    components: {
+      logs: createMockLogger(),
+      presentationManager: createMockPresentationManager(),
+      fileProvider: createMockFileProvider()
+    }
+  } as unknown as Parameters<typeof createPresentationHandler>[0]
+}
+
 function createBadContentTypeContext() {
   return {
     request: {
@@ -263,6 +283,62 @@ describe('when handling a create presentation request', () => {
 
       it('should return status 400', () => {
         expect(result.status).toBe(400)
+      })
+    })
+
+    describe('and the body is the JSON literal null', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(createRawJsonContext('null'))
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about a JSON object', () => {
+        expect((result.body as Record<string, string>).error).toContain('JSON object')
+      })
+    })
+
+    describe('and the body is a JSON array', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(createRawJsonContext('[]'))
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about a JSON object', () => {
+        expect((result.body as Record<string, string>).error).toContain('JSON object')
+      })
+    })
+
+    describe('and the body is a JSON primitive', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(createRawJsonContext('"hello"'))
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about a JSON object', () => {
+        expect((result.body as Record<string, string>).error).toContain('JSON object')
+      })
+    })
+
+    describe('and the body is malformed JSON', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(createRawJsonContext('{not json'))
+      })
+
+      it('should return status 400', () => {
+        expect(result.status).toBe(400)
+      })
+
+      it('should return an error message about valid JSON', () => {
+        expect((result.body as Record<string, string>).error).toContain('valid JSON')
       })
     })
 

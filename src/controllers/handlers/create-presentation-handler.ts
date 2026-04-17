@@ -49,7 +49,16 @@ export async function createPresentationHandler(
         throw new RequestTooLargeError(MAX_JSON_BODY_SIZE / (1024 * 1024))
       }
 
-      const body = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(rawBody.toString('utf-8'))
+      } catch {
+        throw new ValidationError('Request body must be valid JSON')
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new ValidationError('Request body must be a JSON object')
+      }
+      const body = parsed as Record<string, unknown>
       const url = typeof body.url === 'string' ? body.url : undefined
       const token = typeof body.livekitToken === 'string' ? body.livekitToken : undefined
       const lkUrl = typeof body.livekitUrl === 'string' ? body.livekitUrl : undefined
