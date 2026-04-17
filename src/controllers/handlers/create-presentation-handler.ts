@@ -1,7 +1,7 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
-import { MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
+import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
 import { RequestTooLargeError, ValidationError } from '../errors'
 import type { HandlerContextWithPath } from '../../types'
 
@@ -74,6 +74,10 @@ export async function createPresentationHandler(
       livekitToken = token
       livekitUrl = lkUrl
 
+      // Pre-validate LiveKit credentials BEFORE the expensive URL download
+      // so bogus tokens can't amplify a 1 KB request into a 100 MB outbound fetch.
+      await presentationManager.validateCredentials(livekitUrl, livekitToken)
+
       const downloaded = await fileProvider.fromUrl(url)
       fileBuffer = downloaded.buffer
       fileName = downloaded.filename
@@ -144,6 +148,9 @@ export async function createPresentationHandler(
     }
     if (error instanceof MaxConcurrentPresentationsError) {
       return { status: 429, body: { error: error.message } }
+    }
+    if (error instanceof InvalidLivekitCredentialsError) {
+      return { status: 401, body: { error: 'Invalid LiveKit credentials' } }
     }
     logger.error(`Failed to create presentation: ${error instanceof Error ? error.message : String(error)}`)
     return { status: 500, body: { error: 'Internal error' } }

@@ -1,4 +1,8 @@
-import { PresentationNotFoundError, createPresentationManager } from '../../src/logic/presentation-manager'
+import {
+  InvalidLivekitCredentialsError,
+  PresentationNotFoundError,
+  createPresentationManager
+} from '../../src/logic/presentation-manager'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 import type { IPdfRenderer } from '../../src/adapters/pdf-renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
@@ -96,6 +100,45 @@ async function createManagerWithSession(components: ReturnType<typeof createMock
   )
   return { manager, info }
 }
+
+describe('when pre-validating LiveKit credentials', () => {
+  let components: ReturnType<typeof createMockComponents>
+  let publisher: jest.Mocked<ILiveKitPublisher>
+
+  describe('and the connect succeeds', () => {
+    beforeEach(() => {
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+    })
+
+    it('should resolve and disconnect the throw-away publisher', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+      await expect(manager.validateCredentials('wss://lk.example.com', 'good-token')).resolves.toBeUndefined()
+      expect(publisher.connect).toHaveBeenCalledWith('wss://lk.example.com', 'good-token')
+      expect(publisher.disconnect).toHaveBeenCalled()
+    })
+  })
+
+  describe('and the connect rejects', () => {
+    beforeEach(() => {
+      publisher = createMockPublisher()
+      publisher.connect.mockRejectedValue(new Error('token rejected'))
+      components = createMockComponents({ publisher })
+    })
+
+    it('should throw InvalidLivekitCredentialsError and still disconnect', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+      await expect(manager.validateCredentials('wss://lk.example.com', 'bad-token')).rejects.toBeInstanceOf(
+        InvalidLivekitCredentialsError
+      )
+      expect(publisher.disconnect).toHaveBeenCalled()
+    })
+  })
+})
 
 describe('when creating a presentation', () => {
   let components: ReturnType<typeof createMockComponents>

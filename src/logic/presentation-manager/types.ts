@@ -47,6 +47,16 @@ export interface PresentationState {
  */
 export interface IPresentationManager extends IBaseComponent {
   /**
+   * Verifies a LiveKit token by opening and closing a throwaway connection.
+   *
+   * Meant for pre-flight checks so we can reject bogus credentials before
+   * running expensive work (e.g. downloading a user-supplied URL).
+   *
+   * @throws {InvalidLivekitCredentialsError} When the token is rejected by the room
+   */
+  validateCredentials(livekitUrl: string, livekitToken: string): Promise<void>
+
+  /**
    * Creates a new presentation session from a file buffer.
    *
    * Connects to LiveKit first (fail-fast auth), then renders the PDF,

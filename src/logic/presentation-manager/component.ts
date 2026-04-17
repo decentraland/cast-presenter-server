@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
-import { MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
@@ -111,6 +111,22 @@ export async function createPresentationManager(
           logger.warn(`Failed to stop idle session ${id}: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+    }
+  }
+
+  async function validateCredentials(livekitUrl: string, livekitToken: string): Promise<void> {
+    // Throw-away publisher connects and disconnects immediately. Used to
+    // pre-flight bogus tokens before expensive work (e.g. fetching a
+    // user-supplied URL that could be 100 MB).
+    const publisher = liveKitPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
+    try {
+      await publisher.connect(livekitUrl, livekitToken)
+    } catch (err) {
+      throw new InvalidLivekitCredentialsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      await publisher.disconnect().catch(() => {
+        /* best-effort cleanup */
+      })
     }
   }
 
@@ -808,6 +824,7 @@ export async function createPresentationManager(
   }
 
   return {
+    validateCredentials,
     createPresentation,
     navigate,
     getState,

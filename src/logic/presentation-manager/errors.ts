@@ -11,3 +11,10 @@ export class MaxConcurrentPresentationsError extends Error {
     this.name = 'MaxConcurrentPresentationsError'
   }
 }
+
+export class InvalidLivekitCredentialsError extends Error {
+  constructor(message = 'Invalid LiveKit credentials') {
+    super(message)
+    this.name = 'InvalidLivekitCredentialsError'
+  }
+}

@@ -1,6 +1,7 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
+import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'
 import { createMockLogger } from '../mocks/context'
 
 function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
@@ -17,8 +18,11 @@ function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
   }
 }
 
-function createMockPresentationManager() {
+function createMockPresentationManager(overrides?: { validateCredentialsError?: Error }) {
   return {
+    validateCredentials: jest.fn().mockImplementation(async () => {
+      if (overrides?.validateCredentialsError) throw overrides.validateCredentialsError
+    }),
     createPresentation: jest.fn().mockResolvedValue({
       id: 'test-id',
       fileName: 'test',
@@ -29,7 +33,10 @@ function createMockPresentationManager() {
   }
 }
 
-function createJsonContext(body: Record<string, unknown>, overrides?: { fromUrlError?: Error }) {
+function createJsonContext(
+  body: Record<string, unknown>,
+  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error }
+) {
   const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
   return {
     request: {
@@ -43,7 +50,7 @@ function createJsonContext(body: Record<string, unknown>, overrides?: { fromUrlE
     },
     components: {
       logs: createMockLogger(),
-      presentationManager: createMockPresentationManager(),
+      presentationManager: createMockPresentationManager(overrides),
       fileProvider: createMockFileProvider(overrides)
     }
   } as unknown as Parameters<typeof createPresentationHandler>[0]
@@ -283,6 +290,26 @@ describe('when handling a create presentation request', () => {
 
       it('should return status 400', () => {
         expect(result.status).toBe(400)
+      })
+    })
+
+    describe('and the LiveKit credentials fail pre-validation', () => {
+      const context = createJsonContext(
+        { url: 'https://example.com/file.pdf', livekitToken: 'bad', livekitUrl: 'wss://lk.example.com' },
+        { validateCredentialsError: new InvalidLivekitCredentialsError('token rejected') }
+      )
+
+      beforeEach(async () => {
+        result = await createPresentationHandler(context)
+      })
+
+      it('should return status 401', () => {
+        expect(result.status).toBe(401)
+      })
+
+      it('should not trigger the URL download', () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((context.components.fileProvider as any).fromUrl).not.toHaveBeenCalled()
       })
     })
 
