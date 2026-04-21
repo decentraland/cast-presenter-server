@@ -29,7 +29,7 @@
     "nano-staged": "^1.0.2",
     "nodemon": "^3.1.10",
     "simple-git-hooks": "^2.13.1",
-    "ts-jest": "^29.4.5",
+    "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3"
   },
