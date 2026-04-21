@@ -27,6 +27,20 @@ export interface VideoDownloadResult {
   bytes: number
 }
 
+/**
+ * Reasons the compositor may abort playback. Distinct from the
+ * presentation-manager's broader `VideoErrorCode` (which also covers
+ * pre-playback failures like quota/HTTP errors) — this is the compositor's
+ * own failure vocabulary, kept here so the contract stays self-describing.
+ */
+export type CompositorErrorReason =
+  /** FFmpeg composite process exited with a non-zero code mid-stream. */
+  | 'video-playback-interrupted'
+  /** A composite stdio stream emitted an 'error' event (typically EPIPE). */
+  | 'video-stream-error'
+  /** The session-supplied onAudioData callback threw synchronously. */
+  | 'audio-processing-failed'
+
 export interface IVideoCompositor {
   /**
    * Downloads a video to disk. If `signal` aborts, the in-flight HTTPS request
@@ -43,7 +57,21 @@ export interface IVideoCompositor {
     onAudioData?: (pcmChunk: Buffer) => void,
     seekSeconds?: number
   ): Promise<void>
+  /**
+   * Registers a callback for natural end-of-stream (FFmpeg exit code 0).
+   * Register-once per compositor instance: a second registration replaces the
+   * first and the original closure becomes unreachable. Fires at most once.
+   */
   onEnd(callback: () => void): void
+  /**
+   * Registers a callback for unrecoverable mid-stream failures. Before firing,
+   * the compositor calls `stopPlayback` internally — FFmpeg processes are
+   * killed and the slide heartbeat is restored. The callback's job is to
+   * reset session state (videoState='error', drop the compositor reference)
+   * and notify clients. Full teardown of latches/listeners still requires the
+   * session to call `cleanup()`. Same register-once semantics as `onEnd`.
+   */
+  onError(callback: (reason: CompositorErrorReason) => void): void
   getIsPlaying(): boolean
   getLastFrame(): VideoFrameSnapshot | null
   cleanup(): void

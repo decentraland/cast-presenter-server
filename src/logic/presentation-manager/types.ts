@@ -35,7 +35,14 @@ export interface PresentationState {
   fileType: 'pdf' | 'pptx'
   slideVideos: SlideVideoInfo[]
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
+  /** Human-readable error message; present only when videoState === 'error'. */
   videoErrorReason?: string
+  /**
+   * Stable error code mirroring `presentation:error.code`. Present only when
+   * videoState === 'error'. Lets reconnecting clients branch on the failure
+   * type without having had to catch the transient `presentation:error`.
+   */
+  videoErrorCode?: string
 }
 
 /**

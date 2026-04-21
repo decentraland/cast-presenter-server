@@ -168,3 +168,129 @@ describe('video-compositor onEnd latch', () => {
     })
   })
 })
+
+describe('video-compositor error isolation', () => {
+  let tempDir: string
+  let compositor: IVideoCompositor
+  let publisher: ILiveKitPublisher
+
+  beforeEach(() => {
+    fakeProcesses.length = 0
+    spawnMock.mockImplementation(() => {
+      const fake = new FakeChildProcess()
+      fakeProcesses.push(fake)
+      return fake
+    })
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compositor-spec-err-'))
+    const component = createVideoCompositorComponent({ networkValidator: createNetworkValidatorStub() })
+    compositor = component.createCompositor(createLogger(), tempDir)
+    publisher = createPublisherStub()
+  })
+
+  afterEach(() => {
+    compositor.cleanup()
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+  })
+
+  describe('when the composite process exits with a non-zero code mid-stream', () => {
+    it('should fire onError (not onEnd) with code video-playback-interrupted', async () => {
+      await compositor.startPlayback('/tmp/nonexistent.mp4', VIDEO_INFO, SLIDE_BUFFER, SLIDE_W, SLIDE_H, publisher)
+      const onEnd = jest.fn()
+      const onError = jest.fn()
+      compositor.onEnd(onEnd)
+      compositor.onError(onError)
+
+      fakeProcesses[0].simulateClose(1)
+      await flushMicrotasks()
+
+      expect(onEnd).not.toHaveBeenCalled()
+      expect(onError).toHaveBeenCalledWith('video-playback-interrupted')
+    })
+  })
+
+  describe('when onAudioData throws inside the stdout data handler', () => {
+    it('should swallow the throw, stop playback, and fire onError(audio-processing-failed)', async () => {
+      const throwingOnAudio = jest.fn(() => {
+        throw new RangeError('simulated buffer overflow')
+      })
+      await compositor.startPlayback(
+        '/tmp/nonexistent.mp4',
+        VIDEO_INFO,
+        SLIDE_BUFFER,
+        SLIDE_W,
+        SLIDE_H,
+        publisher,
+        throwingOnAudio
+      )
+      const onError = jest.fn()
+      compositor.onError(onError)
+
+      // fakeProcesses[0] = composite, fakeProcesses[1] = audio
+      const audioProc = fakeProcesses[1]
+      // Must not throw out of the event emitter — this is the crash-fix assertion.
+      expect(() => audioProc.stdout.emit('data', Buffer.alloc(1920))).not.toThrow()
+      await flushMicrotasks()
+
+      expect(throwingOnAudio).toHaveBeenCalledTimes(1)
+      expect(onError).toHaveBeenCalledWith('audio-processing-failed')
+    })
+  })
+
+  describe('when a stdio stream emits an error event', () => {
+    it('should not propagate a composite stderr error as an uncaught exception', async () => {
+      await compositor.startPlayback('/tmp/nonexistent.mp4', VIDEO_INFO, SLIDE_BUFFER, SLIDE_W, SLIDE_H, publisher)
+      const onError = jest.fn()
+      compositor.onError(onError)
+
+      const compositeProc = fakeProcesses[0]
+      // If no error listener were attached, this would throw synchronously.
+      expect(() => compositeProc.stderr.emit('error', new Error('EPIPE'))).not.toThrow()
+      await flushMicrotasks()
+
+      expect(onError).toHaveBeenCalledWith('video-stream-error')
+    })
+
+    it('should not propagate an audio stderr error', async () => {
+      const onAudioData = jest.fn()
+      await compositor.startPlayback(
+        '/tmp/nonexistent.mp4',
+        VIDEO_INFO,
+        SLIDE_BUFFER,
+        SLIDE_W,
+        SLIDE_H,
+        publisher,
+        onAudioData
+      )
+      const audioProc = fakeProcesses[1]
+      expect(() => audioProc.stderr.emit('error', new Error('EPIPE'))).not.toThrow()
+    })
+  })
+
+  describe('onError latch', () => {
+    it('should replay the latched reason when onError is registered after the event', async () => {
+      await compositor.startPlayback('/tmp/nonexistent.mp4', VIDEO_INFO, SLIDE_BUFFER, SLIDE_W, SLIDE_H, publisher)
+      fakeProcesses[0].simulateClose(1)
+
+      const cb = jest.fn()
+      compositor.onError(cb)
+      await flushMicrotasks()
+      expect(cb).toHaveBeenCalledWith('video-playback-interrupted')
+    })
+
+    it('should not fire if cleanup() runs before onError is registered', async () => {
+      await compositor.startPlayback('/tmp/nonexistent.mp4', VIDEO_INFO, SLIDE_BUFFER, SLIDE_W, SLIDE_H, publisher)
+      fakeProcesses[0].simulateClose(1)
+      compositor.cleanup()
+
+      const cb = jest.fn()
+      compositor.onError(cb)
+      await flushMicrotasks()
+      expect(cb).not.toHaveBeenCalled()
+    })
+  })
+})

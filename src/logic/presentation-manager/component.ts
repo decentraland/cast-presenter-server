@@ -7,7 +7,7 @@ import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, Presen
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
-import type { IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
@@ -38,6 +38,7 @@ interface InternalSession extends PresentationSession {
   pausedVideoIndex: number
   stoppingPromise: Promise<void> | null
   videoErrorReason: string | null
+  videoErrorCode: VideoErrorCode | null
   preDownloadTimer: ReturnType<typeof setTimeout> | null
   // Signalled when the session stops; cancels in-flight downloads so we don't
   // race with tempDir cleanup or write to a deleted directory.
@@ -47,21 +48,71 @@ interface InternalSession extends PresentationSession {
   bytesDownloaded: number
 }
 
-/** Maps download/playback errors to user-friendly reasons. */
-function classifyVideoError(err: Error): string {
+/**
+ * Codes for failures detected by the presentation-manager itself (download,
+ * permissions, quota, etc.). Combined below with the compositor's own
+ * `CompositorErrorReason` to form the union broadcast in
+ * `presentation:error.code`.
+ */
+type ManagerVideoErrorCode =
+  | 'video-quota-exceeded'
+  | 'video-permission-denied'
+  | 'video-not-found'
+  | 'video-server-error'
+  | 'video-timeout'
+  | 'video-too-large'
+  | 'video-too-many-redirects'
+  | 'video-invalid-format'
+  | 'video-playback-failed'
+
+export type VideoErrorCode = ManagerVideoErrorCode | CompositorErrorReason
+
+export interface VideoErrorInfo {
+  code: VideoErrorCode
+  message: string
+}
+
+/** User-facing messages for failures the compositor reports mid-stream. */
+const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
+  'video-playback-interrupted': 'Video playback was interrupted — the stream ended unexpectedly',
+  'video-stream-error': 'Video playback failed — a stream error stopped the video',
+  'audio-processing-failed': 'Audio processing failed during playback'
+}
+
+/** Maps download/playback errors to a stable code + user-friendly reason. */
+function classifyVideoError(err: Error): VideoErrorInfo {
   if (err instanceof SessionDiskQuotaExceededError) {
-    return 'Presentation has exceeded its video disk budget — stop other videos or restart the session'
+    return {
+      code: 'video-quota-exceeded',
+      message: 'Presentation has exceeded its video disk budget — stop other videos or restart the session'
+    }
   }
   const msg = err.message
-  if (/HTTP 40[13]/.test(msg)) return 'Video not authorized — check sharing permissions'
-  if (/HTTP 404/.test(msg)) return 'Video not found or no longer available'
-  if (/HTTP [45]\d\d/.test(msg)) return 'Video server error — try again later'
-  if (/timed out/i.test(msg)) return 'Video download timed out — file may be too large'
-  if (/exceeds.*limit/i.test(msg)) return 'Video exceeds maximum size limit'
-  if (/too many redirects/i.test(msg)) return 'Video URL has too many redirects'
-  if (/too small/i.test(msg)) return 'File is not a valid video'
-  if (/remux failed/i.test(msg)) return 'Video format is not supported'
-  return 'Video unavailable'
+  if (/HTTP 40[13]/.test(msg)) {
+    return { code: 'video-permission-denied', message: 'Video not authorized — check sharing permissions' }
+  }
+  if (/HTTP 404/.test(msg)) {
+    return { code: 'video-not-found', message: 'Video not found or no longer available' }
+  }
+  if (/HTTP [45]\d\d/.test(msg)) {
+    return { code: 'video-server-error', message: 'Video server error — try again later' }
+  }
+  if (/timed out/i.test(msg)) {
+    return { code: 'video-timeout', message: 'Video download timed out — file may be too large' }
+  }
+  if (/exceeds.*limit/i.test(msg)) {
+    return { code: 'video-too-large', message: 'Video exceeds maximum size limit' }
+  }
+  if (/too many redirects/i.test(msg)) {
+    return { code: 'video-too-many-redirects', message: 'Video URL has too many redirects' }
+  }
+  if (/too small/i.test(msg) || /remux failed/i.test(msg) || /invalid data/i.test(msg)) {
+    return {
+      code: 'video-invalid-format',
+      message: 'Video format is not supported — the file may be private or require authentication'
+    }
+  }
+  return { code: 'video-playback-failed', message: 'Video unavailable' }
 }
 
 /**
@@ -144,6 +195,31 @@ export async function createPresentationManager(
       await session.publisher.updateMetadataState(state)
     } catch (err) {
       logger.warn(`Failed to update metadata: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /**
+   * Sends a transient error event over the LiveKit data channel. Separate from
+   * `presentation:state` so clients can react to *this* failure (e.g. toast)
+   * without having to diff state, and so repeated failures can be surfaced even
+   * if state is otherwise unchanged.
+   */
+  async function broadcastError(
+    session: InternalSession,
+    code: VideoErrorCode,
+    message: string,
+    context?: { videoIndex?: number; videoUrl?: string }
+  ): Promise<void> {
+    try {
+      await session.publisher.publishData({
+        type: 'presentation:error',
+        code,
+        message,
+        ...(context?.videoIndex !== undefined ? { videoIndex: context.videoIndex } : {}),
+        ...(context?.videoUrl !== undefined ? { videoUrl: context.videoUrl } : {})
+      })
+    } catch (err) {
+      logger.warn(`Failed to broadcast error: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -264,6 +340,7 @@ export async function createPresentationManager(
         lastActivityAt: Date.now(),
         stoppingPromise: null,
         videoErrorReason: null,
+        videoErrorCode: null,
         preDownloadTimer: null,
         abortController: new AbortController(),
         bytesDownloaded: 0
@@ -478,6 +555,7 @@ export async function createPresentationManager(
     const requestedSlide = session.currentSlide
     session.videoState = 'loading'
     session.videoErrorReason = null
+    session.videoErrorCode = null
     await broadcastState(session)
 
     if (session.compositor) {
@@ -493,7 +571,10 @@ export async function createPresentationManager(
       if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
         compositor.cleanup()
         session.videoState = 'error'
-        session.videoErrorReason = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
+        const info = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
+        session.videoErrorCode = info.code
+        session.videoErrorReason = info.message
+        await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
         await broadcastState(session)
         logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
         return
@@ -517,7 +598,10 @@ export async function createPresentationManager(
         compositor.cleanup()
         if (session.abortController.signal.aborted) return
         session.videoState = 'error'
-        session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
+        const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
+        session.videoErrorCode = info.code
+        session.videoErrorReason = info.message
+        await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
         await broadcastState(session)
         logger.warn(`Video download failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -569,51 +653,42 @@ export async function createPresentationManager(
     }
 
     // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
-    // Prevents overfilling AudioSource's internal buffer which causes tail latency on pause
+    // Prevents overfilling AudioSource's internal buffer which causes tail latency on pause.
+    // Residual holds the sub-frame leftover between data events; each event appends
+    // the new chunk, drains whole frames, and keeps the tail. Simpler than ring
+    // accounting — avoids the write-past-capacity drift that a fixed ring hit when
+    // FFmpeg bursts a chunk larger than the buffer's free space.
     const AUDIO_FRAME_BYTES = 1920
-    const MAX_AUDIO_REMAINDER = AUDIO_FRAME_BYTES * 4
-    // Pre-sized ring-style buffer: holds up to MAX_AUDIO_REMAINDER of leftover bytes
-    // plus one typical FFmpeg chunk (~16 KB observed). Sized generously; never grows.
-    const AUDIO_BUFFER_BYTES = MAX_AUDIO_REMAINDER + 32 * 1024
-    const audioBuf = Buffer.allocUnsafe(AUDIO_BUFFER_BYTES)
-    let audioRead = 0
-    let audioWrite = 0
+    let audioResidual: Buffer = Buffer.alloc(0)
 
     const onAudioData = (pcmChunk: Buffer) => {
-      // Make room at the tail by shifting unread bytes to index 0 when needed.
-      if (audioWrite + pcmChunk.length > AUDIO_BUFFER_BYTES) {
-        const unread = audioWrite - audioRead
-        if (unread > 0 && audioRead > 0) audioBuf.copy(audioBuf, 0, audioRead, audioWrite)
-        audioRead = 0
-        audioWrite = unread
-        // Should never happen with the sizing above, but cap the backlog just in case
-        if (audioWrite + pcmChunk.length > AUDIO_BUFFER_BYTES) {
-          // Drop the oldest MAX_AUDIO_REMAINDER worth of bytes, same behavior as the
-          // previous subarray-trim fallback.
-          const drop = audioWrite - MAX_AUDIO_REMAINDER
-          if (drop > 0) {
-            audioBuf.copy(audioBuf, 0, drop, audioWrite)
-            audioWrite -= drop
-          }
-        }
-      }
-
-      pcmChunk.copy(audioBuf, audioWrite)
-      audioWrite += pcmChunk.length
-
-      while (audioWrite - audioRead >= AUDIO_FRAME_BYTES) {
-        // Use Buffer.alloc for dedicated ArrayBuffer with guaranteed 2-byte alignment
-        // (Buffer pool may have odd byteOffset which breaks Int16Array)
+      // Avoid copying when no residual is held — the common steady-state case.
+      // Buffer.concat produces a fresh buffer; the no-residual branch reuses
+      // pcmChunk directly. The subarray() result below would alias pcmChunk
+      // in that branch, so when we keep a residual that came from pcmChunk,
+      // copy it to detach from the underlying stdout buffer (Node delivers a
+      // fresh chunk per 'data' event today, but don't depend on that).
+      const concatenated = audioResidual.length === 0 ? null : Buffer.concat([audioResidual, pcmChunk])
+      const source = concatenated ?? pcmChunk
+      let offset = 0
+      while (source.length - offset >= AUDIO_FRAME_BYTES) {
+        // Buffer.alloc gives a dedicated ArrayBuffer with 2-byte alignment
+        // (Buffer pool may have odd byteOffset which breaks Int16Array).
         const frame = Buffer.alloc(AUDIO_FRAME_BYTES)
-        audioBuf.copy(frame, 0, audioRead, audioRead + AUDIO_FRAME_BYTES)
+        source.copy(frame, 0, offset, offset + AUDIO_FRAME_BYTES)
         const int16 = new Int16Array(frame.buffer, 0, AUDIO_FRAME_BYTES / 2)
         session.publisher.pushAudioFrame(int16, 48000, 2, 480)
-        audioRead += AUDIO_FRAME_BYTES
+        offset += AUDIO_FRAME_BYTES
       }
-
-      if (audioRead === audioWrite) {
-        audioRead = 0
-        audioWrite = 0
+      if (offset === source.length) {
+        audioResidual = Buffer.alloc(0)
+      } else if (concatenated) {
+        // Safe to subarray — `concatenated` is owned by us.
+        audioResidual = concatenated.subarray(offset)
+      } else {
+        // Detach from pcmChunk so retaining the residual doesn't pin the
+        // underlying stdout backing buffer.
+        audioResidual = Buffer.from(pcmChunk.subarray(offset))
       }
     }
 
@@ -639,10 +714,13 @@ export async function createPresentationManager(
       compositor.cleanup()
       session.compositor = null
       session.videoState = 'error'
-      session.videoErrorReason = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
+      const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
+      session.videoErrorCode = info.code
+      session.videoErrorReason = info.message
       await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
+      await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
       await broadcastState(session)
       throw err
     }
@@ -674,6 +752,25 @@ export async function createPresentationManager(
         /* noop */
       })
       logger.info(`Video ended naturally for presentation ${session.id}`)
+    })
+
+    compositor.onError(async (reason) => {
+      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      const message = COMPOSITOR_ERROR_MESSAGES[reason]
+      session.videoState = 'error'
+      session.videoErrorCode = reason
+      session.videoErrorReason = message
+      // Full teardown — clears latches/listeners and unlinks the slide temp file.
+      // The compositor's internal stopPlayback already killed FFmpeg, but cleanup
+      // is the documented session-side counterpart that releases the rest.
+      endedCompositor.cleanup()
+      session.compositor = null
+      await session.publisher.stopAudioPublishing().catch(() => {
+        /* noop */
+      })
+      await broadcastError(session, reason, message, { videoIndex, videoUrl: videoInfo.url })
+      await broadcastState(session)
+      logger.warn(`Video playback interrupted for presentation ${session.id}: ${reason}`)
     })
 
     metrics.increment('video_playback_total', { action: 'play' })
@@ -800,7 +897,8 @@ export async function createPresentationManager(
       videoState: session.videoState,
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
-        : {})
+        : {}),
+      ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {})
     }
   }
 
