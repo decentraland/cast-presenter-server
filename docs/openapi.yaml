@@ -59,11 +59,17 @@ paths:
       summary: Create a presentation
       description: |
         Creates a presentation from a file upload (`multipart/form-data`)
-        or a public URL (`application/json`). The server connects to
-        the LiveKit room first to validate the token, then renders the
-        first slide and begins publishing a video track. On success,
+        or a public URL (`application/json`). The server verifies the
+        LiveKit JWT (HMAC-SHA256 against `LIVEKIT_API_SECRET`), derives
+        the target room from the token's `video.room` grant, reserves
+        the room (one presentation per room), then connects to the
+        server-configured LiveKit host (`LIVEKIT_HOST`), renders the
+        first slide, and begins publishing a video track. On success,
         all subsequent control (navigate, play, pause, stop) happens
         over the LiveKit data channel — there is no further HTTP.
+
+        The LiveKit server URL is never accepted from the client — it
+        is configured on the server to prevent SSRF.
 
         Body size limits: the multipart request must be ≤100 MB; the
         JSON request must be ≤1 MB (the downloaded file itself may be
@@ -76,7 +82,7 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file, livekitToken, livekitUrl]
+              required: [file, livekitToken]
               properties:
                 file:
                   type: string
@@ -84,14 +90,15 @@ paths:
                   description: PDF or PPTX file (max 100 MB)
                 livekitToken:
                   type: string
-                  description: LiveKit JWT issued by comms-gatekeeper
-                livekitUrl:
-                  type: string
-                  description: LiveKit server WebSocket URL (must be `wss://`)
+                  description: >
+                    LiveKit JWT (HS256). Must be signed with
+                    `LIVEKIT_API_SECRET`, issued by `LIVEKIT_API_KEY`,
+                    and carry a `video.room` grant identifying the
+                    target room.
           application/json:
             schema:
               type: object
-              required: [url, livekitToken, livekitUrl]
+              required: [url, livekitToken]
               properties:
                 url:
                   type: string
@@ -103,10 +110,11 @@ paths:
                     are blocked via SSRF protection.
                 livekitToken:
                   type: string
-                  description: LiveKit JWT issued by comms-gatekeeper
-                livekitUrl:
-                  type: string
-                  description: LiveKit server WebSocket URL (must be `wss://`)
+                  description: >
+                    LiveKit JWT (HS256). Must be signed with
+                    `LIVEKIT_API_SECRET`, issued by `LIVEKIT_API_KEY`,
+                    and carry a `video.room` grant identifying the
+                    target room.
       responses:
         "201":
           description: Presentation created
@@ -116,8 +124,26 @@ paths:
                 $ref: "#/components/schemas/PresentationInfo"
         "400":
           description: >
-            Invalid content type, missing fields, invalid LiveKit URL,
-            bad file magic bytes, or unsupported file type.
+            Invalid content type, missing fields, bad file magic bytes,
+            or unsupported file type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            LiveKit token is missing, malformed, has an invalid
+            signature, is expired, or is missing required claims
+            (`video.room`, `sub`, issuer match).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            The target room (from the token's `video.room` grant) is
+            already hosting a presentation. Stop the existing one
+            before starting a new one.
           content:
             application/json:
               schema:
@@ -129,7 +155,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "429":
-          description: Maximum concurrent presentations reached
+          description: Maximum concurrent presentations reached (global cap)
           content:
             application/json:
               schema:

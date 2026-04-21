@@ -55,34 +55,36 @@ export interface PresentationState {
  */
 export interface IPresentationManager extends IBaseComponent {
   /**
-   * Verifies a LiveKit token by opening and closing a throwaway connection.
+   * Verifies a LiveKit token by opening and closing a throwaway connection to
+   * the server-configured LiveKit host.
    *
    * Meant for pre-flight checks so we can reject bogus credentials before
    * running expensive work (e.g. downloading a user-supplied URL).
    *
    * @throws {InvalidLivekitCredentialsError} When the token is rejected by the room
    */
-  validateCredentials(livekitUrl: string, livekitToken: string): Promise<void>
+  validateCredentials(livekitToken: string): Promise<void>
 
   /**
    * Creates a new presentation session from a file buffer.
    *
-   * Connects to LiveKit first (fail-fast auth), then renders the PDF,
-   * publishes the first slide, and starts the heartbeat.
+   * Verifies the JWT server-side, reserves the target room (one presentation
+   * per room), then connects to the server-configured LiveKit host, renders
+   * the PDF, publishes the first slide, and starts the heartbeat.
    *
    * @param fileBuffer - Raw bytes of the PDF or PPTX file
    * @param fileType - Detected file format
    * @param livekitToken - Authentication token for the LiveKit room
-   * @param livekitUrl - WebSocket URL of the LiveKit server
    * @param fileName - Optional display name for the presentation
    * @returns Metadata about the created presentation
-   * @throws {MaxConcurrentPresentationsError} When the session limit is reached
+   * @throws {InvalidTokenError} When the JWT signature, claims, or grants are invalid
+   * @throws {RoomAlreadyPresentingError} When the token's room already has an active presentation
+   * @throws {MaxConcurrentPresentationsError} When the global session limit is reached
    */
   createPresentation(
     fileBuffer: Buffer,
     fileType: FileType,
     livekitToken: string,
-    livekitUrl: string,
     fileName?: string
   ): Promise<PresentationInfo>
 

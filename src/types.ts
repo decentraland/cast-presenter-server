@@ -11,6 +11,7 @@ import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
 import type { IRendererComponent } from './adapters/pdf-renderer'
 import type { IVideoCompositorComponent } from './adapters/video-compositor'
+import type { ILiveKitTokenVerifier } from './logic/livekit-token-verifier'
 import type { INetworkValidatorComponent } from './logic/network-validator'
 import type { IPresentationManager } from './logic/presentation-manager'
 import type { metricDeclarations } from './metrics'
@@ -30,6 +31,7 @@ export interface BaseComponents {
   googleDrive: IGoogleDriveComponent
   fileProvider: IFileProviderComponent
   liveKitPublisher: ILiveKitPublisherComponent
+  liveKitTokenVerifier: ILiveKitTokenVerifier
   pdfRenderer: IRendererComponent
   pptxRenderer: IRendererComponent
   videoCompositor: IVideoCompositorComponent

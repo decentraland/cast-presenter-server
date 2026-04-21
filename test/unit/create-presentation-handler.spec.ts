@@ -1,7 +1,12 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
-import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'
+import { InvalidTokenError } from '../../src/logic/livekit-token-verifier'
+import {
+  InvalidLivekitCredentialsError,
+  MaxConcurrentPresentationsError,
+  RoomAlreadyPresentingError
+} from '../../src/logic/presentation-manager'
 import { createMockLogger } from '../mocks/context'
 
 function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
@@ -13,29 +18,35 @@ function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
     fromMultipart: jest.fn().mockResolvedValue({
       buffer: Buffer.from('%PDF-1.7'),
       filename: 'test.pdf',
-      fields: { livekitToken: 'token', livekitUrl: 'wss://lk.example.com' }
+      fields: { livekitToken: 'token' }
     })
   }
 }
 
-function createMockPresentationManager(overrides?: { validateCredentialsError?: Error }) {
+function createMockPresentationManager(overrides?: {
+  validateCredentialsError?: Error
+  createPresentationError?: Error
+}) {
   return {
     validateCredentials: jest.fn().mockImplementation(async () => {
       if (overrides?.validateCredentialsError) throw overrides.validateCredentialsError
     }),
-    createPresentation: jest.fn().mockResolvedValue({
-      id: 'test-id',
-      fileName: 'test',
-      slideCount: 1,
-      currentSlide: 0,
-      fileType: 'pdf' as const
+    createPresentation: jest.fn().mockImplementation(async () => {
+      if (overrides?.createPresentationError) throw overrides.createPresentationError
+      return {
+        id: 'test-id',
+        fileName: 'test',
+        slideCount: 1,
+        currentSlide: 0,
+        fileType: 'pdf' as const
+      }
     })
   }
 }
 
 function createJsonContext(
   body: Record<string, unknown>,
-  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error }
+  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error; createPresentationError?: Error }
 ) {
   const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
   return {
@@ -99,7 +110,6 @@ function createOversizedJsonContext(bodySize: number) {
   const body = {
     url: 'https://example.com/f.pdf',
     livekitToken: 't',
-    livekitUrl: 'wss://lk.example.com',
     pad: 'x'.repeat(bodySize)
   }
   const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
@@ -141,9 +151,7 @@ describe('when handling a create presentation request', () => {
   describe('and the request is JSON-based', () => {
     describe('and the url field is missing', () => {
       beforeEach(async () => {
-        result = await createPresentationHandler(
-          createJsonContext({ livekitToken: 't', livekitUrl: 'wss://lk.example.com' })
-        )
+        result = await createPresentationHandler(createJsonContext({ livekitToken: 't' }))
       })
 
       it('should return status 400', () => {
@@ -173,7 +181,7 @@ describe('when handling a create presentation request', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
           createJsonContext(
-            { url: 'http://example.com/file.pdf', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
+            { url: 'http://example.com/file.pdf', livekitToken: 't' },
             { fromUrlError: new InvalidUrlError('URL must use HTTPS') }
           )
         )
@@ -192,7 +200,7 @@ describe('when handling a create presentation request', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
           createJsonContext(
-            { url: 'not-a-url', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
+            { url: 'not-a-url', livekitToken: 't' },
             { fromUrlError: new InvalidUrlError('Invalid URL: not-a-url') }
           )
         )
@@ -223,9 +231,7 @@ describe('when handling a create presentation request', () => {
 
     describe('and the url field is a non-string value', () => {
       beforeEach(async () => {
-        result = await createPresentationHandler(
-          createJsonContext({ url: 123, livekitToken: 't', livekitUrl: 'wss://lk.example.com' })
-        )
+        result = await createPresentationHandler(createJsonContext({ url: 123, livekitToken: 't' }))
       })
 
       it('should return status 400', () => {
@@ -240,11 +246,7 @@ describe('when handling a create presentation request', () => {
     describe('and the livekitToken field is a non-string value', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
-          createJsonContext({
-            url: 'https://example.com/file.pdf',
-            livekitToken: true,
-            livekitUrl: 'wss://lk.example.com'
-          })
+          createJsonContext({ url: 'https://example.com/file.pdf', livekitToken: true })
         )
       })
 
@@ -257,45 +259,9 @@ describe('when handling a create presentation request', () => {
       })
     })
 
-    describe('and the livekitUrl uses ws:// instead of wss://', () => {
-      beforeEach(async () => {
-        result = await createPresentationHandler(
-          createJsonContext({
-            url: 'https://example.com/file.pdf',
-            livekitToken: 't',
-            livekitUrl: 'ws://lk.example.com'
-          })
-        )
-      })
-
-      it('should return status 400', () => {
-        expect(result.status).toBe(400)
-      })
-
-      it('should return an error message about wss:// protocol', () => {
-        expect((result.body as Record<string, string>).error).toContain('wss://')
-      })
-    })
-
-    describe('and the livekitUrl uses https:// instead of wss://', () => {
-      beforeEach(async () => {
-        result = await createPresentationHandler(
-          createJsonContext({
-            url: 'https://example.com/file.pdf',
-            livekitToken: 't',
-            livekitUrl: 'https://lk.example.com'
-          })
-        )
-      })
-
-      it('should return status 400', () => {
-        expect(result.status).toBe(400)
-      })
-    })
-
     describe('and the LiveKit credentials fail pre-validation', () => {
       const context = createJsonContext(
-        { url: 'https://example.com/file.pdf', livekitToken: 'bad', livekitUrl: 'wss://lk.example.com' },
+        { url: 'https://example.com/file.pdf', livekitToken: 'bad' },
         { validateCredentialsError: new InvalidLivekitCredentialsError('token rejected') }
       )
 
@@ -310,6 +276,59 @@ describe('when handling a create presentation request', () => {
       it('should not trigger the URL download', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((context.components.fileProvider as any).fromUrl).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('and the JWT signature is invalid', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 'forged' },
+            { createPresentationError: new InvalidTokenError() }
+          )
+        )
+      })
+
+      it('should return status 401', () => {
+        expect(result.status).toBe(401)
+      })
+
+      it('should return an error message mentioning the token', () => {
+        expect((result.body as Record<string, string>).error).toContain('token')
+      })
+    })
+
+    describe('and the target room already has an active presentation', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 't' },
+            { createPresentationError: new RoomAlreadyPresentingError('room-42') }
+          )
+        )
+      })
+
+      it('should return status 409', () => {
+        expect(result.status).toBe(409)
+      })
+
+      it('should return an error message naming the room', () => {
+        expect((result.body as Record<string, string>).error).toContain('room-42')
+      })
+    })
+
+    describe('and the global concurrent limit is reached', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 't' },
+            { createPresentationError: new MaxConcurrentPresentationsError(5) }
+          )
+        )
+      })
+
+      it('should return status 429', () => {
+        expect(result.status).toBe(429)
       })
     })
 
@@ -369,19 +388,26 @@ describe('when handling a create presentation request', () => {
       })
     })
 
-    describe('and the livekitUrl is malformed', () => {
+    describe('and every required field is present and valid', () => {
+      const context = createJsonContext({ url: 'https://example.com/file.pdf', livekitToken: 't' })
+
       beforeEach(async () => {
-        result = await createPresentationHandler(
-          createJsonContext({ url: 'https://example.com/file.pdf', livekitToken: 't', livekitUrl: 'not-a-url' })
-        )
+        result = await createPresentationHandler(context)
       })
 
-      it('should return status 400', () => {
-        expect(result.status).toBe(400)
+      it('should return status 201', () => {
+        expect(result.status).toBe(201)
       })
 
-      it('should return an error message about invalid URL', () => {
-        expect((result.body as Record<string, string>).error).toContain('valid URL')
+      it('should call createPresentation without a livekitUrl argument', () => {
+        const call = (
+          context.components.presentationManager as unknown as {
+            createPresentation: jest.Mock
+          }
+        ).createPresentation.mock.calls[0]
+        expect(call).toHaveLength(4)
+        expect(call[2]).toBe('t') // livekitToken
+        expect(typeof call[3]).toBe('string') // fileName, not a URL
       })
     })
   })

@@ -1,27 +1,17 @@
 import type { IHttpServerComponent } from '@well-known-components/interfaces'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
-import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
+import { InvalidTokenError } from '../../logic/livekit-token-verifier'
+import {
+  InvalidLivekitCredentialsError,
+  MaxConcurrentPresentationsError,
+  RoomAlreadyPresentingError
+} from '../../logic/presentation-manager'
 import { RequestTooLargeError, ValidationError } from '../errors'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const MAX_JSON_BODY_SIZE = 1 * 1024 * 1024 // 1 MB — JSON body only contains URLs and tokens
-
-function validateLivekitUrl(lkUrl: string): void {
-  try {
-    const parsed = new URL(lkUrl)
-    if (parsed.protocol !== 'wss:') {
-      throw new ValidationError('livekitUrl must use wss:// protocol')
-    }
-    if (!parsed.hostname) {
-      throw new ValidationError('livekitUrl must specify a host')
-    }
-  } catch (err) {
-    if (err instanceof ValidationError) throw err
-    throw new ValidationError('livekitUrl is not a valid URL')
-  }
-}
 
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager' | 'fileProvider', '/presentations'>
@@ -39,7 +29,6 @@ export async function createPresentationHandler(
     let fileBuffer: Buffer
     let fileName: string
     let livekitToken: string
-    let livekitUrl: string
 
     if (contentType.includes('application/json')) {
       // Buffer the full body and check actual size — Content-Length is client-supplied
@@ -61,22 +50,19 @@ export async function createPresentationHandler(
       const body = parsed as Record<string, unknown>
       const url = typeof body.url === 'string' ? body.url : undefined
       const token = typeof body.livekitToken === 'string' ? body.livekitToken : undefined
-      const lkUrl = typeof body.livekitUrl === 'string' ? body.livekitUrl : undefined
 
       if (!url) {
         throw new ValidationError('Missing url')
       }
-      if (!token || !lkUrl) {
-        throw new ValidationError('Missing livekitToken or livekitUrl')
+      if (!token) {
+        throw new ValidationError('Missing livekitToken')
       }
-      validateLivekitUrl(lkUrl)
 
       livekitToken = token
-      livekitUrl = lkUrl
 
       // Pre-validate LiveKit credentials BEFORE the expensive URL download
       // so bogus tokens can't amplify a 1 KB request into a 100 MB outbound fetch.
-      await presentationManager.validateCredentials(livekitUrl, livekitToken)
+      await presentationManager.validateCredentials(livekitToken)
 
       const downloaded = await fileProvider.fromUrl(url)
       fileBuffer = downloaded.buffer
@@ -97,14 +83,11 @@ export async function createPresentationHandler(
       const result = await fileProvider.fromMultipart(contentType, rawBody)
 
       const token = result.fields.livekitToken || null
-      const lkUrl = result.fields.livekitUrl || null
-      if (!token || !lkUrl) {
-        throw new ValidationError('Missing livekitToken or livekitUrl')
+      if (!token) {
+        throw new ValidationError('Missing livekitToken')
       }
-      validateLivekitUrl(lkUrl)
 
       livekitToken = token
-      livekitUrl = lkUrl
       fileBuffer = result.buffer
       fileName = result.filename
     } else {
@@ -127,13 +110,7 @@ export async function createPresentationHandler(
       fileSize: fileBuffer.length
     })
 
-    const info = await presentationManager.createPresentation(
-      fileBuffer,
-      fileType,
-      livekitToken,
-      livekitUrl,
-      rawFileName
-    )
+    const info = await presentationManager.createPresentation(fileBuffer, fileType, livekitToken, rawFileName)
 
     return { status: 201, body: info }
   } catch (error) {
@@ -148,6 +125,12 @@ export async function createPresentationHandler(
     }
     if (error instanceof MaxConcurrentPresentationsError) {
       return { status: 429, body: { error: error.message } }
+    }
+    if (error instanceof RoomAlreadyPresentingError) {
+      return { status: 409, body: { error: error.message } }
+    }
+    if (error instanceof InvalidTokenError) {
+      return { status: 401, body: { error: 'Invalid LiveKit token' } }
     }
     if (error instanceof InvalidLivekitCredentialsError) {
       return { status: 401, body: { error: 'Invalid LiveKit credentials' } }

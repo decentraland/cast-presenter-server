@@ -1,12 +1,27 @@
 import {
   InvalidLivekitCredentialsError,
   PresentationNotFoundError,
+  RoomAlreadyPresentingError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
+import type { ILiveKitTokenVerifier, VerifiedLiveKitToken } from '../../src/logic/livekit-token-verifier'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
+
+const TEST_LIVEKIT_HOST = 'wss://livekit.test'
+const TEST_ROOM = 'room-under-test'
+const TEST_IDENTITY = 'tester'
+
+function createMockTokenVerifier(result?: Partial<VerifiedLiveKitToken>): jest.Mocked<ILiveKitTokenVerifier> {
+  return {
+    verify: jest.fn().mockResolvedValue({
+      roomId: result?.roomId ?? TEST_ROOM,
+      identity: result?.identity ?? TEST_IDENTITY
+    })
+  }
+}
 
 function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
   return {
@@ -48,13 +63,20 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
   }
 }
 
-function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPublisher> }) {
+function createMockComponents(overrides?: {
+  publisher?: jest.Mocked<ILiveKitPublisher>
+  tokenVerifier?: jest.Mocked<ILiveKitTokenVerifier>
+}) {
   const publisher = overrides?.publisher ?? createMockPublisher()
+  const liveKitTokenVerifier = overrides?.tokenVerifier ?? createMockTokenVerifier()
   return {
     config: {
       getString: jest.fn().mockResolvedValue(undefined),
       getNumber: jest.fn().mockResolvedValue(undefined),
-      requireString: jest.fn().mockResolvedValue(''),
+      requireString: jest.fn(async (name: string) => {
+        if (name === 'LIVEKIT_HOST') return TEST_LIVEKIT_HOST
+        return ''
+      }),
       requireNumber: jest.fn().mockResolvedValue(0)
     },
     logs: {
@@ -69,6 +91,7 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
     liveKitPublisher: {
       createPublisher: jest.fn().mockReturnValue(publisher)
     },
+    liveKitTokenVerifier,
     pdfRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
     },
@@ -109,13 +132,7 @@ async function createManagerWithSession(components: ReturnType<typeof createMock
   const manager = await createPresentationManager(
     components as unknown as Parameters<typeof createPresentationManager>[0]
   )
-  const info = await manager.createPresentation(
-    Buffer.from('%PDF-1.7'),
-    'pdf',
-    'test-token',
-    'wss://lk.example.com',
-    'test.pdf'
-  )
+  const info = await manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'test-token', 'test.pdf')
   return { manager, info }
 }
 
@@ -129,12 +146,12 @@ describe('when pre-validating LiveKit credentials', () => {
       components = createMockComponents({ publisher })
     })
 
-    it('should resolve and disconnect the throw-away publisher', async () => {
+    it('should connect to the server-configured LIVEKIT_HOST and disconnect the throw-away publisher', async () => {
       const manager = await createPresentationManager(
         components as unknown as Parameters<typeof createPresentationManager>[0]
       )
-      await expect(manager.validateCredentials('wss://lk.example.com', 'good-token')).resolves.toBeUndefined()
-      expect(publisher.connect).toHaveBeenCalledWith('wss://lk.example.com', 'good-token')
+      await expect(manager.validateCredentials('good-token')).resolves.toBeUndefined()
+      expect(publisher.connect).toHaveBeenCalledWith(TEST_LIVEKIT_HOST, 'good-token')
       expect(publisher.disconnect).toHaveBeenCalled()
     })
   })
@@ -150,9 +167,7 @@ describe('when pre-validating LiveKit credentials', () => {
       const manager = await createPresentationManager(
         components as unknown as Parameters<typeof createPresentationManager>[0]
       )
-      await expect(manager.validateCredentials('wss://lk.example.com', 'bad-token')).rejects.toBeInstanceOf(
-        InvalidLivekitCredentialsError
-      )
+      await expect(manager.validateCredentials('bad-token')).rejects.toBeInstanceOf(InvalidLivekitCredentialsError)
       expect(publisher.disconnect).toHaveBeenCalled()
     })
   })
@@ -173,9 +188,9 @@ describe('when creating a presentation', () => {
       const manager = await createPresentationManager(
         components as unknown as Parameters<typeof createPresentationManager>[0]
       )
-      await expect(
-        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token', 'wss://lk.example.com')
-      ).rejects.toThrow('PDF contains no pages')
+      await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token')).rejects.toThrow(
+        'PDF contains no pages'
+      )
     })
   })
 
@@ -194,20 +209,15 @@ describe('when creating a presentation', () => {
       )
 
       // First creation fails
-      await expect(
-        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token', 'wss://lk.example.com')
-      ).rejects.toThrow('LiveKit auth failed')
+      await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token')).rejects.toThrow(
+        'LiveKit auth failed'
+      )
 
       // Reset mock so next connect succeeds
       publisher.connect.mockResolvedValue(undefined)
 
       // Second creation should succeed — proves inFlightCreations was decremented
-      const info = await manager.createPresentation(
-        Buffer.from('%PDF-1.7'),
-        'pdf',
-        'good-token',
-        'wss://lk.example.com'
-      )
+      const info = await manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'good-token')
       expect(info.id).toBeDefined()
     })
 
@@ -216,12 +226,84 @@ describe('when creating a presentation', () => {
         components as unknown as Parameters<typeof createPresentationManager>[0]
       )
 
-      await expect(
-        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token', 'wss://lk.example.com')
-      ).rejects.toThrow()
+      await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token')).rejects.toThrow()
 
       expect(components.metrics.increment).toHaveBeenCalledWith('session_created_total', { status: 'error' })
     })
+
+    it('should release the room reservation so a retry for the same room can proceed', async () => {
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+
+      await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'bad-token')).rejects.toThrow()
+
+      // Second attempt for the same room (verifier returns same roomId) must not hit RoomAlreadyPresentingError
+      publisher.connect.mockResolvedValue(undefined)
+      await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'good-token')).resolves.toBeDefined()
+    })
+  })
+})
+
+describe('when creating a presentation and the target room is already reserved', () => {
+  let components: ReturnType<typeof createMockComponents>
+  let manager: IPresentationManager
+
+  beforeEach(async () => {
+    components = createMockComponents()
+    manager = await createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
+    // First presentation reserves TEST_ROOM
+    await manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'first-token')
+  })
+
+  it('should reject a second createPresentation for the same room with RoomAlreadyPresentingError', async () => {
+    await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'second-token')).rejects.toBeInstanceOf(
+      RoomAlreadyPresentingError
+    )
+  })
+
+  it('should accept a createPresentation for a different room', async () => {
+    ;(components.liveKitTokenVerifier.verify as jest.Mock).mockResolvedValueOnce({
+      roomId: 'another-room',
+      identity: 'bob'
+    })
+    await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'another-token')).resolves.toBeDefined()
+  })
+})
+
+describe('when concurrent createPresentation calls target the same room', () => {
+  it('should succeed for the first and reject the second with RoomAlreadyPresentingError', async () => {
+    const components = createMockComponents()
+    const manager = await createPresentationManager(
+      components as unknown as Parameters<typeof createPresentationManager>[0]
+    )
+
+    // Fire both without awaiting between; the sync Set.has→Set.add keeps them serialized.
+    const [first, second] = await Promise.allSettled([
+      manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'first-token'),
+      manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'second-token')
+    ])
+
+    expect(first.status).toBe('fulfilled')
+    expect(second.status).toBe('rejected')
+    if (second.status === 'rejected') {
+      expect(second.reason).toBeInstanceOf(RoomAlreadyPresentingError)
+    }
+  })
+})
+
+describe('when stopping an active presentation', () => {
+  it('should release the room reservation so a new presentation for the same room can start', async () => {
+    const components = createMockComponents()
+    const manager = await createPresentationManager(
+      components as unknown as Parameters<typeof createPresentationManager>[0]
+    )
+    const info = await manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token-1')
+
+    await manager.stopPresentation(info.id)
+
+    // Room should be free again — second createPresentation must not throw RoomAlreadyPresentingError
+    await expect(manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token-2')).resolves.toBeDefined()
   })
 })
 
