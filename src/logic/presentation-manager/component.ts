@@ -760,6 +760,10 @@ export async function createPresentationManager(
       session.videoState = 'error'
       session.videoErrorCode = reason
       session.videoErrorReason = message
+      // Full teardown — clears latches/listeners and unlinks the slide temp file.
+      // The compositor's internal stopPlayback already killed FFmpeg, but cleanup
+      // is the documented session-side counterpart that releases the rest.
+      endedCompositor.cleanup()
       session.compositor = null
       await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
@@ -893,7 +897,8 @@ export async function createPresentationManager(
       videoState: session.videoState,
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
-        : {})
+        : {}),
+      ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {})
     }
   }
 

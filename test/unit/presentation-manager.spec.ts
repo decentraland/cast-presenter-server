@@ -1134,7 +1134,11 @@ describe('when managing video playback in a presentation', () => {
     }
 
     describe('with reason video-playback-interrupted', () => {
-      beforeEach(() => setupAndFire('video-playback-interrupted'))
+      let compositorRef: jest.Mocked<IVideoCompositor>
+      beforeEach(async () => {
+        await setupAndFire('video-playback-interrupted')
+        compositorRef = compositor
+      })
 
       it('should broadcast presentation:error with an "interrupted" message', () => {
         expect(publisher.publishData).toHaveBeenCalledWith(
@@ -1148,14 +1152,23 @@ describe('when managing video playback in a presentation', () => {
         )
       })
 
-      it('should transition session to videoState error', () => {
+      it('should transition session to videoState error and include the structured code', () => {
         expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({ type: 'presentation:state', videoState: 'error' })
+          expect.objectContaining({
+            type: 'presentation:state',
+            videoState: 'error',
+            videoErrorCode: 'video-playback-interrupted',
+            videoErrorReason: expect.stringContaining('interrupted')
+          })
         )
       })
 
       it('should tear down the audio track', () => {
         expect(publisher.stopAudioPublishing).toHaveBeenCalled()
+      })
+
+      it('should call compositor.cleanup() to release latches and the slide temp file', () => {
+        expect(compositorRef.cleanup).toHaveBeenCalled()
       })
     })
 
