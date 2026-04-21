@@ -31,7 +31,9 @@ function createMockConfig(overrides?: Partial<Record<string, string>>): IConfigC
 interface TokenOverrides {
   issuer?: string
   subject?: string
-  room?: string | null
+  // Allows non-string values (e.g. number, boolean) to test the verifier's
+  // typeof guard. Use `null` to omit the room field but keep the video grant.
+  room?: string | number | boolean | null
   expiresIn?: string
   notBefore?: string
   secret?: string
@@ -114,6 +116,24 @@ describe('when verifying a LiveKit token', () => {
     })
   })
 
+  describe('and the token has a notBefore claim in the future', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
+      const token = await signToken({ notBefore: '5m' })
+      try {
+        await verifier.verify(token)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should throw InvalidTokenError', () => {
+      expect(error).toBeInstanceOf(InvalidTokenError)
+    })
+  })
+
   describe('and the token issuer does not match LIVEKIT_API_KEY', () => {
     let error: unknown
 
@@ -174,6 +194,24 @@ describe('when verifying a LiveKit token', () => {
     beforeEach(async () => {
       const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
       const token = await signToken({ room: '' })
+      try {
+        await verifier.verify(token)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should throw InvalidTokenError', () => {
+      expect(error).toBeInstanceOf(InvalidTokenError)
+    })
+  })
+
+  describe('and the token has a video.room grant that is a non-string value', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
+      const token = await signToken({ room: 42 })
       try {
         await verifier.verify(token)
       } catch (err) {
