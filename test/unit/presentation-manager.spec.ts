@@ -1110,14 +1110,13 @@ describe('when managing video playback in a presentation', () => {
   describe('when the compositor fires onError mid-stream', () => {
     let compositor: jest.Mocked<IVideoCompositor>
     let publisher: jest.Mocked<ILiveKitPublisher>
-    let components: ReturnType<typeof createMockComponents>
-    let manager: IPresentationManager
-    let presentationId: string
 
-    beforeEach(async () => {
+    async function setupAndFire(
+      reason: 'video-playback-interrupted' | 'video-stream-error' | 'audio-processing-failed'
+    ) {
       compositor = createMockCompositor()
       publisher = createMockPublisher()
-      components = createMockComponents({ publisher })
+      const components = createMockComponents({ publisher })
       components.videoCompositor.createCompositor.mockReturnValue(compositor)
       const renderer = createMockRenderer()
       renderer.getSlideVideos.mockResolvedValue([
@@ -1125,40 +1124,67 @@ describe('when managing video playback in a presentation', () => {
       ])
       components.pdfRenderer.createRenderer.mockReturnValue(renderer)
       const result = await createManagerWithSession(components)
-      manager = result.manager
-      presentationId = result.info.id
-      await manager.playVideo(presentationId, 0)
+      await result.manager.playVideo(result.info.id, 0)
 
       publisher.publishData.mockClear()
+      publisher.stopAudioPublishing.mockClear()
       const onErrorCallback = compositor.onError.mock.calls[0][0]
-      await onErrorCallback('video-playback-interrupted')
+      await onErrorCallback(reason)
       await flushMicrotasks()
+    }
+
+    describe('with reason video-playback-interrupted', () => {
+      beforeEach(() => setupAndFire('video-playback-interrupted'))
+
+      it('should broadcast presentation:error with an "interrupted" message', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:error',
+            code: 'video-playback-interrupted',
+            message: expect.stringContaining('interrupted'),
+            videoIndex: 0,
+            videoUrl: 'https://example.com/v.mp4'
+          })
+        )
+      })
+
+      it('should transition session to videoState error', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'presentation:state', videoState: 'error' })
+        )
+      })
+
+      it('should tear down the audio track', () => {
+        expect(publisher.stopAudioPublishing).toHaveBeenCalled()
+      })
     })
 
-    it('should broadcast a transient presentation:error with the reason code', () => {
-      expect(publisher.publishData).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'presentation:error',
-          code: 'video-playback-interrupted',
-          message: expect.stringContaining('interrupted'),
-          videoIndex: 0,
-          videoUrl: 'https://example.com/v.mp4'
-        })
-      )
+    describe('with reason video-stream-error', () => {
+      beforeEach(() => setupAndFire('video-stream-error'))
+
+      it('should broadcast a stream-error-specific message', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:error',
+            code: 'video-stream-error',
+            message: expect.stringContaining('stream error')
+          })
+        )
+      })
     })
 
-    it('should transition session to videoState error', () => {
-      expect(publisher.publishData).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'presentation:state', videoState: 'error' })
-      )
-    })
+    describe('with reason audio-processing-failed', () => {
+      beforeEach(() => setupAndFire('audio-processing-failed'))
 
-    it('should tear down the audio track', () => {
-      expect(publisher.stopAudioPublishing).toHaveBeenCalled()
-    })
-
-    it('should register the callback via compositor.onError', () => {
-      expect(compositor.onError).toHaveBeenCalledTimes(1)
+      it('should broadcast an audio-specific message', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:error',
+            code: 'audio-processing-failed',
+            message: expect.stringContaining('Audio')
+          })
+        )
+      })
     })
   })
 

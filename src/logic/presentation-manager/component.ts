@@ -7,7 +7,7 @@ import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, Presen
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
-import type { IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
@@ -48,7 +48,13 @@ interface InternalSession extends PresentationSession {
   bytesDownloaded: number
 }
 
-export type VideoErrorCode =
+/**
+ * Codes for failures detected by the presentation-manager itself (download,
+ * permissions, quota, etc.). Combined below with the compositor's own
+ * `CompositorErrorReason` to form the union broadcast in
+ * `presentation:error.code`.
+ */
+type ManagerVideoErrorCode =
   | 'video-quota-exceeded'
   | 'video-permission-denied'
   | 'video-not-found'
@@ -58,14 +64,19 @@ export type VideoErrorCode =
   | 'video-too-many-redirects'
   | 'video-invalid-format'
   | 'video-playback-failed'
-  // Emitted by the compositor mid-stream (FFmpeg died, stdio stream error, audio handler threw)
-  | 'video-playback-interrupted'
-  | 'video-stream-error'
-  | 'audio-processing-failed'
+
+export type VideoErrorCode = ManagerVideoErrorCode | CompositorErrorReason
 
 export interface VideoErrorInfo {
   code: VideoErrorCode
   message: string
+}
+
+/** User-facing messages for failures the compositor reports mid-stream. */
+const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
+  'video-playback-interrupted': 'Video playback was interrupted — the stream ended unexpectedly',
+  'video-stream-error': 'Video playback failed — a stream error stopped the video',
+  'audio-processing-failed': 'Audio processing failed during playback'
 }
 
 /** Maps download/playback errors to a stable code + user-friendly reason. */
@@ -651,7 +662,14 @@ export async function createPresentationManager(
     let audioResidual: Buffer = Buffer.alloc(0)
 
     const onAudioData = (pcmChunk: Buffer) => {
-      const source = audioResidual.length === 0 ? pcmChunk : Buffer.concat([audioResidual, pcmChunk])
+      // Avoid copying when no residual is held — the common steady-state case.
+      // Buffer.concat produces a fresh buffer; the no-residual branch reuses
+      // pcmChunk directly. The subarray() result below would alias pcmChunk
+      // in that branch, so when we keep a residual that came from pcmChunk,
+      // copy it to detach from the underlying stdout buffer (Node delivers a
+      // fresh chunk per 'data' event today, but don't depend on that).
+      const concatenated = audioResidual.length === 0 ? null : Buffer.concat([audioResidual, pcmChunk])
+      const source = concatenated ?? pcmChunk
       let offset = 0
       while (source.length - offset >= AUDIO_FRAME_BYTES) {
         // Buffer.alloc gives a dedicated ArrayBuffer with 2-byte alignment
@@ -662,7 +680,16 @@ export async function createPresentationManager(
         session.publisher.pushAudioFrame(int16, 48000, 2, 480)
         offset += AUDIO_FRAME_BYTES
       }
-      audioResidual = offset === source.length ? Buffer.alloc(0) : source.subarray(offset)
+      if (offset === source.length) {
+        audioResidual = Buffer.alloc(0)
+      } else if (concatenated) {
+        // Safe to subarray — `concatenated` is owned by us.
+        audioResidual = concatenated.subarray(offset)
+      } else {
+        // Detach from pcmChunk so retaining the residual doesn't pin the
+        // underlying stdout backing buffer.
+        audioResidual = Buffer.from(pcmChunk.subarray(offset))
+      }
     }
 
     // Set playback start BEFORE spawning FFmpeg so the startup latency is
@@ -729,22 +756,16 @@ export async function createPresentationManager(
 
     compositor.onError(async (reason) => {
       if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      const message = COMPOSITOR_ERROR_MESSAGES[reason]
       session.videoState = 'error'
-      // The compositor uses reason codes (e.g. 'video-playback-interrupted').
-      // They're already in our VideoErrorCode union, so pass through.
-      session.videoErrorCode = reason as VideoErrorCode
-      session.videoErrorReason = 'Video playback was interrupted'
+      session.videoErrorCode = reason
+      session.videoErrorReason = message
       session.compositor = null
       await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
-      await broadcastError(session, reason as VideoErrorCode, 'Video playback was interrupted', {
-        videoIndex,
-        videoUrl: videoInfo.url
-      })
-      broadcastState(session).catch(() => {
-        /* noop */
-      })
+      await broadcastError(session, reason, message, { videoIndex, videoUrl: videoInfo.url })
+      await broadcastState(session)
       logger.warn(`Video playback interrupted for presentation ${session.id}: ${reason}`)
     })
 
