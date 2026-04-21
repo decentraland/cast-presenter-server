@@ -498,10 +498,10 @@
   resolved "https://registry.yarnpkg.com/@dcl/core-commons/-/core-commons-0.5.0.tgz#a3fd055cb1dfb69758b2506b0867cda4547dd800"
   integrity sha512-Lru7p7LcpTiIeZnpYQKRbYwHNqZBPieB7OLeGZ44kWt7+YdC6N7xj/GpAkn8xMGu+jcd7DaIZcfktZJqw+ELNA==
 
-"@dcl/eslint-config@^2.3.1":
-  version "2.3.1"
-  resolved "https://registry.yarnpkg.com/@dcl/eslint-config/-/eslint-config-2.3.1.tgz#51607934352c288594c3bd99d70fb1e2c2e664be"
-  integrity sha512-R3RzJSOCX6v7uVicsIHvWibW03xyeV+coxGxQzyNjSGpeab97/TvbyE9IbV//GPM00ItSvUN1B6CntTLRDgokA==
+"@dcl/eslint-config@^2.4.3":
+  version "2.4.3"
+  resolved "https://registry.yarnpkg.com/@dcl/eslint-config/-/eslint-config-2.4.3.tgz#505f4817c6a5750e762163c42b68b113c5ea93be"
+  integrity sha512-SFgQv5Fnvv1fFgXyF9VXxw4cAbJSntiID/h0qwWYDLtlxOp45KnzYDol4IqDFgnuXZOwJgU62GTmYt4/XcOqFA==
   dependencies:
     "@typescript-eslint/eslint-plugin" "^6.21.0"
     "@typescript-eslint/parser" "^6.21.0"

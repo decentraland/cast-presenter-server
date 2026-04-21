@@ -20,7 +20,7 @@
     "*.{js,ts}": ["eslint", "prettier --check"]
   },
   "devDependencies": {
-    "@dcl/eslint-config": "^2.3.1",
+    "@dcl/eslint-config": "^2.4.3",
     "@types/busboy": "1.5.4",
     "@types/node": "^20.14.2",
     "@well-known-components/test-helpers": "^1.5.8",
