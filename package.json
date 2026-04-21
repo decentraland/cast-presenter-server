@@ -51,7 +51,7 @@
     "@well-known-components/http-requests-logger-component": "^2.1.0",
     "@well-known-components/http-server": "^2.1.0",
     "@well-known-components/http-tracer-component": "^1.1.0",
-    "@well-known-components/interfaces": "^1.5.1",
+    "@well-known-components/interfaces": "^1.5.2",
     "@well-known-components/logger": "^3.1.3",
     "@well-known-components/metrics": "^2.1.0",
     "@well-known-components/tracer-component": "^1.2.0",
