@@ -303,7 +303,7 @@ describe('when handling a create presentation request', () => {
         result = await createPresentationHandler(
           createJsonContext(
             { url: 'https://example.com/file.pdf', livekitToken: 't' },
-            { createPresentationError: new RoomAlreadyPresentingError('room-42') }
+            { createPresentationError: new RoomAlreadyPresentingError() }
           )
         )
       })
@@ -312,8 +312,8 @@ describe('when handling a create presentation request', () => {
         expect(result.status).toBe(409)
       })
 
-      it('should return an error message naming the room', () => {
-        expect((result.body as Record<string, string>).error).toContain('room-42')
+      it('should return a generic error message about an active presentation', () => {
+        expect((result.body as Record<string, string>).error).toContain('active presentation')
       })
     })
 

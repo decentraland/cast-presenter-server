@@ -274,7 +274,7 @@ export async function createPresentationManager(
     // concurrent createPresentation calls for the same room are serialized:
     // the second call sees the reservation from the first and bails.
     if (reservedRooms.has(roomId)) {
-      throw new RoomAlreadyPresentingError(roomId)
+      throw new RoomAlreadyPresentingError()
     }
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
@@ -292,7 +292,9 @@ export async function createPresentationManager(
     let tempDir: string | null = null
 
     try {
-      // Connect to LiveKit FIRST — validates the token (fail-fast auth)
+      // Connect to LiveKit. The local verifier above already proved the JWT
+      // is valid; this connect is the network probe that also confirms the
+      // token is accepted server-side.
       await publisher.connect(livekitHost, livekitToken)
 
       // Initialize renderer for the detected format
@@ -890,9 +892,7 @@ export async function createPresentationManager(
     sessions.delete(session.id)
     // Release the room so a new presentation can start there. Kept synchronous
     // with the sessions.delete so reservation and session existence stay in lockstep.
-    if (session.roomId) {
-      reservedRooms.delete(session.roomId)
-    }
+    reservedRooms.delete(session.roomId)
     metrics.decrement('active_sessions')
 
     // Cancel pending pre-download timer to prevent downloads against a destroyed temp dir

@@ -36,6 +36,7 @@ interface TokenOverrides {
   notBefore?: string
   secret?: string
   omitVideo?: boolean
+  omitSubject?: boolean
 }
 
 async function signToken(overrides: TokenOverrides = {}): Promise<string> {
@@ -48,7 +49,9 @@ async function signToken(overrides: TokenOverrides = {}): Promise<string> {
 
   const builder = new SignJWT(video ? { video } : {}).setProtectedHeader({ alg: 'HS256' })
   builder.setIssuer(overrides.issuer ?? TEST_API_KEY)
-  builder.setSubject(overrides.subject ?? TEST_IDENTITY)
+  if (!overrides.omitSubject) {
+    builder.setSubject(overrides.subject ?? TEST_IDENTITY)
+  }
   builder.setIssuedAt()
   if (overrides.notBefore !== undefined) builder.setNotBefore(overrides.notBefore)
   builder.setExpirationTime(overrides.expiresIn ?? '5m')
@@ -153,6 +156,60 @@ describe('when verifying a LiveKit token', () => {
     beforeEach(async () => {
       const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
       const token = await signToken({ room: null })
+      try {
+        await verifier.verify(token)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should throw InvalidTokenError', () => {
+      expect(error).toBeInstanceOf(InvalidTokenError)
+    })
+  })
+
+  describe('and the token has a video.room grant that is an empty string', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
+      const token = await signToken({ room: '' })
+      try {
+        await verifier.verify(token)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should throw InvalidTokenError', () => {
+      expect(error).toBeInstanceOf(InvalidTokenError)
+    })
+  })
+
+  describe('and the token has no sub claim', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
+      const token = await signToken({ omitSubject: true })
+      try {
+        await verifier.verify(token)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should throw InvalidTokenError', () => {
+      expect(error).toBeInstanceOf(InvalidTokenError)
+    })
+  })
+
+  describe('and the token has an empty sub claim', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      const verifier = await createLiveKitTokenVerifier({ config: createMockConfig(), logs: createMockLogger() })
+      const token = await signToken({ subject: '' })
       try {
         await verifier.verify(token)
       } catch (err) {

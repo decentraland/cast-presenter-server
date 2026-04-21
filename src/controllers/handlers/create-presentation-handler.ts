@@ -26,9 +26,11 @@ export async function createPresentationHandler(
   try {
     const contentType = request.headers.get('content-type') || ''
 
-    let fileBuffer: Buffer
-    let fileName: string
-    let livekitToken: string
+    type ParsedSource =
+      | { kind: 'url'; livekitToken: string; url: string }
+      | { kind: 'multipart'; livekitToken: string; buffer: Buffer; filename: string }
+
+    let source: ParsedSource
 
     if (contentType.includes('application/json')) {
       // Buffer the full body and check actual size — Content-Length is client-supplied
@@ -58,15 +60,7 @@ export async function createPresentationHandler(
         throw new ValidationError('Missing livekitToken')
       }
 
-      livekitToken = token
-
-      // Pre-validate LiveKit credentials BEFORE the expensive URL download
-      // so bogus tokens can't amplify a 1 KB request into a 100 MB outbound fetch.
-      await presentationManager.validateCredentials(livekitToken)
-
-      const downloaded = await fileProvider.fromUrl(url)
-      fileBuffer = downloaded.buffer
-      fileName = downloaded.filename
+      source = { kind: 'url', livekitToken: token, url }
     } else if (contentType.includes('multipart/form-data')) {
       const contentLength = request.headers.get('content-length')
       if (contentLength && parseInt(contentLength, 10) > MAX_FILE_SIZE) {
@@ -82,16 +76,30 @@ export async function createPresentationHandler(
       }
       const result = await fileProvider.fromMultipart(contentType, rawBody)
 
-      const token = result.fields.livekitToken || null
+      const token = result.fields.livekitToken
       if (!token) {
         throw new ValidationError('Missing livekitToken')
       }
 
-      livekitToken = token
-      fileBuffer = result.buffer
-      fileName = result.filename
+      source = { kind: 'multipart', livekitToken: token, buffer: result.buffer, filename: result.filename }
     } else {
       throw new ValidationError('Content-Type must be multipart/form-data or application/json')
+    }
+
+    // Pre-validate LiveKit credentials once for both paths — rejects bogus tokens
+    // before the expensive URL download (JSON path), and gives multipart uploads
+    // the same defense-in-depth check the JSON path has always had.
+    await presentationManager.validateCredentials(source.livekitToken)
+
+    let fileBuffer: Buffer
+    let fileName: string
+    if (source.kind === 'url') {
+      const downloaded = await fileProvider.fromUrl(source.url)
+      fileBuffer = downloaded.buffer
+      fileName = downloaded.filename
+    } else {
+      fileBuffer = source.buffer
+      fileName = source.filename
     }
 
     // Common validation for both paths
@@ -110,7 +118,7 @@ export async function createPresentationHandler(
       fileSize: fileBuffer.length
     })
 
-    const info = await presentationManager.createPresentation(fileBuffer, fileType, livekitToken, rawFileName)
+    const info = await presentationManager.createPresentation(fileBuffer, fileType, source.livekitToken, rawFileName)
 
     return { status: 201, body: info }
   } catch (error) {
