@@ -60,9 +60,13 @@ function createVideoCompositor(
   let isPlaying = false
   let cleanedUp = false
   let onEndCallback: (() => void) | null = null
+  let onErrorCallback: ((reason: string) => void) | null = null
   // Latches a natural-end event if FFmpeg closes before onEnd() is registered.
   // Replayed on the next onEnd() call via microtask. Cleared on cleanup().
   let endLatched = false
+  // Same latch for error events — startPlayback returning and onError()
+  // registration race on resume-from-pause.
+  let errorLatched: string | null = null
   let lastPushedFrame: VideoFrameSnapshot | null = null
   let currentSlidePath: string | null = null
 
@@ -146,8 +150,15 @@ function createVideoCompositor(
     )
 
     let stderr = ''
+    let settled = false
     proc.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
+    })
+    // Node streams are EventEmitters — an unhandled 'error' event throws and
+    // crashes the process under --abort-on-uncaught-exception. Plausible trigger:
+    // EPIPE after SIGKILL on the timeout path below.
+    proc.stderr?.on('error', (err) => {
+      logger.warn(`Remux stderr stream error: ${err.message}`)
     })
 
     // Dedicated remux timeout — the outer download timeout covers the whole
@@ -166,6 +177,8 @@ function createVideoCompositor(
     const promise = new Promise<void>((resolve, reject) => {
       proc.on('close', (code) => {
         clearTimeout(timeout)
+        if (settled) return
+        settled = true
         if (timedOut) {
           reject(new Error(`Remux timed out after ${REMUX_TIMEOUT_MS / 1000}s`))
           return
@@ -178,6 +191,8 @@ function createVideoCompositor(
       })
       proc.on('error', (err) => {
         clearTimeout(timeout)
+        if (settled) return
+        settled = true
         reject(err)
       })
     })
@@ -281,6 +296,24 @@ function createVideoCompositor(
           /* never created or already deleted */
         }
       }
+    }
+  }
+
+  /**
+   * Latches the reason if onError() hasn't been registered yet; replays on
+   * registration. Callers fire this alongside stopPlayback() on failure, so
+   * this runs with cleanedUp=true — don't gate on cleanedUp. Public cleanup()
+   * clears onErrorCallback + errorLatched, so a post-public-cleanup fire is
+   * harmlessly swallowed (no listener, no replay target).
+   */
+  function fireError(reason: string): void {
+    if (onErrorCallback) {
+      const cb = onErrorCallback
+      queueMicrotask(() => {
+        if (onErrorCallback === cb) cb(reason)
+      })
+    } else {
+      errorLatched = reason
     }
   }
 
@@ -432,12 +465,24 @@ function createVideoCompositor(
       compositeProcess.stderr?.on('data', (chunk: Buffer) => {
         compositeStderr = (compositeStderr + chunk.toString()).slice(-500)
       })
+      // stdio streams on a ChildProcess are Readables; an unhandled 'error' event
+      // on a Readable crashes the process. Log and abort playback on both.
+      compositeProcess.stderr?.on('error', (err) => {
+        logger.warn(`Composite stderr stream error: ${err.message}`)
+        if (!cleanedUp && isPlaying) {
+          stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+          fireError('video-stream-error')
+        }
+      })
 
       // Prevents crash on spawn failure (ENOENT / EACCES). ChildProcess is an
       // EventEmitter — an unhandled 'error' event throws and takes down the process.
       compositeProcess.on('error', (err) => {
         logger.warn(`Composite FFmpeg process error: ${err.message}`)
-        if (!cleanedUp && isPlaying) stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+        if (!cleanedUp && isPlaying) {
+          stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+          fireError('video-stream-error')
+        }
       })
 
       // Audio process — uses -re for real-time pacing (killed on pause, restarted on resume)
@@ -469,6 +514,9 @@ function createVideoCompositor(
         audioProcess.stderr?.on('data', (chunk: Buffer) => {
           audioStderr = (audioStderr + chunk.toString()).slice(-500)
         })
+        audioProcess.stderr?.on('error', (err) => {
+          logger.warn(`Audio stderr stream error: ${err.message}`)
+        })
 
         // See compositeProcess note — unhandled 'error' on ChildProcess crashes
         // the server. Audio is non-critical, so we just log and leave video running.
@@ -477,10 +525,26 @@ function createVideoCompositor(
         })
 
         audioProcess.stdout?.on('data', (chunk: Buffer) => {
-          if (isPlaying) {
-            // chunk is already a Buffer from stdout — no need to copy.
+          if (!isPlaying) return
+          // Containment barrier: any throw from onAudioData (e.g. a buffer
+          // bookkeeping bug) would otherwise escape the Readable 'data' handler
+          // as an uncaught exception and crash the process under
+          // --abort-on-uncaught-exception. Abort playback on the session side
+          // via fireError; the presentation session keeps running.
+          try {
             onAudioData(chunk)
+          } catch (err) {
+            logger.warn(
+              `onAudioData threw — aborting video playback: ${err instanceof Error ? err.message : String(err)}`
+            )
+            if (!cleanedUp && isPlaying) {
+              stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+              fireError('audio-processing-failed')
+            }
           }
+        })
+        audioProcess.stdout?.on('error', (err) => {
+          logger.warn(`Audio stdout stream error: ${err.message}`)
         })
 
         audioProcess.on('close', (code) => {
@@ -571,14 +635,25 @@ function createVideoCompositor(
         }
       }
       compositeProcess.stdout?.on('data', dataListener)
+      compositeProcess.stdout?.on('error', (err) => {
+        logger.warn(`Composite stdout stream error: ${err.message}`)
+        if (!cleanedUp && isPlaying) {
+          stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
+          fireError('video-stream-error')
+        }
+      })
 
       compositeProcess.on('close', (code) => {
-        if (code && code !== 0 && !cleanedUp) {
+        const abnormal = code !== null && code !== 0
+        if (abnormal && !cleanedUp) {
           logger.warn(`Composite process exited with error`, { code, stderr: compositeStderr })
         }
         if (!cleanedUp && isPlaying) {
           stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
-          if (onEndCallback) {
+          if (abnormal) {
+            // FFmpeg died mid-stream — treat as an error, not a natural end.
+            fireError('video-playback-interrupted')
+          } else if (onEndCallback) {
             onEndCallback()
           } else {
             endLatched = true
@@ -607,6 +682,17 @@ function createVideoCompositor(
       }
     },
 
+    onError(callback: (reason: string) => void): void {
+      onErrorCallback = callback
+      if (errorLatched !== null) {
+        const reason = errorLatched
+        errorLatched = null
+        queueMicrotask(() => {
+          if (onErrorCallback === callback) callback(reason)
+        })
+      }
+    },
+
     getIsPlaying(): boolean {
       return isPlaying
     },
@@ -621,7 +707,9 @@ function createVideoCompositor(
       // Swallow any pending natural-end: a cleaned-up compositor has no semantic
       // "end" event to deliver, and we don't want to leak the session callback closure.
       endLatched = false
+      errorLatched = null
       onEndCallback = null
+      onErrorCallback = null
       if (compositeProcess) {
         if (dataListener) {
           compositeProcess.stdout?.removeListener('data', dataListener)

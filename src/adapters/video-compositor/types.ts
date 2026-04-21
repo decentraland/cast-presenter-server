@@ -44,6 +44,13 @@ export interface IVideoCompositor {
     seekSeconds?: number
   ): Promise<void>
   onEnd(callback: () => void): void
+  /**
+   * Fires when playback is aborted due to an unrecoverable failure (FFmpeg
+   * stream error, audio processing throw, or non-zero exit mid-stream).
+   * The compositor cleans itself up before firing — the callback's job is to
+   * reset session state and notify clients.
+   */
+  onError(callback: (reason: string) => void): void
   getIsPlaying(): boolean
   getLastFrame(): VideoFrameSnapshot | null
   cleanup(): void

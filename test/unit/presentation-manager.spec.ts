@@ -41,6 +41,7 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
     downloadVideo: jest.fn().mockResolvedValue({ path: '/tmp/video.mp4', bytes: 1024 }),
     startPlayback: jest.fn().mockResolvedValue(undefined),
     onEnd: jest.fn(),
+    onError: jest.fn(),
     getIsPlaying: jest.fn().mockReturnValue(false),
     getLastFrame: jest.fn().mockReturnValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080, bufferType: 5 }),
     cleanup: jest.fn()
@@ -1030,6 +1031,193 @@ describe('when managing video playback in a presentation', () => {
       it('should cleanup the orphaned compositor once the post-startPlayback guard trips', () => {
         expect(compositor.cleanup).toHaveBeenCalledTimes(2)
       })
+    })
+  })
+
+  describe('when a user-initiated video play fails', () => {
+    let compositor: jest.Mocked<IVideoCompositor>
+    let publisher: jest.Mocked<ILiveKitPublisher>
+    let components: ReturnType<typeof createMockComponents>
+    let manager: IPresentationManager
+    let presentationId: string
+
+    function setup(overrides: { downloadError?: Error; startPlaybackError?: Error } = {}) {
+      compositor = createMockCompositor()
+      if (overrides.downloadError) compositor.downloadVideo.mockRejectedValue(overrides.downloadError)
+      if (overrides.startPlaybackError) compositor.startPlayback.mockRejectedValue(overrides.startPlaybackError)
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+      return createManagerWithSession(components).then((r) => {
+        manager = r.manager
+        presentationId = r.info.id
+      })
+    }
+
+    describe('and the download fails with HTTP 403', () => {
+      beforeEach(async () => {
+        await setup({ downloadError: new Error('HTTP 403 downloading https://example.com/v.mp4') })
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast a transient presentation:error with code video-permission-denied', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'presentation:error',
+            code: 'video-permission-denied',
+            message: expect.stringContaining('not authorized'),
+            videoIndex: 0,
+            videoUrl: 'https://example.com/v.mp4'
+          })
+        )
+      })
+    })
+
+    describe('and the remux returns invalid data', () => {
+      beforeEach(async () => {
+        await setup({ downloadError: new Error('Remux failed (code 183): Invalid data found when processing input') })
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast code video-invalid-format', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'presentation:error', code: 'video-invalid-format' })
+        )
+      })
+    })
+
+    describe('and startPlayback throws mid-setup', () => {
+      beforeEach(async () => {
+        await setup({ startPlaybackError: new Error('spawn ffmpeg ENOENT') })
+        await manager.playVideo(presentationId, 0).catch(() => {
+          /* rethrown by the manager — swallowed in tests */
+        })
+      })
+
+      it('should broadcast a transient presentation:error', () => {
+        expect(publisher.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'presentation:error', videoIndex: 0 })
+        )
+      })
+    })
+  })
+
+  describe('when the compositor fires onError mid-stream', () => {
+    let compositor: jest.Mocked<IVideoCompositor>
+    let publisher: jest.Mocked<ILiveKitPublisher>
+    let components: ReturnType<typeof createMockComponents>
+    let manager: IPresentationManager
+    let presentationId: string
+
+    beforeEach(async () => {
+      compositor = createMockCompositor()
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+      const result = await createManagerWithSession(components)
+      manager = result.manager
+      presentationId = result.info.id
+      await manager.playVideo(presentationId, 0)
+
+      publisher.publishData.mockClear()
+      const onErrorCallback = compositor.onError.mock.calls[0][0]
+      await onErrorCallback('video-playback-interrupted')
+      await flushMicrotasks()
+    })
+
+    it('should broadcast a transient presentation:error with the reason code', () => {
+      expect(publisher.publishData).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'presentation:error',
+          code: 'video-playback-interrupted',
+          message: expect.stringContaining('interrupted'),
+          videoIndex: 0,
+          videoUrl: 'https://example.com/v.mp4'
+        })
+      )
+    })
+
+    it('should transition session to videoState error', () => {
+      expect(publisher.publishData).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'presentation:state', videoState: 'error' })
+      )
+    })
+
+    it('should tear down the audio track', () => {
+      expect(publisher.stopAudioPublishing).toHaveBeenCalled()
+    })
+
+    it('should register the callback via compositor.onError', () => {
+      expect(compositor.onError).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('when the audio handler receives PCM chunks', () => {
+    // Covers the RangeError crash: feeding an oversize chunk to onAudioData
+    // used to drift audioWrite past the buffer and throw inside Buffer.copy.
+    let compositor: jest.Mocked<IVideoCompositor>
+    let publisher: jest.Mocked<ILiveKitPublisher>
+    let onAudioData: (chunk: Buffer) => void
+
+    beforeEach(async () => {
+      compositor = createMockCompositor()
+      publisher = createMockPublisher()
+      const components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+      const result = await createManagerWithSession(components)
+      await result.manager.playVideo(result.info.id, 0)
+      // The seventh positional arg (index 6) of startPlayback is the onAudioData callback.
+      onAudioData = compositor.startPlayback.mock.calls[0][6] as (chunk: Buffer) => void
+    })
+
+    it('should push nothing for a sub-frame chunk', () => {
+      onAudioData(Buffer.alloc(100))
+      expect(publisher.pushAudioFrame).not.toHaveBeenCalled()
+    })
+
+    it('should push exactly one frame for a 1920-byte chunk', () => {
+      onAudioData(Buffer.alloc(1920))
+      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
+    })
+
+    it('should push one frame and keep the tail for a 1.5-frame chunk', () => {
+      onAudioData(Buffer.alloc(1920 + 500))
+      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
+      // Next small chunk should complete a second frame by combining with the residual
+      publisher.pushAudioFrame.mockClear()
+      onAudioData(Buffer.alloc(1920 - 500))
+      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
+    })
+
+    it('should not throw on a chunk larger than any fixed ring buffer would have been', () => {
+      // Regression: old ring buffer was 40448 bytes; a 60 KB burst from FFmpeg
+      // used to drift audioWrite past the buffer and crash later.
+      expect(() => onAudioData(Buffer.alloc(60 * 1024))).not.toThrow()
+      // 60 KB / 1920 = 32 full frames
+      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(Math.floor((60 * 1024) / 1920))
+    })
+
+    it('should stitch arbitrary chunk boundaries into 1920-byte frames', () => {
+      onAudioData(Buffer.alloc(1000))
+      onAudioData(Buffer.alloc(1000)) // total 2000 → 1 frame, 80 residual
+      onAudioData(Buffer.alloc(50)) // total 130 residual
+      onAudioData(Buffer.alloc(1920 - 130)) // completes frame 2
+      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(2)
     })
   })
 })

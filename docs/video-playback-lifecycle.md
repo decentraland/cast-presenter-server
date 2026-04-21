@@ -133,6 +133,44 @@ then remuxed into a clean MP4 with `-c copy -movflags +faststart`.
 Subsequent plays and resumes use the local cached file for faster
 seeking.
 
+## Failure handling
+
+Playback failures are surfaced over the LiveKit data channel on two
+paths:
+
+1. **`presentation:state`** (persistent) — on failure the session moves
+   to `videoState: 'error'` with `videoErrorReason` set to a
+   human-readable message. The state is cleared back to `loading` on
+   the next play attempt.
+2. **`presentation:error`** (transient) — a separate event fires
+   alongside the state update so clients can toast the error without
+   diffing state. Shape:
+   `{ type: 'presentation:error', code, message, videoIndex, videoUrl }`.
+   Codes are stable strings (e.g. `video-permission-denied`,
+   `video-invalid-format`, `video-playback-interrupted`) defined by the
+   `VideoErrorCode` union in `src/logic/presentation-manager/component.ts`.
+
+Triggers:
+
+- **Presenter-initiated play fails** (download error, disk-quota cap,
+  or `startPlayback` throw) — emitted from `playVideoSession`.
+- **Mid-stream playback crashes** (FFmpeg exits non-zero, composite
+  stdio stream errors, audio handler throws) — the compositor fires
+  `onError(reason)` and the session re-broadcasts it as
+  `presentation:error`.
+
+The FFmpeg child processes defensively attach `error` listeners on
+every piped stream (`stdout`/`stderr` on composite, audio, and remux
+processes). Without them a transient stream error (e.g. EPIPE after
+SIGKILL) would surface as an uncaught exception and crash the server
+under the Dockerfile's `--abort-on-uncaught-exception` flag.
+
+The audio-chunking path in `playVideoSession` uses a residual-buffer
+accumulator (`Buffer.concat` + `subarray`) rather than a fixed ring
+buffer — FFmpeg has been observed bursting chunks larger than any
+sensibly-sized ring, and the previous write-past-capacity drift caused
+a `Buffer.copy` `RangeError` mid-playback.
+
 ## Frame format
 
 The composite process outputs I420 (yuv420p) frames. The heartbeat
