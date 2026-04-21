@@ -6,6 +6,13 @@ import type {
   ILoggerComponent,
   IMetricsComponent
 } from '@well-known-components/interfaces'
+import type { IFileProviderComponent } from './adapters/file-provider'
+import type { IGoogleDriveComponent } from './adapters/google-drive'
+import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
+import type { IPdfRendererComponent } from './adapters/pdf-renderer'
+import type { IVideoCompositorComponent } from './adapters/video-compositor'
+import type { INetworkValidatorComponent } from './logic/network-validator'
+import type { IPresentationManager } from './logic/presentation-manager'
 import type { metricDeclarations } from './metrics'
 
 export interface GlobalContext {
@@ -19,6 +26,13 @@ export interface BaseComponents {
   server: IHttpServerComponent<GlobalContext>
   metrics: IMetricsComponent<keyof typeof metricDeclarations>
   fetcher: IFetchComponent
+  presentationManager: IPresentationManager
+  googleDrive: IGoogleDriveComponent
+  fileProvider: IFileProviderComponent
+  liveKitPublisher: ILiveKitPublisherComponent
+  pdfRenderer: IPdfRendererComponent
+  videoCompositor: IVideoCompositorComponent
+  networkValidator: INetworkValidatorComponent
 }
 
 // components used in runtime

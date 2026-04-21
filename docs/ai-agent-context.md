@@ -1,40 +1,84 @@
-# AI Agent Context
+# AI agent context
 
-**Service Purpose:**
+**Service purpose:**
 
-<!-- Description of the service purpose -->
+Cast Presenter Server is a real-time presentation streaming service
+for Decentraland. It renders PDF/PPTX slides as video frames and
+publishes them to a LiveKit room so scene participants can watch a
+live presentation. It also supports embedded video playback and
+remote control through LiveKit data channels.
 
-**Key Capabilities:**
+**Key capabilities:**
 
-<!-- Description of the service's capabilities or features -->
+- Accept PDF/PPTX uploads and stream rendered slides as a LiveKit
+  video track.
+- Navigate slides (next, prev, goto) with instant keyframe updates.
+- Detect video annotations in PDFs and composite them onto slides
+  using ffmpeg.
+- Proxy public Google Drive files for embedded video playback.
+- Respond to data channel commands from authorized participants.
+- Broadcast presentation state to all room participants on every
+  mutation and on explicit `get-state` requests.
 
-- Capability 1
-- Capability 2
+**Communication pattern:**
 
-**Communication Pattern:**
+- HTTP REST API for presentation lifecycle (create, navigate,
+  play/pause, stop, get state).
+- LiveKit WebRTC data channels for real-time bidirectional control
+  between the bot and scene participants.
+- LiveKit video track publishing for slide and video output.
 
-<!-- Communication's protocols, for example, HTTP REST API -->
+**Technology stack:**
 
-**Technology Stack:**
+- Runtime: Node.js 24 (Alpine Linux, non-root container)
+- Language: TypeScript (strict mode)
+- HTTP framework: @well-known-components/http-server
+- WebRTC: @livekit/rtc-node
+- PDF rendering: pdfjs-dist + @napi-rs/canvas
+- Video processing: ffmpeg (spawned as child process)
+- File upload: busboy
+- Observability: Prometheus metrics, structured JSON logging,
+  distributed tracing
 
-<!-- Technology stack list, including runtime, language, HTTP framework, etc -->
+**External dependencies:**
 
-- Runtime: Node JS
+- LiveKit SFU (WebRTC room connection and media publishing)
+- comms-gatekeeper (issues LiveKit bot tokens)
+- Google Drive (public file streaming for embedded videos)
+- ffmpeg (system binary for video transcoding and compositing)
 
-**External Dependencies:**
+**Key concepts:**
 
-<!-- External dependencies information, including database, storage, etc. -->
+- **Session:** An in-memory object representing an active
+  presentation. Each session holds the PDF renderer, LiveKit
+  publisher, video compositor, and cached video paths. Sessions are
+  identified by a UUID.
+- **Bot token:** A LiveKit JWT issued by comms-gatekeeper with
+  identity `presentation-bot:{roomId}:{timestamp}` and role
+  `presentation`. The server uses this token to join the room. A
+  successful connection acts as implicit authentication.
+- **Data channel protocol:** The bot listens on the `presentation`
+  topic for JSON commands (`navigate`, `video:play`, `video:pause`,
+  `stop`, `get-state`) and broadcasts `presentation:state` messages
+  after every mutation.
+- **SSRF protection:** Video URLs extracted from PDF annotations are
+  validated against an HTTPS-only domain allowlist before download.
+- **Idle cleanup:** Sessions with no remote participants for 5
+  minutes are automatically stopped and cleaned up.
 
-- Database: PostgreSQL (world metadata, permissions, blocked wallets)
+**Video playback lifecycle:**
 
-**Key Concepts:**
+See [video-playback-lifecycle.md](video-playback-lifecycle.md) for the
+full play/pause/resume/stop lifecycle, FFmpeg process architecture,
+heartbeat mechanism, seek warmup logic, and video caching flow.
 
-<!-- A set of key concepts the AI agent must know to understand the code -->
+**Architecture notes:**
 
-- **Concept 1**: To do X, Y is required, as Z is then checked.
-
-**Database notes:**
-
-<!-- A list of notes for AI agents -->
-
-- **Y**: information useful for the context of AI Agents
+- The server is stateless across restarts (all sessions are
+  in-memory).
+- PDF rendering and video compositing happen server-side; clients
+  only receive a standard video track.
+- Presentation commands are authorized by checking the sender's
+  identity against the `presenters` array in LiveKit room metadata,
+  which is managed exclusively by comms-gatekeeper via the server-side
+  API. Room participants cannot modify room metadata.
