@@ -4,7 +4,7 @@ import {
   createPresentationManager
 } from '../../src/logic/presentation-manager'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
-import type { IRenderer } from '../../src/adapters/pdf-renderer/types'
+import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
 

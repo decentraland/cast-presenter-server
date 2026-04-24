@@ -7,7 +7,7 @@ import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, Presen
 import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
-import type { IRenderer } from '../../adapters/pdf-renderer/types'
+import type { IRenderer } from '../../adapters/renderer/types'
 import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 import type { FileType } from '../file-validator'
