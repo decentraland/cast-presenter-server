@@ -1,4 +1,4 @@
-import { sanitizeFilename, validateMagicBytes } from '../../src/logic/file-validator'
+import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../src/logic/file-validator'
 
 describe('when validating file uploads', () => {
   describe('when checking magic bytes', () => {
@@ -49,6 +49,40 @@ describe('when validating file uploads', () => {
     describe('and the buffer is empty', () => {
       it('should return false', () => {
         expect(validateMagicBytes(Buffer.alloc(0), 'pdf')).toBe(false)
+      })
+    })
+  })
+
+  describe('when detecting file type from filename', () => {
+    describe('and the filename has a .pdf extension', () => {
+      it('should return "pdf"', () => {
+        expect(getFileTypeFromName('slides.pdf')).toBe('pdf')
+      })
+    })
+
+    describe('and the filename has a .pptx extension', () => {
+      it('should return "pptx"', () => {
+        expect(getFileTypeFromName('deck.pptx')).toBe('pptx')
+      })
+    })
+
+    describe('and the extension is uppercase', () => {
+      it('should match case-insensitively', () => {
+        expect(getFileTypeFromName('SLIDES.PDF')).toBe('pdf')
+        expect(getFileTypeFromName('Deck.Pptx')).toBe('pptx')
+      })
+    })
+
+    describe('and the extension is unsupported', () => {
+      it('should return null', () => {
+        expect(getFileTypeFromName('notes.key')).toBeNull()
+        expect(getFileTypeFromName('README.md')).toBeNull()
+      })
+    })
+
+    describe('and there is no extension', () => {
+      it('should return null', () => {
+        expect(getFileTypeFromName('slides')).toBeNull()
       })
     })
   })

@@ -1,8 +1,32 @@
 import * as path from 'path'
 
+/**
+ * Supported presentation file formats.
+ *
+ * `as const` + derived `FileType` union keeps the set extensible (to add a new
+ * format: append the const and every `Record<FileType, T>` lookup forces a
+ * compile error until the new entry is filled in).
+ */
+export const FILE_TYPES = {
+  PDF: 'pdf',
+  PPTX: 'pptx'
+} as const
+
+export type FileType = (typeof FILE_TYPES)[keyof typeof FILE_TYPES]
+
 // PDF starts with %PDF, PPTX is a ZIP starting with PK\x03\x04
 const PDF_MAGIC = Buffer.from('%PDF')
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
+
+const MAGIC_BYTES: Record<FileType, Buffer> = {
+  [FILE_TYPES.PDF]: PDF_MAGIC,
+  [FILE_TYPES.PPTX]: ZIP_MAGIC
+}
+
+const EXTENSION_MAP: Record<string, FileType> = {
+  '.pdf': FILE_TYPES.PDF,
+  '.pptx': FILE_TYPES.PPTX
+}
 
 /**
  * Validates that a buffer's first 4 bytes match the expected magic bytes
@@ -12,11 +36,10 @@ const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
  * @param fileType - Expected file format
  * @returns true if the magic bytes match
  */
-export function validateMagicBytes(buffer: Buffer, fileType: 'pdf' | 'pptx'): boolean {
+export function validateMagicBytes(buffer: Buffer, fileType: FileType): boolean {
   if (buffer.length < 4) return false
-  if (fileType === 'pdf') return buffer.subarray(0, 4).equals(PDF_MAGIC)
-  if (fileType === 'pptx') return buffer.subarray(0, 4).equals(ZIP_MAGIC)
-  return false
+  const magic = MAGIC_BYTES[fileType]
+  return buffer.subarray(0, magic.length).equals(magic)
 }
 
 /**
@@ -35,12 +58,9 @@ export function sanitizeFilename(filename: string): string {
  * Detects the presentation file type from its extension.
  *
  * @param filename - Filename to check (case-insensitive)
- * @returns 'pdf' or 'pptx' if supported, null otherwise
+ * @returns A FileType if recognized, null otherwise
  */
-export function getFileTypeFromName(filename: string): 'pdf' | 'pptx' | null {
-  const lower = filename.toLowerCase()
-  if (lower.endsWith('.pdf')) return 'pdf'
-  // TODO: Re-enable PPTX support once parsing is stable
-  // if (lower.endsWith('.pptx')) return 'pptx'
-  return null
+export function getFileTypeFromName(filename: string): FileType | null {
+  const ext = path.extname(filename).toLowerCase()
+  return EXTENSION_MAP[ext] ?? null
 }

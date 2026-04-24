@@ -6,9 +6,10 @@ import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfac
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
-import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
+import type { IRenderer } from '../../adapters/pdf-renderer/types'
 import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
+import type { FileType } from '../file-validator'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
@@ -26,7 +27,7 @@ class SessionDiskQuotaExceededError extends Error {
 }
 
 interface InternalSession extends PresentationSession {
-  renderer: IPdfRenderer
+  renderer: IRenderer
   publisher: ILiveKitPublisher
   compositor: IVideoCompositor | null
   cachedVideoPaths: Map<string, string>
@@ -225,7 +226,7 @@ export async function createPresentationManager(
 
   async function createPresentation(
     fileBuffer: Buffer,
-    fileType: 'pdf' | 'pptx',
+    fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
     fileName?: string
@@ -241,14 +242,14 @@ export async function createPresentationManager(
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
 
-    let renderer: ReturnType<typeof pdfRenderer.createRenderer> | null = null
+    let renderer: IRenderer | null = null
     let tempDir: string | null = null
 
     try {
       // Connect to LiveKit FIRST — validates the token (fail-fast auth)
       await publisher.connect(livekitUrl, livekitToken)
 
-      // Initialize PDF renderer
+      // Initialize renderer for the detected format
       renderer = pdfRenderer.createRenderer()
       await renderer.initialize(fileBuffer)
       const slideCount = renderer.getSlideCount()

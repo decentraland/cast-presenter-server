@@ -9,11 +9,13 @@ export interface RenderResult {
 }
 
 /**
- * A PDF renderer instance bound to a single loaded document.
+ * A presentation renderer instance bound to a single loaded document.
  *
- * Renders slides to RGBA buffers and extracts video annotations.
+ * Renders slides to RGBA buffers and extracts video annotations. Implementations
+ * exist for PDF (pdfjs-dist + @napi-rs/canvas) and PPTX (vendored OOXML parser +
+ * @napi-rs/canvas).
  */
-export interface IPdfRenderer {
+export interface IRenderer {
   initialize(fileBuffer: Buffer): Promise<void>
   renderSlide(index: number): Promise<RenderResult>
   getSlideVideos(index: number): Promise<SlideVideoInfo[]>
@@ -22,13 +24,13 @@ export interface IPdfRenderer {
 }
 
 /**
- * Factory component for creating per-session PDF renderers.
+ * Factory component for creating per-session renderers.
  */
-export interface IPdfRendererComponent extends IBaseComponent {
+export interface IRendererComponent extends IBaseComponent {
   /**
    * Creates a new renderer instance.
    *
-   * @returns An uninitialized IPdfRenderer (call initialize() before use)
+   * @returns An uninitialized IRenderer (call initialize() before use)
    */
-  createRenderer(): IPdfRenderer
+  createRenderer(): IRenderer
 }

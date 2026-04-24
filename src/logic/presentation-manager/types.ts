@@ -1,12 +1,13 @@
 import type { IBaseComponent } from '@well-known-components/interfaces'
 import type { SlideVideoInfo } from '../../adapters/video-compositor/types'
+import type { FileType } from '../file-validator'
 
 /** Internal session state for a running presentation. */
 export interface PresentationSession {
   id: string
   roomId: string
   fileName: string
-  fileType: 'pdf' | 'pptx'
+  fileType: FileType
   slideCount: number
   currentSlide: number
   createdAt: Date
@@ -23,7 +24,7 @@ export interface PresentationInfo {
   fileName: string
   slideCount: number
   currentSlide: number
-  fileType: 'pdf' | 'pptx'
+  fileType: FileType
 }
 
 /** Full presentation state including slide videos and playback status. */
@@ -32,7 +33,7 @@ export interface PresentationState {
   fileName: string
   slideCount: number
   currentSlide: number
-  fileType: 'pdf' | 'pptx'
+  fileType: FileType
   slideVideos: SlideVideoInfo[]
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
   /** Human-readable error message; present only when videoState === 'error'. */
@@ -79,7 +80,7 @@ export interface IPresentationManager extends IBaseComponent {
    */
   createPresentation(
     fileBuffer: Buffer,
-    fileType: 'pdf' | 'pptx',
+    fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
     fileName?: string

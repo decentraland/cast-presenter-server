@@ -1,2 +1,2 @@
 export { createPdfRendererComponent } from './component'
-export type { IPdfRenderer, IPdfRendererComponent, RenderResult } from './types'
+export type { IRenderer, IRendererComponent, RenderResult } from './types'
