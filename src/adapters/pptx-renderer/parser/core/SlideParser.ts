@@ -211,8 +211,17 @@ export class SlideParser {
     masterBodyStyle?: Record<string, unknown>,
     masterOtherStyle?: Record<string, unknown>,
     layoutPhMap?: Record<string, Record<string, unknown>>,
-    masterPhMap?: Record<string, Record<string, unknown>>
+    masterPhMap?: Record<string, Record<string, unknown>>,
+    depth = 0
   ): Shape[] {
+    // Depth cap prevents a crafted PPTX with deeply nested <p:grpSp> groups
+    // from exhausting the call stack. 50 is well above any legitimate deck
+    // (PowerPoint's UI doesn't nest beyond ~10 for manual grouping).
+    const MAX_GROUP_NESTING_DEPTH = 50
+    if (depth > MAX_GROUP_NESTING_DEPTH) {
+      throw new Error(`PPTX shape nesting exceeds ${MAX_GROUP_NESTING_DEPTH} levels`)
+    }
+
     const shapes: Shape[] = []
 
     // Parse regular shapes <p:sp>
@@ -233,7 +242,7 @@ export class SlideParser {
 
     // Parse pictures/media <p:pic>
     for (const pic of toArray(shapeTree['p:pic'] as unknown)) {
-      const shape = this.parsePicture(pic as Record<string, unknown>, relParser, slidePath, themeColors, groupTransform)
+      const shape = this.parsePicture(pic as Record<string, unknown>, relParser, slidePath, groupTransform)
       if (shape) shapes.push(shape)
     }
 
@@ -255,7 +264,8 @@ export class SlideParser {
             masterBodyStyle,
             masterOtherStyle,
             layoutPhMap,
-            masterPhMap
+            masterPhMap,
+            depth + 1
           )
         )
       } else {
@@ -271,7 +281,8 @@ export class SlideParser {
             masterBodyStyle,
             masterOtherStyle,
             layoutPhMap,
-            masterPhMap
+            masterPhMap,
+            depth + 1
           )
         )
       }
@@ -435,7 +446,6 @@ export class SlideParser {
     pic: Record<string, unknown>,
     relParser: RelationshipParser,
     slidePath: string,
-    themeColors?: Record<string, string>,
     groupTransform?: GroupTransform
   ): Shape | null {
     const nvPicPr = pic['p:nvPicPr'] as Record<string, unknown> | undefined
@@ -453,22 +463,6 @@ export class SlideParser {
 
     // Detect placeholder references — geometry may be inherited from the slide layout/master
     const nvPr = getNode(nvPicPr, ['p:nvPr']) as Record<string, unknown> | undefined
-    const phNode = getNode(nvPr, ['p:ph']) as Record<string, unknown> | undefined
-    if (phNode && !clipShapeVal) {
-      const phType = getAttr(phNode as unknown, 'type') ?? 'unknown'
-      const phIdx = getAttr(phNode as unknown, 'idx') ?? '?'
-      console.warn(
-        `[SlideParser] Picture placeholder (type="${phType}", idx=${phIdx}) has no a:prstGeom — geometry may be inherited from slide layout/master`
-      )
-    }
-
-    console.log('[SlideParser] parsePicture — prstGeom:', {
-      clipShapeVal,
-      clipShape,
-      clipAdjustValues,
-      rawPrstGeom: JSON.stringify(prstGeom)
-    })
-
     const cNvPr = getNode(nvPicPr, ['p:cNvPr']) as Record<string, unknown> | undefined
     const name = getAttr(cNvPr as unknown, 'name')
     const title = getAttr(cNvPr as unknown, 'title') ?? ''
@@ -542,22 +536,6 @@ export class SlideParser {
     if (isExternalVideo) {
       mediaType = 'video'
     }
-
-    console.log('[SlideParser] parsePicture — cNvPr raw:', JSON.stringify(cNvPr))
-    console.log('[SlideParser] parsePicture:', {
-      name,
-      title,
-      hlinkClick,
-      hlinkRId: getAttr(hlinkClick as unknown, 'r:id'),
-      externalUrl,
-      titleExt,
-      isExternalVideo,
-      mediaRef,
-      mediaType
-    })
-
-    // Suppress unused param warning for themeColors (reserved for future use on picture text bodies)
-    void themeColors
 
     return new Shape({
       type: 'picture',

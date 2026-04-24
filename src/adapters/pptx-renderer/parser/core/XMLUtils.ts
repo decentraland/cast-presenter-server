@@ -3,8 +3,17 @@ import { XMLParser } from 'fast-xml-parser'
 const defaultParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
-  parseAttributeValue: true,
+  // Keep attributes as strings. Auto-parsing coerces hex colour values like
+  // "000000" into the number 0 and "123456" into 123456, which then round-trip
+  // through `#${val}` as `#0` / `#123456` — broken or silently wrong. Callers
+  // that need numbers go through getAttrNumber(), which does the Number()
+  // conversion itself.
+  parseAttributeValue: false,
   trimValues: false,
+  // Disable DTD/entity expansion. fast-xml-parser processes entities by
+  // default; OOXML doesn't use custom entities, so turning this off blocks
+  // XXE / billion-laughs attacks without affecting legitimate decks.
+  processEntities: false,
   isArray: (_name, _jpath, isLeafNode, _isAttribute) => {
     // Force these elements to always be arrays for consistent parsing
     const alwaysArray = [
@@ -48,7 +57,8 @@ export function parseXML(text: string): Record<string, unknown> {
 
 export function getAttr(obj: unknown, attr: string): string | undefined {
   if (obj && typeof obj === 'object') {
-    return (obj as Record<string, unknown>)[`@_${attr}`] as string | undefined
+    const val = (obj as Record<string, unknown>)[`@_${attr}`]
+    return typeof val === 'string' ? val : undefined
   }
   return undefined
 }
@@ -60,27 +70,9 @@ export function getAttrNumber(obj: unknown, attr: string): number | undefined {
   return isNaN(num) ? undefined : num
 }
 
-export function getAttrBool(obj: unknown, attr: string): boolean {
-  const val = (obj as Record<string, unknown> | null | undefined)?.[`@_${attr}`]
-  return val === 1 || val === '1' || val === true || val === 'true'
-}
-
 export function toArray<T>(value: T | T[] | undefined): T[] {
   if (value === undefined) return []
   return Array.isArray(value) ? value : [value]
-}
-
-export function getText(obj: unknown, path: string[]): string | undefined {
-  let current: unknown = obj
-  for (const key of path) {
-    if (current === null || current === undefined || typeof current !== 'object') {
-      return undefined
-    }
-    current = (current as Record<string, unknown>)[key]
-  }
-  if (typeof current === 'string') return current
-  if (typeof current === 'number') return String(current)
-  return undefined
 }
 
 export function getNode(obj: unknown, path: string[]): unknown {

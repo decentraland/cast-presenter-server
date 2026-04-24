@@ -6,6 +6,15 @@ import { DEFAULT_SLIDE_HEIGHT_PX, DEFAULT_SLIDE_WIDTH_PX, EMU_PER_PIXEL } from '
 import { LRUCache } from '../utils/memory'
 import type { Slide } from '../models/Slide'
 
+// Guard against ZIP bombs: a small compressed PPTX could decompress into many
+// GBs of XML/media and exhaust memory. JSZip doesn't validate this on its own,
+// so we sum the declared uncompressed sizes of every entry after loadAsync and
+// reject before reading any content. 500 MB is generous for legitimate decks
+// (image-heavy 200-slide deck) and well below single-session disk/RAM limits.
+const MAX_UNCOMPRESSED_BYTES = 500 * 1024 * 1024
+/** Per-embedded-media cap written to disk in extractEmbeddedVideo. */
+export const MAX_EMBEDDED_MEDIA_BYTES = 200 * 1024 * 1024
+
 export class PPTXParser {
   private zip: JSZip | null = null
   private slideFiles: string[] = []
@@ -28,6 +37,23 @@ export class PPTXParser {
     // Load the ZIP archive
     // eslint-disable-next-line import/namespace
     this.zip = await JSZip.loadAsync(file)
+
+    // ZIP-bomb guard: reject before reading any content if the declared
+    // uncompressed size exceeds the cap. Using _data.uncompressedSize reads
+    // JSZip's internal header value — authoritative for zip entries. Summing
+    // across all entries avoids the split-across-many-small-files trick.
+    let totalUncompressed = 0
+    for (const entry of Object.values(this.zip.files)) {
+      if (entry.dir) continue
+      const entryWithData = entry as unknown as { _data?: { uncompressedSize?: number } }
+      const size = entryWithData._data?.uncompressedSize ?? 0
+      totalUncompressed += size
+      if (totalUncompressed > MAX_UNCOMPRESSED_BYTES) {
+        throw new Error(
+          `PPTX uncompressed size exceeds ${MAX_UNCOMPRESSED_BYTES / 1024 / 1024} MB limit (possible ZIP bomb)`
+        )
+      }
+    }
 
     // Parse the package relationships to find presentation.xml
     const pkgRelsText = await this.readText('_rels/.rels')

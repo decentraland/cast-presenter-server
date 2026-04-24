@@ -1,13 +1,14 @@
 import * as fs from 'fs'
+import * as fsp from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { GlobalFonts, type SKRSContext2D, createCanvas, loadImage } from '@napi-rs/canvas'
-import { PPTXParser } from './parser/core/PPTXParser'
+import { MAX_EMBEDDED_MEDIA_BYTES, PPTXParser } from './parser/core/PPTXParser'
 import type { Geometry } from './parser/models/Geometry'
 import type { Shape } from './parser/models/Shape'
 import type { Slide } from './parser/models/Slide'
 import type { Fill, Stroke, TextParagraph, TextRun } from './parser/models/types'
-import type { IRenderer, IRendererComponent, RenderResult } from '../pdf-renderer/types'
+import type { IRenderer, IRendererComponent, RenderResult } from '../renderer/types'
 import type { SlideVideoInfo } from '../video-compositor/types'
 
 const TARGET_WIDTH = 960
@@ -531,9 +532,9 @@ function renderParagraphs(
       // Bullet on first visual line only — positioned at marL + indent (indent is negative for hanging bullets)
       if (isFirstLine && para.bullet && !para.bullet.none) {
         const bulletChar = para.bullet.char ?? (para.bullet.autoNum ? '1.' : '\u2022')
-        const firstRun = para.runs.find((r) => !r.lineBreak) ?? { fontSize: 18 }
-        ctx.font = buildFont(firstRun as TextRun)
-        ctx.fillStyle = (firstRun as TextRun).color ?? '#000000'
+        const firstRun: TextRun = para.runs.find((r) => !r.lineBreak) ?? { text: '', fontSize: 24 }
+        ctx.font = buildFont(firstRun)
+        ctx.fillStyle = firstRun.color ?? '#000000'
         ctx.textBaseline = 'top'
         const bulletX = geo.x + padL + marL + indent
         fillTextWithEmoji(ctx, bulletChar, bulletX, y, ctx.font)
@@ -653,12 +654,18 @@ function createRenderer(): IRenderer {
   async function extractEmbeddedVideo(mediaRef: string): Promise<string> {
     if (!parser) throw new Error('PPTX not initialized')
     if (!embeddedVideoDir) {
-      embeddedVideoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-pptx-video-'))
+      embeddedVideoDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cast-pptx-video-'))
     }
     const data = await parser.getMedia(mediaRef)
+    // Cap per-media bytes to complement the overall ZIP-bomb guard. An
+    // individual embedded asset shouldn't exceed this — if it does the deck
+    // is almost certainly malicious or corrupted.
+    if (data.byteLength > MAX_EMBEDDED_MEDIA_BYTES) {
+      throw new Error(`Embedded media ${mediaRef} exceeds ${MAX_EMBEDDED_MEDIA_BYTES / 1024 / 1024} MB limit`)
+    }
     const fileName = path.basename(mediaRef)
     const filePath = path.join(embeddedVideoDir, fileName)
-    fs.writeFileSync(filePath, Buffer.from(data))
+    await fsp.writeFile(filePath, new Uint8Array(data))
     return filePath
   }
 
@@ -715,6 +722,13 @@ function createRenderer(): IRenderer {
         let url = ''
 
         if (shape.externalUrl) {
+          // Defence-in-depth: the video-compositor runs full SSRF validation
+          // (HTTPS + domain allowlist + private-IP block) on download, but a
+          // crafted PPTX can embed hyperlinks with dangerous schemes that we
+          // shouldn't even surface to callers or log. Accept only http/https
+          // here; everything else (file:, data:, javascript:, ftp:, gopher:,
+          // etc.) gets dropped silently.
+          if (!/^https?:\/\//i.test(shape.externalUrl)) continue
           url = shape.externalUrl
         } else if (shape.mediaRef) {
           url = await extractEmbeddedVideo(shape.mediaRef)
