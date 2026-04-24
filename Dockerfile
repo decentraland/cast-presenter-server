@@ -18,7 +18,10 @@ RUN yarn install --prod --frozen-lockfile
 
 FROM node:24-trixie-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends tini ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  tini ffmpeg ca-certificates \
+  fontconfig fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
 
 # NODE_ENV is used to configure some runtime options, like JSON logger
 ENV NODE_ENV production
