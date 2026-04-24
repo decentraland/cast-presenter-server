@@ -31,6 +31,7 @@ export interface BaseComponents {
   fileProvider: IFileProviderComponent
   liveKitPublisher: ILiveKitPublisherComponent
   pdfRenderer: IRendererComponent
+  pptxRenderer: IRendererComponent
   videoCompositor: IVideoCompositorComponent
   networkValidator: INetworkValidatorComponent
 }

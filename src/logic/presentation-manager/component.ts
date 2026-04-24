@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/pdf-renderer/types'
@@ -127,17 +128,24 @@ function classifyVideoError(err: Error): VideoErrorInfo {
  *
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
- * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, videoCompositor
+ * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'videoCompositor'
+    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
   >
 ): Promise<IPresentationManager> {
-  const { config, logs, metrics, liveKitPublisher, pdfRenderer, videoCompositor } = components
+  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
+
+  // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
+  // add the adapter component to this map — the compiler forces coverage.
+  const renderers: Record<FileType, typeof pdfRenderer> = {
+    [FILE_TYPES.PDF]: pdfRenderer,
+    [FILE_TYPES.PPTX]: pptxRenderer
+  }
 
   // Resolve config at component creation (0 = unlimited per .env.default docs)
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
@@ -250,7 +258,7 @@ export async function createPresentationManager(
       await publisher.connect(livekitUrl, livekitToken)
 
       // Initialize renderer for the detected format
-      renderer = pdfRenderer.createRenderer()
+      renderer = renderers[fileType].createRenderer()
       await renderer.initialize(fileBuffer)
       const slideCount = renderer.getSlideCount()
       if (slideCount === 0) {

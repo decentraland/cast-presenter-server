@@ -72,6 +72,9 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
     pdfRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
     },
+    pptxRenderer: {
+      createRenderer: jest.fn().mockReturnValue(createMockRenderer())
+    },
     videoCompositor: {
       createCompositor: jest.fn().mockReturnValue(createMockCompositor()),
       destroyTempDir: jest.fn()
