@@ -1,4 +1,4 @@
-import * as JSZip from 'jszip'
+import JSZip from 'jszip'
 import { RelationshipParser } from './RelationshipParser'
 import { SlideParser } from './SlideParser'
 import { getAttr, getAttrNumber, getNode, parseXML, toArray } from './XMLUtils'
@@ -35,24 +35,23 @@ export class PPTXParser {
 
   async parse(file: ArrayBuffer | Uint8Array): Promise<void> {
     // Load the ZIP archive
-    // eslint-disable-next-line import/namespace
     this.zip = await JSZip.loadAsync(file)
 
     // ZIP-bomb guard: reject before reading any content if the declared
-    // uncompressed size exceeds the cap. Using _data.uncompressedSize reads
-    // JSZip's internal header value — authoritative for zip entries. Summing
-    // across all entries avoids the split-across-many-small-files trick.
+    // uncompressed size exceeds the cap. Walks JSZip's public forEach iterator
+    // (no internal-API poking) and reads the header's uncompressedSize for
+    // each entry. Summing across entries catches split-across-many-small-files
+    // attacks too.
     let totalUncompressed = 0
-    for (const entry of Object.values(this.zip.files)) {
-      if (entry.dir) continue
+    this.zip.forEach((_relativePath, entry) => {
+      if (entry.dir) return
       const entryWithData = entry as unknown as { _data?: { uncompressedSize?: number } }
-      const size = entryWithData._data?.uncompressedSize ?? 0
-      totalUncompressed += size
-      if (totalUncompressed > MAX_UNCOMPRESSED_BYTES) {
-        throw new Error(
-          `PPTX uncompressed size exceeds ${MAX_UNCOMPRESSED_BYTES / 1024 / 1024} MB limit (possible ZIP bomb)`
-        )
-      }
+      totalUncompressed += entryWithData._data?.uncompressedSize ?? 0
+    })
+    if (totalUncompressed > MAX_UNCOMPRESSED_BYTES) {
+      throw new Error(
+        `PPTX uncompressed size exceeds ${MAX_UNCOMPRESSED_BYTES / 1024 / 1024} MB limit (possible ZIP bomb)`
+      )
     }
 
     // Parse the package relationships to find presentation.xml
