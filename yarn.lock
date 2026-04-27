@@ -1538,19 +1538,19 @@
     "@types/node" "*"
     form-data "^4.0.0"
 
-"@types/node@*", "@types/node@^20.14.2", "@types/node@^20.3.1":
-  version "20.14.2"
-  resolved "https://registry.npmjs.org/@types/node/-/node-20.14.2.tgz"
-  integrity sha512-xyu6WAMVwv6AKFLB+e/7ySZVr/0zLCzOa7rSpq6jNwpqOrUbcACDWC+53d4n2QHOnDou0fbIsg8wZu/sxrnI4Q==
-  dependencies:
-    undici-types "~5.26.4"
-
-"@types/node@>=13.7.0":
+"@types/node@*", "@types/node@>=13.7.0":
   version "25.5.2"
   resolved "https://registry.yarnpkg.com/@types/node/-/node-25.5.2.tgz#94861e32f9ffd8de10b52bbec403465c84fff762"
   integrity sha512-tO4ZIRKNC+MDWV4qKVZe3Ql/woTnmHDr5JD8UI5hn2pwBrHEwOEMZK7WlNb5RKB6EoJ02gwmQS9OrjuFnZYdpg==
   dependencies:
     undici-types "~7.18.0"
+
+"@types/node@^20.14.2", "@types/node@^20.3.1":
+  version "20.14.2"
+  resolved "https://registry.npmjs.org/@types/node/-/node-20.14.2.tgz"
+  integrity sha512-xyu6WAMVwv6AKFLB+e/7ySZVr/0zLCzOa7rSpq6jNwpqOrUbcACDWC+53d4n2QHOnDou0fbIsg8wZu/sxrnI4Q==
+  dependencies:
+    undici-types "~5.26.4"
 
 "@types/node@^22.5.4":
   version "22.13.4"
@@ -1838,19 +1838,10 @@
     "@well-known-components/interfaces" "^1.2.0"
     tslib "^2.5.0"
 
-"@well-known-components/interfaces@^1.2.0", "@well-known-components/interfaces@^1.4.1":
+"@well-known-components/interfaces@^1.2.0", "@well-known-components/interfaces@^1.4.1", "@well-known-components/interfaces@^1.5.1", "@well-known-components/interfaces@^1.5.2":
   version "1.5.2"
   resolved "https://registry.yarnpkg.com/@well-known-components/interfaces/-/interfaces-1.5.2.tgz#ef7001a19d410459e65b216dd948d15be19e4efa"
   integrity sha512-TzKQblOci2Azczk1DZ4JL5aJW7hwq7kHrFMO4lCRMmW51bA71BtiZlq0WP72Dln067xTSoHQAU4WHCFJlGYvEQ==
-  dependencies:
-    "@types/node" "^20.3.1"
-    "@types/node-fetch" "^2.5.12"
-    typed-url-params "^1.0.1"
-
-"@well-known-components/interfaces@^1.5.1":
-  version "1.5.1"
-  resolved "https://registry.npmjs.org/@well-known-components/interfaces/-/interfaces-1.5.1.tgz"
-  integrity sha512-2/8/xSOGXB8UsC4P5ORqxox+zCep35ShvW8i660YrqO57jeElfUVKOtekYEZDH0TaebP4ek35bJUW+WbAw/d0w==
   dependencies:
     "@types/node" "^20.3.1"
     "@types/node-fetch" "^2.5.12"
