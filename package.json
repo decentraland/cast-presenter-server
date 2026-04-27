@@ -58,7 +58,7 @@
     "@well-known-components/metrics": "^2.1.0",
     "@well-known-components/tracer-component": "^1.2.0",
     "busboy": "^1.6.0",
-    "fast-xml-parser": "5.5.12",
+    "fast-xml-parser": "5.7.0",
     "jszip": "3.10.1",
     "pdfjs-dist": "^4.7.76"
   }
