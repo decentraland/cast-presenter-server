@@ -1132,48 +1132,55 @@
   resolved "https://registry.yarnpkg.com/@livekit/mutex/-/mutex-1.1.1.tgz#72492b611d55be8130ba2271b7a436d94b1bc6d4"
   integrity sha512-EsshAucklmpuUAfkABPxJNhzj9v2sG7JuzFDL4ML1oJQSV14sqrpTYnsaOudMAw9yOaW53NU3QQTlUQoRs4czw==
 
-"@livekit/rtc-node-darwin-arm64@0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node-darwin-arm64/-/rtc-node-darwin-arm64-0.13.24.tgz#a586b50f329196365024383e56799ba98f72877c"
-  integrity sha512-gm5xOpGu6Rj/mNU2jEijcGhQGN2GdxV2dNYQm3NCKN7ow0BmMFZvXSCAWOWf+9oTutPXHnrc7EN1mt2v+lfqhA==
+"@livekit/rtc-ffi-bindings-darwin-arm64@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings-darwin-arm64/-/rtc-ffi-bindings-darwin-arm64-0.12.52-patch.0.tgz#ef54411e8e6c640cfedc9e6560af878299506245"
+  integrity sha512-IKUir6goV8yVRR7E2qrAP0JtH7gUyMkO0TG8G+dopO/fkXAsPpSealgI9fLcBJl0zhKK+eGCr741r6xR+xxsVw==
 
-"@livekit/rtc-node-darwin-x64@0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node-darwin-x64/-/rtc-node-darwin-x64-0.13.24.tgz#da4b6727e34f1162266473c71f57dbc47463a63b"
-  integrity sha512-jZSK5lHDp7+u0jby7PEWMzbxc0F0nLx6FT3FVjuMlT13ZY6QWKDUUCFbfDOtbdhiOZJYc5A4SwvubY6woEJXTg==
+"@livekit/rtc-ffi-bindings-darwin-x64@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings-darwin-x64/-/rtc-ffi-bindings-darwin-x64-0.12.52-patch.0.tgz#4922e9a9f8ea2e84b6ae9703374737c8a04e95dc"
+  integrity sha512-h2oKdGvK4E4nYxHc+hsHkYu+oJIhKKqrC96v1XSGa5fgIEcq4Bve6tNEwUCBTkvuGh/I2tOI83udgcF4P4+mhQ==
 
-"@livekit/rtc-node-linux-arm64-gnu@0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node-linux-arm64-gnu/-/rtc-node-linux-arm64-gnu-0.13.24.tgz#277a0d7da7243db1206ae65651fddbe213f8b52a"
-  integrity sha512-I+IeZET2h+viZ48moEFF0EWDHa+kLii5yuEsw38ya4mHZaZtlfbzrYKGKdONqbI9M9ldvv8XXuD0wFPjuH5CZw==
+"@livekit/rtc-ffi-bindings-linux-arm64-gnu@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings-linux-arm64-gnu/-/rtc-ffi-bindings-linux-arm64-gnu-0.12.52-patch.0.tgz#9cbd82cbd98fe401f36cfc3838530cb852818860"
+  integrity sha512-bWtJ3r+wQ1Fd8s8jiM7GnBMfaKepSYk5c4bgimMIC4mkz+puChpfaj9avz1M271FUgxnIAKCTz6fPN2ygIAFnw==
 
-"@livekit/rtc-node-linux-x64-gnu@0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node-linux-x64-gnu/-/rtc-node-linux-x64-gnu-0.13.24.tgz#c3bcfab4f2888a77ea79f071e197458732a597ba"
-  integrity sha512-vKOxzN/SsrtV8zIVwZCi31bZUhlb6RhJZ0NnY5MwKGSRFPi7Dwt8fmr0Vh0YmsY/p+4eZjKxvFmy7L3WVE54zw==
+"@livekit/rtc-ffi-bindings-linux-x64-gnu@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings-linux-x64-gnu/-/rtc-ffi-bindings-linux-x64-gnu-0.12.52-patch.0.tgz#01074c7f358415764126acfe3442174009f83abb"
+  integrity sha512-y1j4ciiCMaUrii0/XYwLFyRBRHDvx4202YCK5ePF3xB+9tW3Fuwexd/z4GuupCpP9eadGkpALCQt60wnLnFDnw==
 
-"@livekit/rtc-node-win32-x64-msvc@0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node-win32-x64-msvc/-/rtc-node-win32-x64-msvc-0.13.24.tgz#765d9b76a286ea6faa9091a146e40be5b926af95"
-  integrity sha512-yTzqwndq2oKLUkXW2i/BkZMJC6kZOpRO/DKvkkKQvqc3Q+JuWz1m48GmyjIwTOKF28QjqEU3+IrnD65Uu+mFOg==
+"@livekit/rtc-ffi-bindings-win32-x64-msvc@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings-win32-x64-msvc/-/rtc-ffi-bindings-win32-x64-msvc-0.12.52-patch.0.tgz#36ae23f1807dd6d965ca38305f364e4deacb53c3"
+  integrity sha512-a7eoTor7KgN4JDPqZjyBQjgkVIZcxkyP5Iau3O/1qDaYKboLMqSYHfSAk84Un4r0SsSFvxUXXDY3boMLJ7QYow==
 
-"@livekit/rtc-node@^0.13.24":
-  version "0.13.24"
-  resolved "https://registry.yarnpkg.com/@livekit/rtc-node/-/rtc-node-0.13.24.tgz#942bed85d8f0284b94ffb744d7f67b4d95dfa09a"
-  integrity sha512-06pF8YJlJk11R6J7kFXFpwV8etpbmCskoXFvwfwcDDixMqaP6qtS5srq3G23mDaRjx7ofz/PXg2GtiZbqNGT5A==
+"@livekit/rtc-ffi-bindings@0.12.52-patch.0":
+  version "0.12.52-patch.0"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-ffi-bindings/-/rtc-ffi-bindings-0.12.52-patch.0.tgz#f79c006a7cafa0fb0b5ac0555d701d00dbe44001"
+  integrity sha512-e01PH3AAS0/oN93LzgLDycDWzLGCpHqvZ35qzSuBWrG7V9mmQpdW/bOc6r9UFGZx/BcUXov4OTtao4OyDVVyHw==
   dependencies:
     "@bufbuild/protobuf" "^1.10.1"
+  optionalDependencies:
+    "@livekit/rtc-ffi-bindings-darwin-arm64" "0.12.52-patch.0"
+    "@livekit/rtc-ffi-bindings-darwin-x64" "0.12.52-patch.0"
+    "@livekit/rtc-ffi-bindings-linux-arm64-gnu" "0.12.52-patch.0"
+    "@livekit/rtc-ffi-bindings-linux-x64-gnu" "0.12.52-patch.0"
+    "@livekit/rtc-ffi-bindings-win32-x64-msvc" "0.12.52-patch.0"
+
+"@livekit/rtc-node@^0.13.26":
+  version "0.13.26"
+  resolved "https://registry.yarnpkg.com/@livekit/rtc-node/-/rtc-node-0.13.26.tgz#98efb9e740de0c74e623497d368cc1d642092539"
+  integrity sha512-srgTgIIjWrj+M7n2LbCXCgEbIpyhzc6c12FnUEhn7EtvI8MkC/RjlkeVmBJgl5j7YEe9t4CKnhTwN96ONAdzsA==
+  dependencies:
     "@datastructures-js/deque" "1.0.8"
     "@livekit/mutex" "^1.0.0"
+    "@livekit/rtc-ffi-bindings" "0.12.52-patch.0"
     "@livekit/typed-emitter" "^3.0.0"
     pino "^9.0.0"
     pino-pretty "^13.0.0"
-  optionalDependencies:
-    "@livekit/rtc-node-darwin-arm64" "0.13.24"
-    "@livekit/rtc-node-darwin-x64" "0.13.24"
-    "@livekit/rtc-node-linux-arm64-gnu" "0.13.24"
-    "@livekit/rtc-node-linux-x64-gnu" "0.13.24"
-    "@livekit/rtc-node-win32-x64-msvc" "0.13.24"
 
 "@livekit/typed-emitter@^3.0.0":
   version "3.0.0"

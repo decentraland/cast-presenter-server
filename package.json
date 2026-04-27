@@ -46,7 +46,7 @@
   "dependencies": {
     "@dcl/protocol": "1.0.0-23951495761.commit-bf007b9",
     "@dcl/traced-fetch-component": "^1.0.0",
-    "@livekit/rtc-node": "^0.13.24",
+    "@livekit/rtc-node": "^0.13.26",
     "@napi-rs/canvas": "^0.1.97",
     "@well-known-components/env-config-provider": "^1.2.0",
     "@well-known-components/fetch-component": "^3.0.0",
