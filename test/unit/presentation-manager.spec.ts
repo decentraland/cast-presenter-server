@@ -4,7 +4,7 @@ import {
   createPresentationManager
 } from '../../src/logic/presentation-manager'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
-import type { IPdfRenderer } from '../../src/adapters/pdf-renderer/types'
+import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
 
@@ -26,7 +26,7 @@ function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
   }
 }
 
-function createMockRenderer(): jest.Mocked<IPdfRenderer> {
+function createMockRenderer(): jest.Mocked<IRenderer> {
   return {
     initialize: jest.fn().mockResolvedValue(undefined),
     renderSlide: jest.fn().mockResolvedValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080 }),
@@ -70,6 +70,9 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       createPublisher: jest.fn().mockReturnValue(publisher)
     },
     pdfRenderer: {
+      createRenderer: jest.fn().mockReturnValue(createMockRenderer())
+    },
+    pptxRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
     },
     videoCompositor: {

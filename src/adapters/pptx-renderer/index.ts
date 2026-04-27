@@ -1,0 +1,1 @@
+export { createPptxRendererComponent } from './component'

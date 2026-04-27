@@ -1,5 +1,5 @@
 import { createCanvas } from '@napi-rs/canvas'
-import type { IPdfRenderer, IPdfRendererComponent, RenderResult } from './types'
+import type { IRenderer, IRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 
@@ -35,7 +35,7 @@ function pdfRectToCanvas(
   return { x, y, width, height }
 }
 
-function createRenderer(): IPdfRenderer {
+function createRenderer(): IRenderer {
   let doc: PDFDocumentProxy | null = null
   // Per-page annotation cache. renderSlide and getSlideVideos are both called
   // for every slide viewed, and getAnnotations() is a relatively expensive
@@ -145,7 +145,7 @@ function createRenderer(): IPdfRenderer {
   }
 }
 
-export function createPdfRendererComponent(): IPdfRendererComponent {
+export function createPdfRendererComponent(): IRendererComponent {
   return {
     createRenderer
   }

@@ -14,6 +14,7 @@ import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
 import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
 import { createPdfRendererComponent } from './adapters/pdf-renderer'
+import { createPptxRendererComponent } from './adapters/pptx-renderer'
 import { createVideoCompositorComponent } from './adapters/video-compositor'
 import { createNetworkValidatorComponent } from './logic/network-validator'
 import { createPresentationManager } from './logic/presentation-manager'
@@ -72,6 +73,7 @@ export async function initComponents(): Promise<AppComponents> {
 
   const liveKitPublisher = createLiveKitPublisherComponent()
   const pdfRenderer = createPdfRendererComponent()
+  const pptxRenderer = createPptxRendererComponent()
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
 
   const presentationManager = await createPresentationManager({
@@ -80,6 +82,7 @@ export async function initComponents(): Promise<AppComponents> {
     metrics,
     liveKitPublisher,
     pdfRenderer,
+    pptxRenderer,
     videoCompositor
   })
 
@@ -95,6 +98,7 @@ export async function initComponents(): Promise<AppComponents> {
     fileProvider,
     liveKitPublisher,
     pdfRenderer,
+    pptxRenderer,
     videoCompositor,
     networkValidator
   }

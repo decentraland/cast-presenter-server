@@ -4,11 +4,13 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
-import type { IPdfRenderer } from '../../adapters/pdf-renderer/types'
+import type { IRenderer } from '../../adapters/renderer/types'
 import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
+import type { FileType } from '../file-validator'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
@@ -26,7 +28,7 @@ class SessionDiskQuotaExceededError extends Error {
 }
 
 interface InternalSession extends PresentationSession {
-  renderer: IPdfRenderer
+  renderer: IRenderer
   publisher: ILiveKitPublisher
   compositor: IVideoCompositor | null
   cachedVideoPaths: Map<string, string>
@@ -126,17 +128,24 @@ function classifyVideoError(err: Error): VideoErrorInfo {
  *
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
- * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, videoCompositor
+ * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'videoCompositor'
+    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
   >
 ): Promise<IPresentationManager> {
-  const { config, logs, metrics, liveKitPublisher, pdfRenderer, videoCompositor } = components
+  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
+
+  // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
+  // add the adapter component to this map — the compiler forces coverage.
+  const renderers: Record<FileType, typeof pdfRenderer> = {
+    [FILE_TYPES.PDF]: pdfRenderer,
+    [FILE_TYPES.PPTX]: pptxRenderer
+  }
 
   // Resolve config at component creation (0 = unlimited per .env.default docs)
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
@@ -225,7 +234,7 @@ export async function createPresentationManager(
 
   async function createPresentation(
     fileBuffer: Buffer,
-    fileType: 'pdf' | 'pptx',
+    fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
     fileName?: string
@@ -241,15 +250,15 @@ export async function createPresentationManager(
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
 
-    let renderer: ReturnType<typeof pdfRenderer.createRenderer> | null = null
+    let renderer: IRenderer | null = null
     let tempDir: string | null = null
 
     try {
       // Connect to LiveKit FIRST — validates the token (fail-fast auth)
       await publisher.connect(livekitUrl, livekitToken)
 
-      // Initialize PDF renderer
-      renderer = pdfRenderer.createRenderer()
+      // Initialize renderer for the detected format
+      renderer = renderers[fileType].createRenderer()
       await renderer.initialize(fileBuffer)
       const slideCount = renderer.getSlideCount()
       if (slideCount === 0) {

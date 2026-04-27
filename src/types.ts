@@ -9,7 +9,7 @@ import type {
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
-import type { IPdfRendererComponent } from './adapters/pdf-renderer'
+import type { IRendererComponent } from './adapters/pdf-renderer'
 import type { IVideoCompositorComponent } from './adapters/video-compositor'
 import type { INetworkValidatorComponent } from './logic/network-validator'
 import type { IPresentationManager } from './logic/presentation-manager'
@@ -30,7 +30,8 @@ export interface BaseComponents {
   googleDrive: IGoogleDriveComponent
   fileProvider: IFileProviderComponent
   liveKitPublisher: ILiveKitPublisherComponent
-  pdfRenderer: IPdfRendererComponent
+  pdfRenderer: IRendererComponent
+  pptxRenderer: IRendererComponent
   videoCompositor: IVideoCompositorComponent
   networkValidator: INetworkValidatorComponent
 }
