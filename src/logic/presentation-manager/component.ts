@@ -149,16 +149,8 @@ export async function createPresentationManager(
     | 'videoCompositor'
   >
 ): Promise<IPresentationManager> {
-  const {
-    config,
-    logs,
-    metrics,
-    liveKitPublisher,
-    liveKitTokenVerifier,
-    pdfRenderer,
-    pptxRenderer,
-    videoCompositor
-  } = components
+  const { config, logs, metrics, liveKitPublisher, liveKitTokenVerifier, pdfRenderer, pptxRenderer, videoCompositor } =
+    components
   const logger = logs.getLogger('presentation-manager')
 
   // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
