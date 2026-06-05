@@ -1,5 +1,7 @@
 import type { IBaseComponent, ILoggerComponent } from '@well-known-components/interfaces'
+import type { OverlayConfig } from '../../logic/presentation-manager/types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
+import type { RemoteVideoTrack } from '@livekit/rtc-node'
 
 /** Video annotation geometry from a PDF slide. */
 export interface SlideVideoInfo {
@@ -40,6 +42,10 @@ export type CompositorErrorReason =
   | 'video-stream-error'
   /** The session-supplied onAudioData callback threw synchronously. */
   | 'audio-processing-failed'
+  /** Camera frame resolution changed mid-playback — ffmpeg must be restarted. */
+  | 'camera-resolution-changed'
+  /** Camera frame dimensions failed validation (out of bounds or non-integer). */
+  | 'camera-resolution-invalid'
 
 export interface IVideoCompositor {
   /**
@@ -55,7 +61,8 @@ export interface IVideoCompositor {
     slideHeight: number,
     publisher: ILiveKitPublisher,
     onAudioData?: (pcmChunk: Buffer) => void,
-    seekSeconds?: number
+    seekSeconds?: number,
+    presenterCamera?: { track: RemoteVideoTrack; overlayConfig: OverlayConfig }
   ): Promise<void>
   /**
    * Registers a callback for natural end-of-stream (FFmpeg exit code 0).

@@ -2,6 +2,18 @@ import type { IBaseComponent } from '@well-known-components/interfaces'
 import type { SlideVideoInfo } from '../../adapters/video-compositor/types'
 import type { FileType } from '../file-validator'
 
+/** Where the camera circle is drawn on the slide. */
+export type OverlayCorner = 'TL' | 'TR' | 'BL' | 'BR'
+
+/** Discrete size buckets: 15% / 20% / 25% of the slide width. */
+export type OverlaySize = 'small' | 'medium' | 'large'
+
+/** Per-session camera-overlay configuration; immutable once the session starts. */
+export interface OverlayConfig {
+  corner: OverlayCorner
+  size: OverlaySize
+}
+
 /** Internal session state for a running presentation. */
 export interface PresentationSession {
   id: string
@@ -16,6 +28,8 @@ export interface PresentationSession {
   lastFrameHeight: number
   slideVideos: SlideVideoInfo[]
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
+  /** Camera-overlay layout for this session. Undefined disables the overlay entirely. */
+  overlayConfig?: OverlayConfig
 }
 
 /** Metadata returned after creating a presentation. */
@@ -75,6 +89,7 @@ export interface IPresentationManager extends IBaseComponent {
    * @param livekitToken - Authentication token for the LiveKit room
    * @param livekitUrl - WebSocket URL of the LiveKit server
    * @param fileName - Optional display name for the presentation
+   * @param overlayConfig - Camera-overlay layout (corner + size); omit to disable the overlay.
    * @returns Metadata about the created presentation
    * @throws {MaxConcurrentPresentationsError} When the session limit is reached
    */
@@ -83,7 +98,8 @@ export interface IPresentationManager extends IBaseComponent {
     fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
-    fileName?: string
+    fileName?: string,
+    overlayConfig?: OverlayConfig
   ): Promise<PresentationInfo>
 
   /**

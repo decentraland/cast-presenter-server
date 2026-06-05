@@ -1,0 +1,14 @@
+# Phase 5 learnings
+
+## 2026-05-21 — done
+
+- ffmpeg `geq` probe passed on the executor host (ffmpeg 8.1, Homebrew, macOS). The probe wrote a 256x256 RGBA PNG with a red circle on transparent background — `format=yuva420p` + `geq` alpha mask is supported. Sample stderr also surfaces a benign image2 muxer warning about the lack of a `%d` pattern; harmless because `-frames:v 1` short-circuits it. Real ffmpeg in the Docker image still needs the same check at deploy time.
+- Spec step 9 said `cameraReader`/`cameraStream` were declared inside `startPlayback` (step 7) and needed hoisting. They were never declared locally in step 7 here — wrote them directly at the top of `createVideoCompositor` per the final intended shape. No shadowing to remove.
+- Spec step 10's `onEnd` snippet wanted to re-use `publisherLogger`, but that name only exists inside `createPresentation`'s closure — `playVideoSession` is sibling scope. Used `logs.getLogger(\`livekit-publisher:${session.id}\`)` instead. Typecheck caught it on first compile.
+- Spec step 11 told us to add the restart-on-flip block to **both** branches of the presenter-camera handler. The condition (`videoState === 'playing' && pausedVideoIndex >= 0`) is identical; just the log message differs ("activate" / "deactivate").
+- `COMPOSITOR_ERROR_MESSAGES` is `Record<CompositorErrorReason, string>` — adding `'camera-resolution-changed'` to the union forced a matching entry. Phase 4-style learning: adding to the discriminated union forces a sibling file update; tsc points you straight at it.
+- Stopped the canvas pump **and dropped `session.cameraOverlayCompositor`** before handing the track to ffmpeg. The pump compositor's `stop()` nulls `currentTrack`, so re-using the instance after `stop()` is pointless — instead we re-create a fresh compositor in `onEnd` and in the camera 'active' handler. The session's `lastPresenterCameraTrack` is the durable handle.
+- Wrapped the camera-pump async IIFE with a `.catch()` to silence any tail-end unhandled rejection during teardown (e.g. reader cancellation racing with a pending `read()`). The existing finally-block `cameraStdin.end()` was sufficient on the happy path; the outer catch is defensive.
+- Existing test `presentation-manager.spec.ts > "should pass onAudioData callback to compositor startPlayback"` had a pinned-arity assertion on `startPlayback`; adding the 9th parameter broke it. Updated the spec to append `undefined` for the optional `presenterCamera` arg.
+- Did **not** run the mode-flip stress test — needs Phase 6's integration scaffolding. Recorded as a Phase 6 follow-up.
+- `RemoteVideoTrack` is a value-style class in `@livekit/rtc-node`, but the codebase consistently imports it as a type. Followed the same pattern via `import type { RemoteVideoTrack } from '@livekit/rtc-node'` in both files. Eslint `import/order` re-sorted the trailing type-only `@livekit/rtc-node` import after the auto-fix; left it as-is.

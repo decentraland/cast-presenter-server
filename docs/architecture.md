@@ -135,6 +135,37 @@ Each presentation runs as an in-memory session identified by a UUID.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 
+## Loom-style camera overlay
+
+When the caller provides `overlayCorner` + `overlaySize` on
+`POST /presentations`, the server subscribes to the first presenter's
+camera track and composites it as a circular bubble on the presentation
+track. There are two composition paths:
+
+- **Slide only (camera on):** the canvas-based
+  `camera-overlay-compositor` adapter draws each camera frame onto the
+  current slide at ~20 fps and pushes the result via the LiveKit
+  publisher. Replaces the 500 ms heartbeat while the camera is live;
+  the heartbeat resumes when the camera goes away.
+- **Embedded video + camera:** `video-compositor` spawns ffmpeg with
+  three inputs (slide PNG, video stream, camera RGBA via FIFO). The
+  filter graph is pinned by
+  `test/unit/build-filter-complex.spec.ts`; for the live integration
+  matrix see `docs/specs/loom-camera-overlay/phase-6-integration-tests.md`.
+
+The 2x2 mode matrix is verified manually until a LiveKit test fixture
+exists (`test/integration/loom-overlay.spec.ts` is currently `describe.skip`):
+
+1. Connect a real presenter from a `cast2` browser client.
+2. Toggle the camera on - the circle should appear within ~1 s in
+   the configured corner and stay stable across slide navigation.
+3. Play an embedded video - the circle should persist through the
+   ffmpeg restart with at most a ~500 ms hiccup; audio should not stall.
+4. Mute the camera mid-video - the circle should vanish within ~1 s
+   and the video must keep playing.
+5. Resize / disable / re-enable the camera - the pipeline should
+   recover without restarting the LiveKit publisher.
+
 ## Data channel protocol
 
 The bot communicates with Decentraland scenes through LiveKit data

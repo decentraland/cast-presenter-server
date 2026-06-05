@@ -3,6 +3,7 @@ import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } f
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
 import { RequestTooLargeError, ValidationError } from '../errors'
+import type { OverlayConfig, OverlayCorner, OverlaySize } from '../../logic/presentation-manager/types'
 import type { HandlerContextWithPath } from '../../types'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
@@ -23,6 +24,29 @@ function validateLivekitUrl(lkUrl: string): void {
   }
 }
 
+const VALID_CORNERS: ReadonlySet<string> = new Set(['TL', 'TR', 'BL', 'BR'])
+const VALID_SIZES: ReadonlySet<string> = new Set(['small', 'medium', 'large'])
+
+function parseOverlayConfigFromBody(body: Record<string, unknown>): OverlayConfig | undefined {
+  const corner = typeof body.overlayCorner === 'string' ? body.overlayCorner : undefined
+  const size = typeof body.overlaySize === 'string' ? body.overlaySize : undefined
+  if (!corner && !size) return undefined
+  if (!corner || !size) {
+    throw new ValidationError('overlayCorner and overlaySize must both be set, or both omitted')
+  }
+  if (!VALID_CORNERS.has(corner)) {
+    throw new ValidationError(`overlayCorner must be one of TL, TR, BL, BR (got ${corner})`)
+  }
+  if (!VALID_SIZES.has(size)) {
+    throw new ValidationError(`overlaySize must be one of small, medium, large (got ${size})`)
+  }
+  return { corner: corner as OverlayCorner, size: size as OverlaySize }
+}
+
+function parseOverlayConfigFromFields(fields: Record<string, string>): OverlayConfig | undefined {
+  return parseOverlayConfigFromBody(fields as unknown as Record<string, unknown>)
+}
+
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager' | 'fileProvider', '/presentations'>
 ): Promise<IHttpServerComponent.IResponse> {
@@ -40,6 +64,7 @@ export async function createPresentationHandler(
     let fileName: string
     let livekitToken: string
     let livekitUrl: string
+    let overlayConfig: OverlayConfig | undefined
 
     if (contentType.includes('application/json')) {
       // Buffer the full body and check actual size — Content-Length is client-supplied
@@ -62,6 +87,7 @@ export async function createPresentationHandler(
       const url = typeof body.url === 'string' ? body.url : undefined
       const token = typeof body.livekitToken === 'string' ? body.livekitToken : undefined
       const lkUrl = typeof body.livekitUrl === 'string' ? body.livekitUrl : undefined
+      overlayConfig = parseOverlayConfigFromBody(body)
 
       if (!url) {
         throw new ValidationError('Missing url')
@@ -98,6 +124,7 @@ export async function createPresentationHandler(
 
       const token = result.fields.livekitToken || null
       const lkUrl = result.fields.livekitUrl || null
+      overlayConfig = parseOverlayConfigFromFields(result.fields)
       if (!token || !lkUrl) {
         throw new ValidationError('Missing livekitToken or livekitUrl')
       }
@@ -132,7 +159,8 @@ export async function createPresentationHandler(
       fileType,
       livekitToken,
       livekitUrl,
-      rawFileName
+      rawFileName,
+      overlayConfig
     )
 
     return { status: 201, body: info }

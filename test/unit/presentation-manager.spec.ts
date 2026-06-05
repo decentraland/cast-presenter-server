@@ -19,6 +19,7 @@ function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
     pushAudioFrame: jest.fn(),
     stopAudioPublishing: jest.fn().mockResolvedValue(undefined),
     setDataHandler: jest.fn(),
+    setPresenterCameraTrackHandler: jest.fn(),
     updateMetadataState: jest.fn().mockResolvedValue(undefined),
     publishData: jest.fn().mockResolvedValue(undefined),
     getRemoteParticipantCount: jest.fn().mockReturnValue(0),
@@ -78,6 +79,13 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
     videoCompositor: {
       createCompositor: jest.fn().mockReturnValue(createMockCompositor()),
       destroyTempDir: jest.fn()
+    },
+    cameraOverlayCompositor: {
+      createCompositor: jest.fn().mockReturnValue({
+        start: jest.fn().mockResolvedValue(undefined),
+        updateSlide: jest.fn(),
+        stop: jest.fn().mockResolvedValue(undefined)
+      })
     },
     metrics: {
       increment: jest.fn(),
@@ -626,6 +634,7 @@ describe('when managing video playback in a presentation', () => {
           expect.any(Number),
           publisher,
           expect.any(Function),
+          undefined,
           undefined
         )
       })
@@ -1074,8 +1083,7 @@ describe('when managing video playback in a presentation', () => {
             type: 'presentation:error',
             code: 'video-permission-denied',
             message: expect.stringContaining('not authorized'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
+            videoIndex: 0
           })
         )
       })
@@ -1149,8 +1157,7 @@ describe('when managing video playback in a presentation', () => {
             type: 'presentation:error',
             code: 'video-playback-interrupted',
             message: expect.stringContaining('interrupted'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
+            videoIndex: 0
           })
         )
       })

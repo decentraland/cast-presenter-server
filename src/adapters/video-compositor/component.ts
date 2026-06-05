@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { VideoBufferType, VideoStream } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
@@ -15,8 +16,10 @@ import type {
   VideoFrameSnapshot
 } from './types'
 import type { INetworkValidatorComponent } from '../../logic/network-validator/types'
+import type { OverlayConfig } from '../../logic/presentation-manager/types'
 import type { AppComponents } from '../../types'
 import type { ILiveKitPublisher } from '../livekit-publisher/types'
+import type { RemoteVideoTrack, VideoFrame as RtcVideoFrame } from '@livekit/rtc-node'
 import type { ChildProcess } from 'child_process'
 
 const FRAME_RATE = 20
@@ -43,6 +46,93 @@ export function validateFilterParam(value: number, name: string, max = 7680): vo
   }
 }
 
+/**
+ * Validates remote-media (camera/video) frame dimensions before they are used
+ * for resource allocation (canvas/buffer) or interpolated into ffmpeg argv.
+ *
+ * Mirrors `validateFilterParam`'s 7680 cap but throws a stable error reason
+ * (`camera-resolution-invalid`) so callers can surface it as a typed compositor
+ * error rather than a raw OOM/argv parse failure. See `security-review.md`
+ * (High — Unbounded camera frame size enables memory DoS).
+ *
+ * @throws {Error} If width or height is not a positive integer ≤ max.
+ */
+export function validateMediaDimensions(width: number, height: number, ctx: string, max = 7680): void {
+  if (!Number.isInteger(width) || width < 1 || width > max) {
+    throw new Error(`Invalid media dimensions ${ctx}: width=${width}, must be integer 1-${max}`)
+  }
+  if (!Number.isInteger(height) || height < 1 || height > max) {
+    throw new Error(`Invalid media dimensions ${ctx}: height=${height}, must be integer 1-${max}`)
+  }
+}
+
+const SIZE_RATIO: Record<OverlayConfig['size'], number> = {
+  small: 0.15,
+  medium: 0.2,
+  large: 0.25
+}
+const MARGIN_RATIO = 0.02
+
+/**
+ * Build the ffmpeg `-filter_complex` graph for a 2- or 3-input composite.
+ *
+ * Without a camera input ([0] slide + [1] video), the graph mirrors the
+ * existing single-line filter exactly. With a camera input ([2] raw RGBA),
+ * it adds a circular-clipped overlay on top via `geq`-based alpha masking.
+ *
+ * Exported so unit tests can pin the exact filter strings.
+ */
+export function buildFilterComplex(opts: {
+  videoOverlay: { x: number; y: number; w: number; h: number }
+  camera: { config: OverlayConfig; slideWidth: number; slideHeight: number } | null
+}): string {
+  const { x, y, w: vw, h: vh } = opts.videoOverlay
+  if (!opts.camera) {
+    return `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
+  }
+  const { config, slideWidth, slideHeight } = opts.camera
+  const D = Math.round(slideWidth * SIZE_RATIO[config.size])
+  const margin = Math.round(slideWidth * MARGIN_RATIO)
+  const r = D / 2
+  let cx = 0
+  let cy = 0
+  switch (config.corner) {
+    case 'TL':
+      cx = margin
+      cy = margin
+      break
+    case 'TR':
+      cx = slideWidth - margin - D
+      cy = margin
+      break
+    case 'BL':
+      cx = margin
+      cy = slideHeight - margin - D
+      break
+    case 'BR':
+      cx = slideWidth - margin - D
+      cy = slideHeight - margin - D
+      break
+  }
+  validateFilterParam(D, 'D')
+  validateFilterParam(cx, 'cx', Math.max(slideWidth, slideHeight))
+  validateFilterParam(cy, 'cy', Math.max(slideWidth, slideHeight))
+
+  // [2:v] is the raw RGBA camera; crop to a center square, scale to D, add alpha plane,
+  // then mask via geq so pixels outside the inscribed circle become transparent.
+  const cam =
+    `[2:v]crop='min(iw,ih)':'min(iw,ih)':'(iw-min(iw,ih))/2':'(ih-min(iw,ih))/2',` +
+    `scale=${D}:${D},format=yuva420p,` +
+    `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(lte(hypot(X-${r},Y-${r}),${r}),255,0)'[cam]`
+
+  return (
+    `[1:v]scale=${vw}:${vh}[vid];` +
+    `[0:v][vid]overlay=${x}:${y}:shortest=1[bg];` +
+    cam +
+    `;[bg][cam]overlay=${cx}:${cy}`
+  )
+}
+
 function createVideoCompositor(
   logger: ILoggerComponent.ILogger,
   networkValidator: INetworkValidatorComponent,
@@ -50,6 +140,7 @@ function createVideoCompositor(
 ): IVideoCompositor {
   let compositeProcess: ChildProcess | null = null
   let audioProcess: ChildProcess | null = null
+  let cameraReader: ReadableStreamDefaultReader<{ frame: RtcVideoFrame }> | null = null
   let dataListener: ((chunk: Buffer) => void) | null = null
   let frameBuffer: Buffer = Buffer.alloc(0)
   // Read/write pointers into frameBuffer. Emitting a frame advances readOffset;
@@ -211,6 +302,45 @@ function createVideoCompositor(
     }
   }
 
+  async function readFirstCameraFrame(track: RemoteVideoTrack): Promise<{
+    width: number
+    height: number
+    firstFrameRgba: Buffer
+    stream: VideoStream
+    reader: ReadableStreamDefaultReader<{ frame: RtcVideoFrame }>
+  }> {
+    const stream = new VideoStream(track)
+    const reader = stream.getReader()
+    try {
+      const { value, done } = await reader.read()
+      if (done || !value) {
+        // Clean up the just-opened reader/stream before failing — caller never gets them.
+        try {
+          await reader.cancel()
+        } catch {
+          /* already cancelled */
+        }
+        throw new Error('Camera stream ended before first frame')
+      }
+      const rgba = value.frame.convert(VideoBufferType.RGBA)
+      validateMediaDimensions(rgba.width, rgba.height, 'readFirstCameraFrame')
+      return {
+        width: rgba.width,
+        height: rgba.height,
+        firstFrameRgba: Buffer.from(rgba.data),
+        stream,
+        reader
+      }
+    } catch (err) {
+      try {
+        await reader.cancel()
+      } catch {
+        /* already cancelled */
+      }
+      throw err
+    }
+  }
+
   async function tryDownload(downloadUrl: string, signal?: AbortSignal): Promise<VideoDownloadResult> {
     signal?.throwIfAborted()
     const rawPath = path.join(dir, `raw-${Date.now()}`)
@@ -360,6 +490,13 @@ function createVideoCompositor(
       audioProcess = null
     }
 
+    if (cameraReader) {
+      cameraReader.cancel().catch(() => {
+        /* already cancelled */
+      })
+      cameraReader = null
+    }
+
     frameBuffer = Buffer.alloc(0)
     writeOffset = 0
     readOffset = 0
@@ -395,7 +532,8 @@ function createVideoCompositor(
       slideHeight: number,
       publisher: ILiveKitPublisher,
       onAudioData?: (pcmChunk: Buffer) => void,
-      seekSeconds?: number
+      seekSeconds?: number,
+      presenterCamera?: { track: RemoteVideoTrack; overlayConfig: OverlayConfig }
     ): Promise<void> {
       isPlaying = true
       cleanedUp = false
@@ -405,6 +543,21 @@ function createVideoCompositor(
       validateFilterParam(y, 'y')
       validateFilterParam(vw, 'vw')
       validateFilterParam(vh, 'vh')
+
+      // Pre-read one camera frame to learn its resolution. ffmpeg needs `-s WxH` at
+      // spawn time for the raw RGBA input; we can't change it later without restart.
+      // Lifetime: this reader is closed here on success/failure; the long-lived
+      // VideoStream for ongoing frames is constructed below after ffmpeg starts.
+      let cameraInit: {
+        width: number
+        height: number
+        firstFrameRgba: Buffer
+        stream: VideoStream
+        reader: ReadableStreamDefaultReader<{ frame: RtcVideoFrame }>
+      } | null = null
+      if (presenterCamera) {
+        cameraInit = await readFirstCameraFrame(presenterCamera.track)
+      }
 
       const compositeFrameSize = i420FrameSize(slideWidth, slideHeight)
       if (compositeFrameSize === 0) {
@@ -430,8 +583,19 @@ function createVideoCompositor(
       currentSlidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       await fs.promises.writeFile(currentSlidePath, slideBuffer)
 
-      // Overlay video at PDF geometry coordinates
-      const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
+      // Overlay video at PDF geometry coordinates. When a presenter camera is
+      // configured, the filter graph adds a circular-clipped camera overlay on top.
+      const filterComplex = buildFilterComplex({
+        videoOverlay: { x, y, w: vw, h: vh },
+        camera:
+          presenterCamera && cameraInit
+            ? {
+                config: presenterCamera.overlayConfig,
+                slideWidth,
+                slideHeight
+              }
+            : null
+      })
 
       // -ss before -i for input seeking (used for resume after pause)
       // Modern FFmpeg enables -accurate_seek by default, so input seeking
@@ -442,6 +606,25 @@ function createVideoCompositor(
       // no network protocols are exposed to FFmpeg, preventing HLS/DASH
       // playlist attacks that reference file:// URIs
       const protocols = 'file,pipe'
+
+      // Conditionally inject a third raw-RGBA input fed via stdio fd 3 — only
+      // when the presenter camera is configured and we successfully pre-read a frame.
+      const cameraInputArgs = cameraInit
+        ? [
+            '-threads',
+            '1',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgba',
+            '-s',
+            `${cameraInit.width}x${cameraInit.height}`,
+            '-r',
+            String(FRAME_RATE),
+            '-i',
+            'pipe:3'
+          ]
+        : []
 
       // Video composite — -re on video input for real-time pacing
       const ffmpegArgs = [
@@ -467,6 +650,7 @@ function createVideoCompositor(
         '-re',
         '-i',
         videoPath,
+        ...cameraInputArgs,
         '-filter_complex',
         filterComplex,
         '-an',
@@ -479,7 +663,10 @@ function createVideoCompositor(
         'pipe:1'
       ]
 
-      compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const stdioConfig: Array<'ignore' | 'pipe'> = cameraInit
+        ? ['ignore', 'pipe', 'pipe', 'pipe']
+        : ['ignore', 'pipe', 'pipe']
+      compositeProcess = spawn('ffmpeg', ffmpegArgs, { stdio: stdioConfig })
 
       let compositeStderr = ''
       compositeProcess.stderr?.on('data', (chunk: Buffer) => {
@@ -498,6 +685,75 @@ function createVideoCompositor(
         logger.warn(`Composite FFmpeg process error: ${err.message}`)
         abortPlayback('video-stream-error', publisher, slideBuffer, slideWidth, slideHeight)
       })
+
+      // Camera-frame pump: feed raw RGBA frames from the LiveKit VideoStream into
+      // ffmpeg's fd:3. We reuse the VideoStream/reader already opened by
+      // readFirstCameraFrame to learn the camera's dimensions — opening a second
+      // VideoStream on the same RemoteVideoTrack would duplicate the allocation
+      // and add an artificial dependency on the first frame arriving before
+      // ffmpeg can spawn. ffmpeg can't change input resolution mid-stream — if
+      // the camera reports a new size we abort and let the presentation-manager
+      // restart playback. Back-pressure is handled via 'drain'; EPIPE on
+      // shutdown is silenced.
+      if (presenterCamera && cameraInit && compositeProcess.stdio[3]) {
+        const cameraStdin = compositeProcess.stdio[3] as NodeJS.WritableStream
+        const camWidth = cameraInit.width
+        const camHeight = cameraInit.height
+
+        // Write the pre-read first frame so ffmpeg gets data immediately.
+        cameraStdin.write(cameraInit.firstFrameRgba)
+
+        cameraStdin.on('error', (err: Error) => {
+          // ffmpeg may EPIPE this fd on its own shutdown — we don't want it to crash us.
+          logger.warn(`Camera stdin error: ${err.message}`)
+        })
+
+        // Reuse — don't reconstruct — the stream/reader opened by readFirstCameraFrame.
+        cameraReader = cameraInit.reader
+        const localReader = cameraReader
+
+        void (async () => {
+          try {
+            while (isPlaying) {
+              const { value, done } = await localReader.read()
+              if (done || !value) break
+              if (value.frame.width !== camWidth || value.frame.height !== camHeight) {
+                logger.warn(
+                  `Camera resolution changed (${camWidth}x${camHeight} -> ${value.frame.width}x${value.frame.height}), aborting`
+                )
+                abortPlayback('camera-resolution-changed', publisher, slideBuffer, slideWidth, slideHeight)
+                break
+              }
+              const rgba = value.frame.convert(VideoBufferType.RGBA)
+              const ok = cameraStdin.write(Buffer.from(rgba.data))
+              if (!ok) {
+                // Back-pressure — wait for drain before reading more.
+                await new Promise<void>((resolve) => cameraStdin.once('drain', resolve))
+              }
+            }
+          } catch (err) {
+            logger.warn(`Camera pump error: ${err instanceof Error ? err.message : String(err)}`)
+          } finally {
+            try {
+              cameraStdin.end()
+            } catch {
+              /* already closed */
+            }
+          }
+        })().catch((err) => {
+          // Defensive: any unhandled rejection (e.g. mid-await teardown) shouldn't
+          // crash the host process under --abort-on-uncaught-exception.
+          logger.warn(`Camera pump unhandled rejection: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      } else if (cameraInit) {
+        // Defensive: presenterCamera was set but the stdio fd is missing.
+        // Close the stream/reader so they don't leak.
+        try {
+          await cameraInit.reader.cancel()
+        } catch {
+          /* already cancelled */
+        }
+      }
 
       // Audio process — uses -re for real-time pacing (killed on pause, restarted on resume)
       if (onAudioData) {
@@ -560,7 +816,8 @@ function createVideoCompositor(
 
         audioProcess.on('close', (code) => {
           if (code && code !== 0 && !cleanedUp) {
-            logger.warn(`Audio process exited with error`, { code, stderr: audioStderr })
+            logger.warn(`Audio process exited with error`, { code })
+            logger.debug(`Audio process stderr`, { stderr: audioStderr })
           }
           audioProcess = null
         })
@@ -654,7 +911,8 @@ function createVideoCompositor(
       compositeProcess.on('close', (code) => {
         const abnormal = code !== null && code !== 0
         if (abnormal && !cleanedUp) {
-          logger.warn(`Composite process exited with error`, { code, stderr: compositeStderr })
+          logger.warn(`Composite process exited with error`, { code })
+          logger.debug(`Composite process stderr`, { stderr: compositeStderr })
         }
         if (!cleanedUp && isPlaying) {
           stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)
@@ -729,6 +987,12 @@ function createVideoCompositor(
       if (audioProcess) {
         audioProcess.kill('SIGKILL')
         audioProcess = null
+      }
+      if (cameraReader) {
+        cameraReader.cancel().catch(() => {
+          /* already cancelled */
+        })
+        cameraReader = null
       }
       frameBuffer = Buffer.alloc(0)
       writeOffset = 0
