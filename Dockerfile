@@ -1,4 +1,4 @@
-FROM node:24-trixie-slim as builderenv
+FROM node:24@sha256:032e78d7e54e352129831743737e3a83171d9cc5b5896f411649c597ce0b11ea as builderenv
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ RUN yarn install --prod --frozen-lockfile
 
 ########################## END OF BUILD STAGE ##########################
 
-FROM node:24-trixie-slim
+FROM node:24@sha256:032e78d7e54e352129831743737e3a83171d9cc5b5896f411649c597ce0b11ea
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   tini ffmpeg ca-certificates \
