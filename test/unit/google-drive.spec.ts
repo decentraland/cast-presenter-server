@@ -1,4 +1,4 @@
-import type { IFetchComponent } from '@well-known-components/interfaces'
+import type { IFetchComponent } from '@dcl/core-commons'
 import { createGoogleDriveComponent, getPublicDriveDownloadUrl } from '../../src/adapters/google-drive'
 import type { IGoogleDriveComponent } from '../../src/adapters/google-drive'
 
