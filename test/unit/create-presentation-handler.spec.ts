@@ -1,4 +1,4 @@
-import type { IHttpServerComponent } from '@well-known-components/interfaces'
+import type { IHttpServerComponent } from '@dcl/core-commons'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
 import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'

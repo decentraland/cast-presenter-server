@@ -1,5 +1,6 @@
 import { Readable } from 'stream'
 import { FileNotFoundError, UnknownFileRetrievalError } from './errors'
+import { drainResponse } from '../../logic/fetch-utils'
 import type { DriveStreamResult, IGoogleDriveComponent } from './types'
 import type { AppComponents } from '../../types'
 
@@ -71,6 +72,7 @@ export async function createGoogleDriveComponent(
 
       const res = await fetcher.fetch(url, { headers })
       if (!res.ok) {
+        await drainResponse(res)
         if (res.status === 404 || res.status === 403) {
           throw new FileNotFoundError(fileId)
         }

@@ -1,11 +1,10 @@
 import type {
   IBaseComponent,
   IConfigComponent,
-  IFetchComponent,
-  IHttpServerComponent,
   ILoggerComponent,
   IMetricsComponent
 } from '@well-known-components/interfaces'
+import type { IFetchComponent, IHttpServerComponent } from '@dcl/core-commons'
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'

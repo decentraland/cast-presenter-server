@@ -1,4 +1,4 @@
-import { Router } from '@well-known-components/http-server'
+import { Router } from '@dcl/http-server'
 import { createPresentationHandler } from './handlers/create-presentation-handler'
 import { driveVideoHandler } from './handlers/drive-video-handler'
 import { pingHandler } from './handlers/ping-handler'

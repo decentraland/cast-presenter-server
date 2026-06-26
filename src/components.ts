@@ -1,15 +1,15 @@
 import { createDotEnvConfigComponent } from '@well-known-components/env-config-provider'
-import { Verbosity, instrumentHttpServerWithRequestLogger } from '@well-known-components/http-requests-logger-component'
+import { createLogComponent } from '@well-known-components/logger'
+import { Verbosity, instrumentHttpServerWithRequestLogger } from '@dcl/http-requests-logger-component'
 import {
   createServerComponent,
   createStatusCheckComponent,
   instrumentHttpServerWithPromClientRegistry
-} from '@well-known-components/http-server'
-import { createHttpTracerComponent } from '@well-known-components/http-tracer-component'
-import { createLogComponent } from '@well-known-components/logger'
-import { createMetricsComponent } from '@well-known-components/metrics'
-import { createTracerComponent } from '@well-known-components/tracer-component'
+} from '@dcl/http-server'
+import { createHttpTracerComponent } from '@dcl/http-tracer-component'
+import { createMetricsComponent } from '@dcl/metrics'
 import { createTracedFetcherComponent } from '@dcl/traced-fetch-component'
+import { createTracerComponent } from '@dcl/tracer-component'
 import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
 import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'

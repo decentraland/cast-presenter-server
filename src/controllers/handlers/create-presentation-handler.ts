@@ -1,4 +1,4 @@
-import type { IHttpServerComponent } from '@well-known-components/interfaces'
+import type { IHttpServerComponent } from '@dcl/core-commons'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
