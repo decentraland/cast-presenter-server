@@ -3,7 +3,12 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
-import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import {
+  InvalidLivekitCredentialsError,
+  MaxConcurrentPresentationsError,
+  PresentationNotFoundError,
+  RoomAlreadyPresentingError
+} from './errors'
 import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
@@ -134,10 +139,18 @@ function classifyVideoError(err: Error): VideoErrorInfo {
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
+    | 'config'
+    | 'logs'
+    | 'metrics'
+    | 'liveKitPublisher'
+    | 'liveKitTokenVerifier'
+    | 'pdfRenderer'
+    | 'pptxRenderer'
+    | 'videoCompositor'
   >
 ): Promise<IPresentationManager> {
-  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
+  const { config, logs, metrics, liveKitPublisher, liveKitTokenVerifier, pdfRenderer, pptxRenderer, videoCompositor } =
+    components
   const logger = logs.getLogger('presentation-manager')
 
   // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
@@ -152,7 +165,13 @@ export async function createPresentationManager(
   const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
   const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
 
+  const livekitHost = await config.requireString('LIVEKIT_HOST')
+
   const sessions = new Map<string, InternalSession>()
+  // Rooms currently hosting a presentation (including in-flight creations).
+  // Used to enforce one-presentation-per-room with a synchronous check-and-insert
+  // that closes the TOCTOU window between lookup and reservation.
+  const reservedRooms = new Set<string>()
   let inFlightCreations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
 
@@ -174,13 +193,13 @@ export async function createPresentationManager(
     }
   }
 
-  async function validateCredentials(livekitUrl: string, livekitToken: string): Promise<void> {
+  async function validateCredentials(livekitToken: string): Promise<void> {
     // Throw-away publisher connects and disconnects immediately. Used to
     // pre-flight bogus tokens before expensive work (e.g. fetching a
     // user-supplied URL that could be 100 MB).
     const publisher = liveKitPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
     try {
-      await publisher.connect(livekitUrl, livekitToken)
+      await publisher.connect(livekitHost, livekitToken)
     } catch (err) {
       throw new InvalidLivekitCredentialsError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -236,16 +255,27 @@ export async function createPresentationManager(
     fileBuffer: Buffer,
     fileType: FileType,
     livekitToken: string,
-    livekitUrl: string,
     fileName?: string
   ): Promise<PresentationInfo> {
+    // Verify JWT first — rejects forged tokens before anything else, and
+    // extracts the target room from the (trusted) video.room grant rather
+    // than trusting a client-supplied parameter.
+    const { roomId } = await liveKitTokenVerifier.verify(livekitToken)
+
+    // Synchronous lock acquisition. No `await` between check and insert, so
+    // concurrent createPresentation calls for the same room are serialized:
+    // the second call sees the reservation from the first and bails.
+    if (reservedRooms.has(roomId)) {
+      throw new RoomAlreadyPresentingError()
+    }
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
     }
+    reservedRooms.add(roomId)
 
     inFlightCreations++
     const id = randomUUID()
-    logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length })
+    logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length, roomId })
 
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
@@ -254,8 +284,10 @@ export async function createPresentationManager(
     let tempDir: string | null = null
 
     try {
-      // Connect to LiveKit FIRST — validates the token (fail-fast auth)
-      await publisher.connect(livekitUrl, livekitToken)
+      // Connect to LiveKit. The local verifier above already proved the JWT
+      // is valid; this connect is the network probe that also confirms the
+      // token is accepted server-side.
+      await publisher.connect(livekitHost, livekitToken)
 
       // Initialize renderer for the detected format
       renderer = renderers[fileType].createRenderer()
@@ -326,7 +358,7 @@ export async function createPresentationManager(
 
       const session: InternalSession = {
         id,
-        roomId: '',
+        roomId,
         fileName: presentationName,
         fileType,
         slideCount,
@@ -382,6 +414,8 @@ export async function createPresentationManager(
       if (err instanceof Error && err.message.includes('LiveKit')) {
         metrics.increment('livekit_connection_errors_total')
       }
+      // Release the room reservation so a retry (or another client for the same room) can proceed.
+      reservedRooms.delete(roomId)
       // Clean up acquired resources in reverse order on failure
       if (tempDir) {
         videoCompositor.destroyTempDir(tempDir)
@@ -848,6 +882,9 @@ export async function createPresentationManager(
 
     // Remove from map immediately to prevent re-entry from other lookup paths
     sessions.delete(session.id)
+    // Release the room so a new presentation can start there. Kept synchronous
+    // with the sessions.delete so reservation and session existence stay in lockstep.
+    reservedRooms.delete(session.roomId)
     metrics.decrement('active_sessions')
 
     // Cancel pending pre-download timer to prevent downloads against a destroyed temp dir
@@ -970,7 +1007,7 @@ export async function createPresentationManager(
         clearInterval(idleCheckInterval)
         idleCheckInterval = null
       }
-      // Stop all active sessions
+      // Stop all active sessions (each call releases its own room reservation)
       for (const session of [...sessions.values()]) {
         try {
           await stopSession(session)
@@ -978,6 +1015,9 @@ export async function createPresentationManager(
           logger.warn(`Failed to stop session during shutdown: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+      // Defensive: in case any in-flight createPresentation holds a reservation
+      // without a live session, clear the set so a restart starts clean.
+      reservedRooms.clear()
       logger.info('Presentation manager stopped')
     }
   }

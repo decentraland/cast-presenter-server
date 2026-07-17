@@ -16,6 +16,7 @@ import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
 import { createPdfRendererComponent } from './adapters/pdf-renderer'
 import { createPptxRendererComponent } from './adapters/pptx-renderer'
 import { createVideoCompositorComponent } from './adapters/video-compositor'
+import { createLiveKitTokenVerifier } from './logic/livekit-token-verifier'
 import { createNetworkValidatorComponent } from './logic/network-validator'
 import { createPresentationManager } from './logic/presentation-manager'
 import { metricDeclarations } from './metrics'
@@ -72,6 +73,7 @@ export async function initComponents(): Promise<AppComponents> {
   const fileProvider = createFileProviderComponent({ logs, networkValidator })
 
   const liveKitPublisher = createLiveKitPublisherComponent()
+  const liveKitTokenVerifier = await createLiveKitTokenVerifier({ config, logs })
   const pdfRenderer = createPdfRendererComponent()
   const pptxRenderer = createPptxRendererComponent()
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
@@ -81,6 +83,7 @@ export async function initComponents(): Promise<AppComponents> {
     logs,
     metrics,
     liveKitPublisher,
+    liveKitTokenVerifier,
     pdfRenderer,
     pptxRenderer,
     videoCompositor
@@ -97,6 +100,7 @@ export async function initComponents(): Promise<AppComponents> {
     googleDrive,
     fileProvider,
     liveKitPublisher,
+    liveKitTokenVerifier,
     pdfRenderer,
     pptxRenderer,
     videoCompositor,

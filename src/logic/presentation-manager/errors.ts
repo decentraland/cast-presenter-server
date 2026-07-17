@@ -18,3 +18,10 @@ export class InvalidLivekitCredentialsError extends Error {
     this.name = 'InvalidLivekitCredentialsError'
   }
 }
+
+export class RoomAlreadyPresentingError extends Error {
+  constructor() {
+    super('Room already has an active presentation')
+    this.name = 'RoomAlreadyPresentingError'
+  }
+}
