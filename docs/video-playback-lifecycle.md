@@ -59,6 +59,10 @@ cost of requiring the heartbeat and warmup logic described below.
 
 **Key file:** `src/logic/presentation-manager/component.ts` — `pauseVideoSession()`
 
+While a presenter camera is active, idle output (the slide or the
+frozen frame) is pushed once per camera frame with the bubble stamped,
+and the heartbeat repeats the last stamped frame.
+
 ## Resume (play after pause)
 
 A new compositor is created and `startPlayback` is called with
@@ -100,6 +104,11 @@ ensuring a seamless visual transition:
           stopHeartbeat() called
           normal 20fps video streaming
 ```
+
+While a presenter camera is active, idle output (the slide or the
+frozen frame) is pushed once per camera frame with the bubble stamped,
+so the heartbeat repeats the last stamped frame, including during the
+warmup.
 
 **Key files:**
 - `src/logic/presentation-manager/component.ts` — `playVideoSession()` (seekSeconds branch)

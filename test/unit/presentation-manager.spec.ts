@@ -1,10 +1,11 @@
+import { DEFAULT_OVERLAY_LAYOUT } from '../../src/adapters/camera-overlay'
 import { i420FrameSize, rgbaToI420 } from '../../src/logic/color-convert'
 import {
   InvalidLivekitCredentialsError,
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
-import type { ICameraOverlay } from '../../src/adapters/camera-overlay'
+import type { ICameraOverlay, OverlayLayout } from '../../src/adapters/camera-overlay'
 import type { ILiveKitPublisher, PresenterCameraTrackHandler } from '../../src/adapters/livekit-publisher/types'
 import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
@@ -53,11 +54,14 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
 }
 
 function createMockOverlay(): jest.Mocked<ICameraOverlay> {
+  let layout: OverlayLayout = { ...DEFAULT_OVERLAY_LAYOUT }
   return {
     start: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
-    setLayout: jest.fn(),
-    getLayout: jest.fn().mockReturnValue({ x: 0, y: 1, size: 'small' }),
+    setLayout: jest.fn((next: OverlayLayout) => {
+      layout = { ...next }
+    }),
+    getLayout: jest.fn(() => ({ ...layout })),
     isActive: jest.fn().mockReturnValue(false),
     stamp: jest.fn(),
     onCameraFrame: jest.fn()
@@ -341,6 +345,163 @@ describe('when handling data channel messages', () => {
 
     it('should not broadcast video loading state', () => {
       expect(publisher.publishData).not.toHaveBeenCalledWith(expect.objectContaining({ videoState: 'loading' }))
+    })
+  })
+})
+
+describe('when a presenter sends presentation:overlay:update', () => {
+  const OVERLAY_UPDATE = 'presentation:overlay:update'
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let overlay: jest.Mocked<ICameraOverlay>
+  let manager: IPresentationManager
+  let sessionId: string
+  let dataHandler: (message: Record<string, unknown>) => Promise<void>
+
+  function stateBroadcasts(): Array<Record<string, unknown>> {
+    return publisher.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
+  }
+
+  async function advanceBroadcastInterval(): Promise<void> {
+    await jest.advanceTimersByTimeAsync(250)
+    await flushMicrotasks()
+  }
+
+  beforeEach(async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+    publisher = createMockPublisher()
+    overlay = createMockOverlay()
+    const created = await createManagerWithSession(createMockComponents({ publisher, overlay }))
+    manager = created.manager
+    sessionId = created.info.id
+    dataHandler = publisher.setDataHandler.mock.calls[0][0] as (message: Record<string, unknown>) => Promise<void>
+    publisher.publishData.mockClear()
+    publisher.updateMetadataState.mockClear()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  describe('and it carries x, y and size', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5, y: 0.25, size: 'large' })
+    })
+
+    it('should set the full layout on the overlay', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 0.5, y: 0.25, size: 'large' })
+    })
+  })
+
+  describe('and it carries only size', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.3, y: 0.6 })
+      overlay.setLayout.mockClear()
+      await dataHandler({ type: OVERLAY_UPDATE, size: 'large' })
+    })
+
+    it('should keep the previous x and y', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 0.3, y: 0.6, size: 'large' })
+    })
+  })
+
+  describe('and x and y are outside [0, 1]', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 2, y: -1 })
+    })
+
+    it('should store them clamped to the nearest edge', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 1, y: 0, size: 'small' })
+    })
+  })
+
+  describe.each([
+    { label: 'x is NaN', fields: { x: NaN } },
+    { label: 'x is a numeric string', fields: { x: '0.5' } },
+    { label: 'y is Infinity', fields: { y: Infinity } },
+    { label: 'size is unknown', fields: { size: 'medium' } }
+  ])('and $label', ({ fields }) => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5, ...fields })
+    })
+
+    it('should not set the layout', () => {
+      expect(overlay.setLayout).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and it carries no layout fields', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE })
+      await advanceBroadcastInterval()
+    })
+
+    it('should not set the layout', () => {
+      expect(overlay.setLayout).not.toHaveBeenCalled()
+    })
+
+    it('should not broadcast state', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+  })
+
+  describe('and three valid updates arrive within 100 ms', () => {
+    const lastOverlay = { x: 0.3, y: 1, size: 'large' }
+
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.1 })
+      await jest.advanceTimersByTimeAsync(50)
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.2 })
+      await jest.advanceTimersByTimeAsync(50)
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.3, size: 'large' })
+    })
+
+    it('should not broadcast state before the interval elapses', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+
+    describe('and the broadcast interval elapses', () => {
+      beforeEach(async () => {
+        await advanceBroadcastInterval()
+      })
+
+      it('should broadcast state exactly once with the last overlay', () => {
+        const broadcasts = stateBroadcasts()
+        expect(broadcasts).toHaveLength(1)
+        expect(broadcasts[0]).toEqual(expect.objectContaining({ overlay: lastOverlay }))
+      })
+
+      it('should update the metadata once with the last overlay', () => {
+        expect(publisher.updateMetadataState).toHaveBeenCalledTimes(1)
+        expect(publisher.updateMetadataState).toHaveBeenCalledWith(expect.objectContaining({ overlay: lastOverlay }))
+      })
+    })
+  })
+
+  describe('and a presenter requests the state after session creation', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: 'presentation:get-state' })
+    })
+
+    it('should broadcast the default overlay layout', () => {
+      expect(stateBroadcasts()).toEqual([expect.objectContaining({ overlay: DEFAULT_OVERLAY_LAYOUT })])
+    })
+  })
+
+  describe('and the session stops while a broadcast is pending', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5 })
+      await manager.stopPresentation(sessionId)
+      publisher.publishData.mockClear()
+      publisher.updateMetadataState.mockClear()
+      await advanceBroadcastInterval()
+    })
+
+    it('should not broadcast state', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+
+    it('should not update the metadata', () => {
+      expect(publisher.updateMetadataState).not.toHaveBeenCalled()
     })
   })
 })
