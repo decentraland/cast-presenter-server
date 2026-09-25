@@ -1,0 +1,45 @@
+[
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "gotcha",
+    "title": "Test-first red commits need minimal stubs when the pre-commit hook rejects a test-only commit",
+    "observation": "The nano-staged pre-commit eslint task rejects a test that imports a module that does not exist yet (`import/no-unresolved`). The harness TDD judge also requires the test file to be byte-identical in the red commit and the green head, so editing the test after the red commit (for example, removing a temporary eslint-disable) fails the judge. Red commit 1a96831 therefore contains the final test/unit/camera-overlay.spec.ts plus stub src/adapters/camera-overlay/{types,component,index}.ts. The stubs export the real names with the step-1 types, their functions throw `new Error('not implemented')`, and the constants are placeholders. That commit lints and typechecks, and all 27 tests fail. Green commit 43c8f7b changes only the three source files, and the spec then passes 27/27.",
+    "conclusion": "When the pre-commit hook rejects a test-only red commit, commit the final test together with minimal lint- and typecheck-clean stubs that throw, and never edit the test file afterwards. `git diff <red> HEAD -- <test>` must be empty.",
+    "concepts": ["test-first", "pre-commit hook", "tdd judge", "eslint import/no-unresolved"],
+    "paths": ["test/unit/camera-overlay.spec.ts", "src/adapters/camera-overlay/component.ts"],
+    "evidence": ["commit 1a96831", "commit 43c8f7b"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-2"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "gotcha",
+    "title": "Reused patch canvas must be cleared before each arc-clipped redraw",
+    "observation": "A mutation run that removed `ctx.clearRect(0, 0, d, d)` from the patch rebuild in src/adapters/camera-overlay/component.ts made the 'should stamp byte-identical results' test fail: redrawing an identical camera frame into the reused d x d canvas inside the arc clip accumulates the anti-aliased edge alpha, so the second stamp differs from the first. The @napi-rs/canvas native module also leaves a `CustomGC` open handle that jest --detectOpenHandles reports; it is harmless under --forceExit.",
+    "conclusion": "Keep the clearRect before the clip/drawImage in buildPatch; the edge-stability test guards it.",
+    "concepts": ["camera overlay", "canvas clip", "anti-aliasing"],
+    "paths": ["src/adapters/camera-overlay/component.ts", "test/unit/camera-overlay.spec.ts"],
+    "symbols": ["buildPatch", "createCameraOverlay"],
+    "confidence": 0.9,
+    "status": "candidate",
+    "source": "phase-2"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "gotcha",
+    "title": "The camera overlay pump must own its teardown because rtc-node VideoStream has no backpressure",
+    "observation": "Before repair-1, one try/catch wrapped the whole read loop in src/adapters/camera-overlay/component.ts. A single throw from frame.convert, createCanvas, ImageData or putImageData ended the pump for good, while running/hasFrame stayed true and the reader was never cancelled. rtc-node keeps queueing decoded frames that nobody reads, so memory grows and the bubble freezes. The fix guards each acceptFrame call on its own. When the pump exits and still owns the current reader, it clears reader/stream/running/hasFrame/patch and cancels the reader. start() now resets running/hasFrame before building the stream and logs instead of throwing when the VideoStream constructor or getReader fails. The frame size is checked with validateMediaDimensions on event.frame.width/height before convert, so an invalid frame never allocates.",
+    "conclusion": "Any long-lived rtc-node stream reader loop should catch errors per frame, and on exit it should release the reader it still owns (checked with reader === ownReader, so a replaced or stopped reader is left alone). Check frame dimensions on the VideoFrame itself before convert.",
+    "concepts": ["camera overlay", "rtc-node VideoStream", "backpressure", "reader lifecycle", "validateMediaDimensions"],
+    "paths": ["src/adapters/camera-overlay/component.ts", "test/unit/camera-overlay.spec.ts"],
+    "symbols": ["pump", "acceptFrame", "createCameraOverlay"],
+    "evidence": ["commit 829dba8", "commit c17591a"],
+    "confidence": 0.9,
+    "status": "candidate",
+    "source": "phase-2"
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "observation",
+    "title": "Phase 4 red run and green result",
+    "observation": "Red commit b5783e4 holds only test/unit/presentation-manager.spec.ts and test/mocks/context.ts. Running `jest test/unit/presentation-manager.spec.ts` against the phase-3 source gave 6 failed and 100 passed tests: full update, size-only update, clamping, the throttled broadcast (both publishData and updateMetadataState), and get-state carrying the default overlay. The invalid-input, empty-command and stop-while-pending cases pass trivially in red, because the base source ignores the unknown command. The hook accepted the test-only red commit without src stubs. Green commit d7b028d: the file passes 106/106, the full suite passes 291 across 14 suites, and lint, typecheck, the lockfile check, and both the phase and Completion `rg` checks are clean.",
+    "conclusion": "The overlay command tests use fake timers with `doNotFake: ['setImmediate', 'nextTick']`, so `flushMicrotasks` still works. They also live in their own top-level describe with the default renderer (no slide videos), which means the 3000 ms preDownloadTimer does nothing when timers advance.",
+    "concepts": ["test-first", "fake timers", "broadcast throttle"],
+    "paths": ["test/unit/presentation-manager.spec.ts", "test/mocks/context.ts", "src/logic/presentation-manager/component.ts"],
+    "symbols": ["parseOverlayUpdate", "scheduleOverlayBroadcast", "OVERLAY_BROADCAST_INTERVAL_MS"],
+    "evidence": ["commit b5783e4", "commit d7b028d"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-4"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "maintenance",
+    "title": "End-to-end manual smoke skipped: no dev LiveKit room",
+    "observation": "The plan's Completion smoke needs a dev LiveKit room and a sites streamer view with frontend phase 1: bubble bottom-left with the camera on before start, `presentation:overlay:update` moving it on slides and on playing and paused video, and camera-off hiding it. The executor had neither the room nor the frontend build, so the smoke did not run. Other behaviours are covered only by unit tests with a mocked publisher and overlay: an overlay update does not push a frame, and it relies on the next camera or ffmpeg frame to apply.",
+    "conclusion": "Before merging, run the plan's manual smoke on a dev room. Pay particular attention to a layout change while paused with an active camera, which should apply on the next camera frame (≤50 ms).",
+    "concepts": ["manual smoke", "livekit", "camera overlay"],
+    "paths": ["docs/specs/loom-overlay-runtime/plan.md"],
+    "confidence": 0.9,
+    "status": "candidate",
+    "source": "phase-4"
+  }
+]

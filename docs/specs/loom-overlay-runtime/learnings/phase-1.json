@@ -1,0 +1,73 @@
+[
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "observation",
+    "title": "PDF smoke gate baseline passes on pdfjs-dist 4.10.38 and canvas 0.1.97",
+    "observation": "The Verification smoke check (built dist/adapters/pdf-renderer rendering test/fixtures/one-slide.pdf) printed `ok 960 742` on the unchanged deps under Node v24.19.0. After the upgrade it printed `ok 960 742` again: pixel (240,500) is [0,0,0,255] and pixel (50,50) is [255,255,255,255]. It also passed inside the built Docker image (node v24.17.0, linux arm64).",
+    "conclusion": "test/fixtures/one-slide.pdf plus the node -e smoke check is a working pdfjs render gate for dependency bumps. 612pt * 960/792 rounds to 742 (already even), so the expected height is 742.",
+    "concepts": ["pdf renderer", "smoke test", "dependency upgrade"],
+    "paths": ["test/fixtures/one-slide.pdf", "src/adapters/pdf-renderer/component.ts"],
+    "evidence": ["spec:loom-overlay-runtime/phase-1"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-1"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "compatibility",
+    "title": "pdfjs-dist 6 removed PDFDocumentProxy.destroy() and requires RenderParameters.canvas",
+    "observation": "With pdfjs-dist 6.3.289, `doc.destroy()` does not exist on PDFDocumentProxy in either the types or the runtime (legacy/build/pdf.mjs), so the old `void doc.destroy()` would throw a TypeError. Destroy now lives on the loading task. `RenderParameters.canvas: HTMLCanvasElement | null` is required; `canvasContext` is kept only for backwards compatibility and needs `canvas: null`.",
+    "conclusion": "Use `void doc.loadingTask.destroy()` and `page.render({ canvas: canvas as unknown as HTMLCanvasElement, viewport })`, passing the @napi-rs/canvas Canvas directly. pdfjs calls getContext on it and the output renders correctly with an opaque white background.",
+    "concepts": ["pdfjs-dist 6", "render parameters", "document destroy"],
+    "paths": ["src/adapters/pdf-renderer/component.ts"],
+    "symbols": ["PDFDocumentProxy", "PDFDocumentLoadingTask", "RenderParameters"],
+    "evidence": ["node_modules/pdfjs-dist/types/src/display/api.d.ts:399", "node_modules/pdfjs-dist/types/src/display/api.d.ts:1215"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-1"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "compatibility",
+    "title": "rtc-node 1.1.0 needed no code changes and Room.disconnect still does not dispose ffiHandle",
+    "observation": "Upgrading @livekit/rtc-node from 0.13.24 to 1.1.0 (rtc-ffi-bindings 0.12.73) produced no typecheck errors, and the jest mock in test/unit/livekit-publisher.spec.ts needed no new symbols. In 1.1.0, Room.disconnect() (dist/room.cjs) sends the FFI disconnect, runs cleanupOnDisconnect and removes listeners, but never calls ffiHandle.dispose().",
+    "conclusion": "Keep the manual `ffiHandle?.dispose()` after `room.disconnect()` in the livekit publisher. There is no double-dispose risk in 1.1.0, so no extra try/catch was added.",
+    "concepts": ["livekit rtc-node 1.x", "ffi handle leak"],
+    "paths": ["src/adapters/livekit-publisher/component.ts"],
+    "symbols": ["Room.disconnect", "FfiHandle"],
+    "evidence": ["node_modules/@livekit/rtc-node/dist/room.cjs:636"],
+    "confidence": 0.9,
+    "status": "candidate",
+    "source": "phase-1"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "gotcha",
+    "title": "ESLint and the pre-commit hook fail in worktrees nested under the main checkout",
+    "observation": "In .worktrees/<feature>/<phase>, `yarn lint`, `yarn lint:fix` and the nano-staged pre-commit eslint task exit 2 with \"ESLint couldn't determine the plugin @typescript-eslint uniquely\". The repo .eslintrc.json has no `root: true`, so ESLint 8 cascades into the main checkout's .eslintrc.json and loads a second plugin copy from the main node_modules. The failure does not depend on the diff.",
+    "conclusion": "In nested worktrees, run `./node_modules/.bin/eslint --no-eslintrc -c .eslintrc.json '{src,test}/**/*.{js,ts}'` (plus --fix) as the equivalent lint gate. Commits that stage js/ts files are blocked by the hook. The permanent fix is `\"root\": true` in .eslintrc.json or worktrees outside the repo tree.",
+    "concepts": ["eslint", "git worktree", "pre-commit hook"],
+    "paths": [".eslintrc.json"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-1"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "maintenance",
+    "title": "`root: true` in .eslintrc.json fixes lint and the pre-commit hook in nested worktrees",
+    "observation": "After `\"root\": true` was added as the first key of .eslintrc.json (user-approved during run-881c573a), the normal `npx --yes yarn@1.22.22 lint:fix` and `lint` scripts exit 0 in the nested phase-1 worktree. The nano-staged pre-commit hook then passed eslint and prettier without --no-verify, in commit a057fee.",
+    "conclusion": "Keep `root: true` in .eslintrc.json. It stops ESLint 8 from cascading into a parent checkout's config, so plan-plus worktrees under .worktrees/ lint and commit normally. The --no-eslintrc workaround is no longer needed.",
+    "concepts": ["eslint", "git worktree", "pre-commit hook", "root config"],
+    "paths": [".eslintrc.json"],
+    "evidence": ["commit a057fee38e9be5987e600dec5d45097a5c1b211c"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-1"
+  }
+]

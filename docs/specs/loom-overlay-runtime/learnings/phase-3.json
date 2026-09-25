@@ -1,0 +1,43 @@
+[
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "observation",
+    "title": "Phase 3 red run: all three spec files fail against the base source",
+    "observation": "The red run used the final test files against the base source at a993344: `jest test/unit/presentation-manager.spec.ts test/unit/build-filter-complex.spec.ts test/unit/video-compositor.spec.ts`. It gave 3 failed suites, with 21 failed and 70 passed tests. build-filter-complex.spec.ts and video-compositor.spec.ts fail with ts-jest TS2345, because the old signatures require `camera` and take `presenterCamera` as the ninth argument. presentation-manager.spec.ts compiles and fails 21 assertions, including the pinned ninth `startPlayback` argument and every camera scenario. The pre-commit hook accepted the test-only red commit 5b33491 without stubs. `yarn typecheck` covers only `src` (tsconfig include), so test-side type errors do not block the hook. After green commit 23bb5a8, the three files pass 115/115 and the full suite passes 276, with 5 skipped.",
+    "conclusion": "A red commit whose test-file type errors come only from not-yet-changed signatures needs no src stubs here: eslint and prettier pass, and ts-jest turns the type errors into failing suites.",
+    "concepts": ["test-first", "pre-commit hook", "ts-jest diagnostics"],
+    "paths": ["test/unit/presentation-manager.spec.ts", "test/unit/build-filter-complex.spec.ts", "test/unit/video-compositor.spec.ts", "tsconfig.json"],
+    "evidence": ["commit 5b33491", "commit 23bb5a8"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-3"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "gotcha",
+    "title": "Idle-output transitions beyond the phase-3 edge-case table",
+    "observation": "(1) Resume, then pause again before ffmpeg delivers a frame. `getLastFrame()` is null because each play creates a new compositor, so `pauseVideoSession` leaves `baseFrame` as the previous frozen I420 frame, not the slide. The old code pushed the slide in this case. (2) `compositor.onError` is delivered through `queueMicrotask` after the compositor's own `stopPlayback`. In that window `session.compositor` is still set but `getIsPlaying()` is false, so a camera frame can stamp the pre-reset `baseFrame` once. The manager's synchronous `resetBaseToSlide` plus `setupSlideOutput` then replaces it. `onEnd` is called synchronously from the close handler and has no such window. (3) The `validateMediaDimensions` JSDoc named `camera-resolution-invalid`, which the phase verification `rg` matches, so it was trimmed.",
+    "conclusion": "Case 1 is kept on purpose: the viewer keeps the frozen video frame they already saw during loading, rather than a slide flash. Case 2 is a single-frame transient that heals itself, so no guard was added. If either matters, set `baseFrame` from the slide in pause when `lastFrame` is null, or check `videoState` in `pushIdleFrame`.",
+    "concepts": ["camera overlay", "idle output", "pause resume", "compositor callbacks"],
+    "paths": ["src/logic/presentation-manager/component.ts", "src/adapters/video-compositor/component.ts"],
+    "symbols": ["pauseVideoSession", "pushIdleFrame", "refreshIdleOutput", "resetBaseToSlide", "fireError"],
+    "confidence": 0.85,
+    "status": "candidate",
+    "source": "phase-3"
+  },
+  {
+    "schema_version": 2,
+    "scope": "project",
+    "kind": "maintenance",
+    "title": "Phase 4 must rewrite the stale header of test/integration/loom-overlay.spec.ts",
+    "observation": "The skipped suite test/integration/loom-overlay.spec.ts (owned by phase 4) still describes the old model: a canvas pump, 3-input ffmpeg, and `createPresentation` POSTing `overlayCorner/overlaySize`. The phase-3 verification `rg` is case-sensitive and does not include `overlayCorner`, so it passes. The plan's Completion `rg` does include `overlayCorner` and scans `test`, so it will fail until that header is rewritten.",
+    "conclusion": "In phase 4, rewrite the loom-overlay.spec.ts header and case names for the single stamping path, and drop the overlayCorner/overlaySize wording.",
+    "concepts": ["integration test", "completion check"],
+    "paths": ["test/integration/loom-overlay.spec.ts"],
+    "confidence": 0.95,
+    "status": "candidate",
+    "source": "phase-3"
+  }
+]
