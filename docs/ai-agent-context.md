@@ -59,7 +59,7 @@ remote control through LiveKit data channels.
   successful connection acts as implicit authentication.
 - **Data channel protocol:** The bot listens on the `presentation`
   topic for JSON commands (`navigate`, `video:play`, `video:pause`,
-  `stop`, `get-state`) and broadcasts `presentation:state` messages
+  `stop`, `get-state`, `overlay:update`) and broadcasts `presentation:state` messages
   after every mutation.
 - **SSRF protection:** Video URLs extracted from PDF annotations are
   validated against an HTTPS-only domain allowlist before download.

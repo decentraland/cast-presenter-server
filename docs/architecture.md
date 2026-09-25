@@ -137,34 +137,32 @@ Each presentation runs as an in-memory session identified by a UUID.
 
 ## Loom-style camera overlay
 
-When the caller provides `overlayCorner` + `overlaySize` on
-`POST /presentations`, the server subscribes to the first presenter's
-camera track and composites it as a circular bubble on the presentation
-track. There are two composition paths:
+Every session draws the first presenter's camera as a circular bubble
+on the presentation track while that camera track is active and
+unmuted. Muting or unpublishing the camera hides the bubble; there is
+no separate visibility flag.
 
-- **Slide only (camera on):** the canvas-based
-  `camera-overlay-compositor` adapter draws each camera frame onto the
-  current slide at ~20 fps and pushes the result via the LiveKit
-  publisher. Replaces the 500 ms heartbeat while the camera is live;
-  the heartbeat resumes when the camera goes away.
-- **Embedded video + camera:** `video-compositor` spawns ffmpeg with
-  three inputs (slide PNG, video stream, camera RGBA via FIFO). The
-  filter graph is pinned by
-  `test/unit/build-filter-complex.spec.ts`; for the live integration
-  matrix see `docs/specs/loom-camera-overlay/phase-6-integration-tests.md`.
+One stamping step in `src/adapters/camera-overlay/` blends the bubble
+into each I420 frame just before `publisher.pushFrame`. ffmpeg never
+receives a camera input:
 
-The 2x2 mode matrix is verified manually until a LiveKit test fixture
-exists (`test/integration/loom-overlay.spec.ts` is currently `describe.skip`):
+- **Slide or paused video:** each camera frame (up to ~20 fps) stamps
+  the bubble over the current slide or the frozen video frame and
+  pushes the result. The heartbeat repeats the last stamped frame, so
+  a stalled camera still yields output.
+- **Playing video:** ffmpeg frames drive output, and each one is
+  decorated with the bubble before it is pushed.
 
-1. Connect a real presenter from a `cast2` browser client.
-2. Toggle the camera on - the circle should appear within ~1 s in
-   the configured corner and stay stable across slide navigation.
-3. Play an embedded video - the circle should persist through the
-   ffmpeg restart with at most a ~500 ms hiccup; audio should not stall.
-4. Mute the camera mid-video - the circle should vanish within ~1 s
-   and the video must keep playing.
-5. Resize / disable / re-enable the camera - the pipeline should
-   recover without restarting the LiveKit publisher.
+The layout is the bubble centre `x`, `y` as fractions of the slide
+width and height, plus a `size` of `small` (15% of slide width) or
+`large` (25%). The bubble keeps a margin of 2% of the slide width from
+every edge, so `(0, 0)`, `(1, 0)`, `(0, 1)` and `(1, 1)` are the four
+corner presets. The default is `{ "x": 0, "y": 1, "size": "small" }`,
+bottom-left.
+
+Presenters move or resize the bubble at runtime with
+`presentation:overlay:update`. The next frame uses the new layout,
+with no ffmpeg restart.
 
 ## Data channel protocol
 
@@ -183,7 +181,11 @@ strings sent with reliable delivery.
 { "type": "presentation:video:stop" }
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
+{ "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
 ```
+
+`presentation:overlay:update` changes only the fields it carries, and
+the bot drops the whole command if any field is invalid.
 
 ### State broadcast (bot to all participants)
 
@@ -204,7 +206,8 @@ broadcasts:
       "geometry": { "x": 100, "y": 200, "width": 640, "height": 360 }
     }
   ],
-  "videoState": "idle"
+  "videoState": "idle",
+  "overlay": { "x": 0, "y": 1, "size": "small" }
 }
 ```
 

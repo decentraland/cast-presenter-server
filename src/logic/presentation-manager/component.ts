@@ -4,10 +4,11 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { OVERLAY_SIZES } from '../../adapters/camera-overlay'
 import { rgbaToI420 } from '../color-convert'
 import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
-import type { ICameraOverlay } from '../../adapters/camera-overlay'
+import type { ICameraOverlay, OverlayLayout } from '../../adapters/camera-overlay'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/renderer/types'
 import type { CompositorErrorReason, IVideoCompositor, VideoFrameSnapshot } from '../../adapters/video-compositor/types'
@@ -19,6 +20,7 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
 const BUFFER_TYPE_RGBA = 0
 const BUFFER_TYPE_I420 = 5
+const OVERLAY_BROADCAST_INTERVAL_MS = 250
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -51,6 +53,7 @@ interface InternalSession extends PresentationSession {
   videoErrorReason: string | null
   videoErrorCode: VideoErrorCode | null
   preDownloadTimer: ReturnType<typeof setTimeout> | null
+  overlayBroadcastTimer: ReturnType<typeof setTimeout> | null
   // Signalled when the session stops; cancels in-flight downloads so we don't
   // race with tempDir cleanup or write to a deleted directory.
   abortController: AbortController
@@ -124,6 +127,22 @@ function classifyVideoError(err: Error): VideoErrorInfo {
     }
   }
   return { code: 'video-playback-failed', message: 'Video unavailable' }
+}
+
+function parseOverlayUpdate(message: Record<string, unknown>): Partial<OverlayLayout> | null {
+  const patch: Partial<OverlayLayout> = {}
+  for (const axis of ['x', 'y'] as const) {
+    const value = message[axis]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+    patch[axis] = Math.min(1, Math.max(0, value))
+  }
+  const size = message.size
+  if (size !== undefined) {
+    if (typeof size !== 'string' || !(OVERLAY_SIZES as readonly string[]).includes(size)) return null
+    patch.size = size as OverlayLayout['size']
+  }
+  return patch
 }
 
 /**
@@ -273,6 +292,14 @@ export async function createPresentationManager(
     refreshIdleOutput(session)
   }
 
+  function scheduleOverlayBroadcast(session: InternalSession): void {
+    if (session.overlayBroadcastTimer) return
+    session.overlayBroadcastTimer = setTimeout(() => {
+      session.overlayBroadcastTimer = null
+      broadcastState(session).catch(() => undefined)
+    }, OVERLAY_BROADCAST_INTERVAL_MS)
+  }
+
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
     try {
@@ -397,6 +424,13 @@ export async function createPresentationManager(
             case 'presentation:stop':
               await stopSession(session)
               break
+            case 'presentation:overlay:update': {
+              const patch = parseOverlayUpdate(message)
+              if (!patch || Object.keys(patch).length === 0) break
+              session.cameraOverlay.setLayout({ ...session.cameraOverlay.getLayout(), ...patch })
+              scheduleOverlayBroadcast(session)
+              break
+            }
             case 'presentation:get-state':
               await broadcastState(session)
               break
@@ -450,6 +484,7 @@ export async function createPresentationManager(
         videoErrorReason: null,
         videoErrorCode: null,
         preDownloadTimer: null,
+        overlayBroadcastTimer: null,
         abortController: new AbortController(),
         bytesDownloaded: 0
       }
@@ -952,6 +987,10 @@ export async function createPresentationManager(
       clearTimeout(session.preDownloadTimer)
       session.preDownloadTimer = null
     }
+    if (session.overlayBroadcastTimer) {
+      clearTimeout(session.overlayBroadcastTimer)
+      session.overlayBroadcastTimer = null
+    }
 
     // Abort any in-flight downloads so they don't race with tempDir cleanup below
     session.abortController.abort()
@@ -1004,6 +1043,7 @@ export async function createPresentationManager(
       fileType: session.fileType,
       slideVideos: session.slideVideos,
       videoState: session.videoState,
+      overlay: session.cameraOverlay.getLayout(),
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
         : {}),
