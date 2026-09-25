@@ -58,7 +58,7 @@ function solidRgba(width: number, height: number, rgba: [number, number, number,
 }
 
 function cameraFrame(width = 64, height = 48, data = solidRgba(64, 48, [255, 0, 0, 255])) {
-  return { done: false, value: { frame: { convert: jest.fn(() => ({ width, height, data })) } } }
+  return { done: false, value: { frame: { width, height, convert: jest.fn(() => ({ width, height, data })) } } }
 }
 
 function i420Frame(width: number, height: number, y: number, u: number, v: number): Buffer {
@@ -413,18 +413,101 @@ describe('when running a camera overlay', () => {
 
   describe('and a camera frame has invalid dimensions', () => {
     let callback: jest.Mock
+    let invalid: ReturnType<typeof cameraFrame>
 
     beforeEach(async () => {
       callback = jest.fn()
+      invalid = cameraFrame(99999, 48, new Uint8Array(16))
       overlay.onCameraFrame(callback)
       overlay.start(trackA)
-      readerA.push(cameraFrame(99999, 48, new Uint8Array(16)))
+      readerA.push(invalid)
       await flush()
     })
 
     it('should drop the frame', () => {
       expect(overlay.isActive()).toBe(false)
       expect(callback).not.toHaveBeenCalled()
+    })
+
+    it('should not convert the frame', () => {
+      expect(invalid.value.frame.convert).not.toHaveBeenCalled()
+    })
+
+    it('should log a warning', () => {
+      expect(logger.warn).toHaveBeenCalled()
+    })
+  })
+
+  describe('and converting one camera frame throws', () => {
+    let callback: jest.Mock
+
+    beforeEach(async () => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(1000)
+      const broken = cameraFrame()
+      broken.value.frame.convert.mockImplementation(() => {
+        throw new Error('convert failed')
+      })
+      callback = jest.fn()
+      overlay.onCameraFrame(callback)
+      overlay.start(trackA)
+      readerA.push(broken)
+      await flush()
+      now.mockReturnValue(1100)
+      readerA.push(cameraFrame())
+      await flush()
+    })
+
+    it('should log a warning', () => {
+      expect(logger.warn).toHaveBeenCalled()
+    })
+
+    it('should keep delivering the next frame', () => {
+      expect(callback).toHaveBeenCalledTimes(1)
+      expect(overlay.isActive()).toBe(true)
+    })
+  })
+
+  describe('and reading the camera stream fails', () => {
+    beforeEach(async () => {
+      overlay.start(trackA)
+      readerA.read.mockRejectedValueOnce(new Error('read failed'))
+      readerA.push(cameraFrame())
+      await flush()
+    })
+
+    it('should become inactive', () => {
+      expect(overlay.isActive()).toBe(false)
+    })
+
+    it('should cancel the reader', () => {
+      expect(readerA.cancel).toHaveBeenCalled()
+    })
+  })
+
+  describe('and the camera stream cannot be created on restart', () => {
+    let error: unknown
+
+    beforeEach(async () => {
+      overlay.start(trackA)
+      readerA.push(cameraFrame())
+      await flush()
+      VideoStreamMock.mockImplementationOnce(() => {
+        throw new Error('no stream')
+      })
+      error = undefined
+      try {
+        overlay.start(trackB)
+      } catch (err) {
+        error = err
+      }
+    })
+
+    it('should not throw', () => {
+      expect(error).toBeUndefined()
+    })
+
+    it('should become inactive', () => {
+      expect(overlay.isActive()).toBe(false)
     })
 
     it('should log a warning', () => {
