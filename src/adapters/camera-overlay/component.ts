@@ -24,6 +24,7 @@ const MIN_FRAME_INTERVAL_MS = 1000 / FRAME_RATE
 
 const even = (n: number): number => n - (n % 2)
 const clamp = (n: number, min: number, max: number): number => Math.min(Math.max(n, min), max)
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /** @returns the even-aligned bubble square in pixels; `d` is `0` when it does not fit. */
 export function overlayRect(layout: OverlayLayout, width: number, height: number): OverlayRect {
@@ -101,13 +102,13 @@ function createCameraOverlay(logger: ILoggerComponent.ILogger): ICameraOverlay {
     running && reader === ownReader
 
   function acceptFrame(event: VideoFrameEvent): void {
-    const rgba = event.frame.convert(VideoBufferType.RGBA)
     try {
-      validateMediaDimensions(rgba.width, rgba.height, 'camera-overlay')
+      validateMediaDimensions(event.frame.width, event.frame.height, 'camera-overlay')
     } catch (err) {
-      logger.warn(`camera-overlay dropped frame: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`camera-overlay dropped frame: ${describeError(err)}`)
       return
     }
+    const rgba = event.frame.convert(VideoBufferType.RGBA)
     if (!fullCamCanvas || fullCamWidth !== rgba.width || fullCamHeight !== rgba.height) {
       fullCamCanvas = createCanvas(rgba.width, rgba.height)
       fullCamWidth = rgba.width
@@ -125,7 +126,7 @@ function createCameraOverlay(logger: ILoggerComponent.ILogger): ICameraOverlay {
       try {
         callback()
       } catch (err) {
-        logger.warn(`camera-overlay frame callback error: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`camera-overlay frame callback error: ${describeError(err)}`)
       }
     }
   }
@@ -138,11 +139,22 @@ function createCameraOverlay(logger: ILoggerComponent.ILogger): ICameraOverlay {
         const now = Date.now()
         if (now - lastAcceptedAt < MIN_FRAME_INTERVAL_MS) continue
         lastAcceptedAt = now
-        acceptFrame(value)
+        try {
+          acceptFrame(value)
+        } catch (err) {
+          logger.warn(`camera-overlay frame error: ${describeError(err)}`)
+        }
       }
     } catch (err) {
-      logger.warn(`camera-overlay pump error: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`camera-overlay pump error: ${describeError(err)}`)
     }
+    if (reader !== ownReader) return
+    reader = null
+    stream = null
+    running = false
+    hasFrame = false
+    patch = null
+    ownReader.cancel().catch(() => undefined)
   }
 
   function buildPatch(d: number): OverlayPatch {
@@ -181,11 +193,19 @@ function createCameraOverlay(logger: ILoggerComponent.ILogger): ICameraOverlay {
       const old = reader
       reader = null
       old?.cancel().catch(() => undefined)
-      stream = new VideoStream(track)
-      const ownReader = stream.getReader()
+      running = false
+      hasFrame = false
+      let ownReader: ReadableStreamDefaultReader<VideoFrameEvent>
+      try {
+        stream = new VideoStream(track)
+        ownReader = stream.getReader()
+      } catch (err) {
+        stream = null
+        logger.warn(`camera-overlay failed to start: ${describeError(err)}`)
+        return
+      }
       reader = ownReader
       running = true
-      hasFrame = false
       lastAcceptedAt = 0
       void pump(ownReader)
     },

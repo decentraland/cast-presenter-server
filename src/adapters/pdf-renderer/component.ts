@@ -133,7 +133,7 @@ function createRenderer(): IRenderer {
     destroy(): void {
       annotationsCache.clear()
       if (doc) {
-        void doc.loadingTask.destroy()
+        doc.loadingTask.destroy().catch(() => undefined)
         doc = null
       }
     }
