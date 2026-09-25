@@ -5,6 +5,7 @@ import * as os from 'os'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { createVideoCompositorComponent } from '../../src/adapters/video-compositor/component'
+import { i420FrameSize } from '../../src/logic/color-convert'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 import type { IVideoCompositor, SlideVideoInfo } from '../../src/adapters/video-compositor/types'
 import type { INetworkValidatorComponent } from '../../src/logic/network-validator/types'
@@ -291,6 +292,110 @@ describe('video-compositor error isolation', () => {
       compositor.onError(cb)
       await flushMicrotasks()
       expect(cb).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe('when a decorateFrame callback is passed', () => {
+  const FRAME_SIZE = i420FrameSize(SLIDE_W, SLIDE_H)
+  let tempDir: string
+  let compositor: IVideoCompositor
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let logger: jest.Mocked<ILoggerComponent.ILogger>
+  let frame: Buffer
+
+  beforeEach(() => {
+    fakeProcesses.length = 0
+    spawnMock.mockImplementation(() => {
+      const fake = new FakeChildProcess()
+      fakeProcesses.push(fake)
+      return fake
+    })
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compositor-spec-decorate-'))
+    logger = createLogger() as jest.Mocked<ILoggerComponent.ILogger>
+    const component = createVideoCompositorComponent({ networkValidator: createNetworkValidatorStub() })
+    compositor = component.createCompositor(logger, tempDir)
+    publisher = createPublisherStub() as jest.Mocked<ILiveKitPublisher>
+    frame = Buffer.alloc(FRAME_SIZE, 7)
+  })
+
+  afterEach(() => {
+    compositor.cleanup()
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  describe('and it returns a decorated frame', () => {
+    let decorated: Buffer
+    let decorateFrame: jest.Mock<Buffer, [Buffer, number, number]>
+
+    beforeEach(async () => {
+      decorated = Buffer.alloc(FRAME_SIZE, 9)
+      decorateFrame = jest.fn<Buffer, [Buffer, number, number]>().mockReturnValue(decorated)
+      await compositor.startPlayback(
+        '/tmp/nonexistent.mp4',
+        VIDEO_INFO,
+        SLIDE_BUFFER,
+        SLIDE_W,
+        SLIDE_H,
+        publisher,
+        undefined,
+        undefined,
+        decorateFrame
+      )
+      fakeProcesses[0].stdout.emit('data', frame)
+    })
+
+    it('should pass the undecorated frame and the slide size to decorateFrame', () => {
+      expect(decorateFrame).toHaveBeenCalledWith(frame, SLIDE_W, SLIDE_H)
+    })
+
+    it('should push the buffer decorateFrame returned', () => {
+      expect(publisher.pushFrame).toHaveBeenCalledTimes(1)
+      expect(publisher.pushFrame.mock.calls[0][0]).toBe(decorated)
+      expect(publisher.pushFrame).toHaveBeenCalledWith(decorated, SLIDE_W, SLIDE_H, 5)
+    })
+
+    it('should keep the undecorated frame for getLastFrame', () => {
+      const last = compositor.getLastFrame()
+      expect(last?.buffer).toEqual(frame)
+      expect(last?.buffer).not.toBe(decorated)
+    })
+  })
+
+  describe('and it throws', () => {
+    let emitFrame: () => boolean
+
+    beforeEach(async () => {
+      const decorateFrame = jest.fn<Buffer, [Buffer, number, number]>(() => {
+        throw new Error('stamp failed')
+      })
+      await compositor.startPlayback(
+        '/tmp/nonexistent.mp4',
+        VIDEO_INFO,
+        SLIDE_BUFFER,
+        SLIDE_W,
+        SLIDE_H,
+        publisher,
+        undefined,
+        undefined,
+        decorateFrame
+      )
+      emitFrame = () => fakeProcesses[0].stdout.emit('data', frame)
+    })
+
+    it('should not throw from the stdout data handler', () => {
+      expect(emitFrame).not.toThrow()
+    })
+
+    it('should push the undecorated frame', () => {
+      emitFrame()
+      expect(publisher.pushFrame).toHaveBeenCalledWith(frame, SLIDE_W, SLIDE_H, 5)
+    })
+
+    it('should log a warning', () => {
+      emitFrame()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('decorateFrame'))
     })
   })
 })
