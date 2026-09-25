@@ -4,25 +4,21 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { rgbaToI420 } from '../color-convert'
 import { FILE_TYPES } from '../file-validator'
-import type {
-  IPresentationManager,
-  OverlayConfig,
-  PresentationInfo,
-  PresentationSession,
-  PresentationState
-} from './types'
-import type { ICameraOverlayCompositor } from '../../adapters/camera-overlay-compositor'
+import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
+import type { ICameraOverlay } from '../../adapters/camera-overlay'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/renderer/types'
-import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { CompositorErrorReason, IVideoCompositor, VideoFrameSnapshot } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 import type { FileType } from '../file-validator'
-import type { RemoteVideoTrack } from '@livekit/rtc-node'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
+const BUFFER_TYPE_RGBA = 0
+const BUFFER_TYPE_I420 = 5
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -39,23 +35,11 @@ interface InternalSession extends PresentationSession {
   renderer: IRenderer
   publisher: ILiveKitPublisher
   compositor: IVideoCompositor | null
-  cameraOverlayCompositor: ICameraOverlayCompositor | null
-  presenterCameraActive: boolean
-  /**
-   * The most recent presenter camera track handed to us by livekit-publisher.
-   * Held here so we can restart the canvas pump after an embedded video ends
-   * (the ffmpeg path consumes the track during playback). Cleared on 'inactive'.
-   */
-  lastPresenterCameraTrack: RemoteVideoTrack | null
-  /**
-   * Closure-bound helper that starts the camera-overlay canvas pump for this
-   * session. Defined inside `createPresentation` so it captures the per-session
-   * `publisherLogger` and the shared `cameraOverlayCompositor`. Exposed on the
-   * session so sibling functions (notably `playVideoSession`'s `onEnd` hook)
-   * can reuse the same start sequence and logger object without re-resolving
-   * either inline. Set once at session creation and never reassigned.
-   */
-  startCameraOverlayPump: (session: InternalSession) => Promise<void>
+  cameraOverlay: ICameraOverlay
+  /** Frame shown when no video is playing: the RGBA slide or the unstamped I420 frozen video frame. */
+  baseFrame: VideoFrameSnapshot | null
+  /** I420 conversion of an RGBA `baseFrame`, keyed by its source buffer. */
+  baseI420: { source: Buffer; i420: Buffer } | null
   cachedVideoPaths: Map<string, string>
   navigating: boolean
   tempDir: string
@@ -103,9 +87,7 @@ export interface VideoErrorInfo {
 const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
   'video-playback-interrupted': 'Video playback was interrupted — the stream ended unexpectedly',
   'video-stream-error': 'Video playback failed — a stream error stopped the video',
-  'audio-processing-failed': 'Audio processing failed during playback',
-  'camera-resolution-changed': 'Camera resolution changed mid-playback — restart the camera',
-  'camera-resolution-invalid': 'Camera resolution invalid'
+  'audio-processing-failed': 'Audio processing failed during playback'
 }
 
 /** Maps download/playback errors to a stable code + user-friendly reason. */
@@ -168,19 +150,11 @@ export async function createPresentationManager(
     | 'pdfRenderer'
     | 'pptxRenderer'
     | 'videoCompositor'
-    | 'cameraOverlayCompositor'
+    | 'cameraOverlay'
   >
 ): Promise<IPresentationManager> {
-  const {
-    config,
-    logs,
-    metrics,
-    liveKitPublisher,
-    pdfRenderer,
-    pptxRenderer,
-    videoCompositor,
-    cameraOverlayCompositor
-  } = components
+  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor, cameraOverlay } =
+    components
   const logger = logs.getLogger('presentation-manager')
 
   // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
@@ -233,41 +207,70 @@ export async function createPresentationManager(
     }
   }
 
+  function baseAsI420(session: InternalSession): Buffer | null {
+    const base = session.baseFrame
+    if (!base) return null
+    if (base.bufferType === BUFFER_TYPE_I420) return base.buffer
+    if (session.baseI420?.source !== base.buffer) {
+      session.baseI420 = { source: base.buffer, i420: rgbaToI420(base.buffer, base.width, base.height) }
+    }
+    return session.baseI420.i420
+  }
+
+  function pushIdleFrame(session: InternalSession): void {
+    if (session.compositor?.getIsPlaying() || !session.cameraOverlay.isActive() || !session.baseFrame) return
+    const i420 = baseAsI420(session)
+    if (!i420) return
+    const { width, height } = session.baseFrame
+    let frame: Buffer
+    try {
+      frame = Buffer.from(i420)
+      session.cameraOverlay.stamp(frame, width, height)
+    } catch (err) {
+      logger.warn(`Camera overlay stamp failed: ${err instanceof Error ? err.message : String(err)}`)
+      frame = Buffer.from(i420)
+    }
+    session.publisher.pushFrame(frame, width, height, BUFFER_TYPE_I420)
+    session.publisher.startHeartbeat(frame, width, height, BUFFER_TYPE_I420)
+  }
+
+  function refreshIdleOutput(session: InternalSession): void {
+    const base = session.baseFrame
+    if (session.compositor?.getIsPlaying() || !base) return
+    if (session.cameraOverlay.isActive()) {
+      pushIdleFrame(session)
+      return
+    }
+    session.publisher.pushFrame(base.buffer, base.width, base.height, base.bufferType)
+    session.publisher.startHeartbeat(base.buffer, base.width, base.height, base.bufferType)
+  }
+
+  function resetBaseToSlide(session: InternalSession): void {
+    if (!session.lastFrameBuffer) return
+    session.baseFrame = {
+      buffer: session.lastFrameBuffer,
+      width: session.lastFrameWidth,
+      height: session.lastFrameHeight,
+      bufferType: BUFFER_TYPE_RGBA
+    }
+  }
+
   async function setupSlideOutput(
     session: InternalSession,
     buffer: Buffer,
     width: number,
     height: number
   ): Promise<void> {
-    // Always update the cached last-frame fields so reconnect/resume code paths work.
     session.lastFrameBuffer = buffer
     session.lastFrameWidth = width
     session.lastFrameHeight = height
+    resetBaseToSlide(session)
 
-    // If an embedded video is playing, slide output is owned by the ffmpeg compositor.
-    // Phase 5 adds the camera into the ffmpeg pipeline; nothing for us to do here.
     if (session.videoState === 'playing' || session.videoState === 'loading') {
       return
     }
 
-    const shouldOverlay = session.presenterCameraActive && session.overlayConfig
-    if (shouldOverlay) {
-      // We can't start the compositor without a live RemoteVideoTrack handle.
-      // The handler in createPresentation owns the track — it calls this function
-      // already wired up. If we land here with no compositor instance, it means
-      // the handler hasn't fired yet, so fall through to heartbeat for now; the
-      // handler will run setupSlideOutput again when 'active' fires.
-      if (session.cameraOverlayCompositor) {
-        session.publisher.stopHeartbeat()
-        session.cameraOverlayCompositor.updateSlide(buffer, width, height)
-        // Compositor pumps frames itself — first push will follow within ~50ms.
-        return
-      }
-      logger.debug(`[setupSlideOutput] camera active but no compositor instance yet; falling back to heartbeat`)
-    }
-
-    session.publisher.pushFrame(buffer, width, height)
-    session.publisher.startHeartbeat(buffer, width, height)
+    refreshIdleOutput(session)
   }
 
   async function broadcastState(session: InternalSession): Promise<void> {
@@ -316,8 +319,7 @@ export async function createPresentationManager(
     fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
-    fileName?: string,
-    overlayConfig?: OverlayConfig
+    fileName?: string
   ): Promise<PresentationInfo> {
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
@@ -329,6 +331,23 @@ export async function createPresentationManager(
 
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
+    const overlay = cameraOverlay.createOverlay(publisherLogger)
+
+    publisher.setPresenterCameraTrackHandler(async (event) => {
+      try {
+        if (event.kind === 'active') {
+          overlay.start(event.track)
+          return
+        }
+        await overlay.stop()
+        const session = sessions.get(id)
+        if (session) refreshIdleOutput(session)
+      } catch (err) {
+        logger.warn(
+          `[presenter-camera] handler error (${event.kind}): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    })
 
     let renderer: IRenderer | null = null
     let tempDir: string | null = null
@@ -387,101 +406,6 @@ export async function createPresentationManager(
         }
       })
 
-      // Restart embedded-video playback so ffmpeg picks up the new camera-input
-      // shape (added on 'activate', dropped on 'deactivate'). Both branches of the
-      // presenter-camera handler need the same restart, so the body is extracted
-      // here to keep them in sync.
-      const restartPlaybackOnCameraFlip = async (reason: 'activate' | 'deactivate'): Promise<void> => {
-        const session = sessions.get(id)
-        if (!session) return
-        if (session.videoState !== 'playing') return
-        if (session.pausedVideoIndex < 0) return
-        const elapsedMs = Date.now() - session.videoPlaybackStartedAt
-        session.videoElapsedBeforePause += elapsedMs
-        session.videoState = 'paused'
-        const indexToResume = session.pausedVideoIndex
-        await playVideoSession(session, indexToResume).catch((err) =>
-          logger.warn(
-            `Playback restart on camera ${reason} failed: ${err instanceof Error ? err.message : String(err)}`
-          )
-        )
-      }
-
-      // Start the camera-overlay canvas pump for `session`. Captures
-      // `cameraOverlayCompositor` and `publisherLogger` from the enclosing
-      // closure so both call sites (the active-branch of the camera handler
-      // and the `compositor.onEnd` block in `playVideoSession`, which routes
-      // through `session.startCameraOverlayPump`) use the same logger object
-      // and the same start sequence. Callers remain responsible for stopping
-      // any prior compositor before invoking this.
-      const startCameraOverlayPump = async (session: InternalSession): Promise<void> => {
-        if (!session.overlayConfig) return
-        if (!session.lastPresenterCameraTrack) return
-        const overlay = cameraOverlayCompositor.createCompositor(publisherLogger, session.overlayConfig)
-        session.cameraOverlayCompositor = overlay
-        session.publisher.stopHeartbeat()
-        await overlay.start(
-          session.lastPresenterCameraTrack,
-          session.lastFrameBuffer ?? Buffer.alloc(0),
-          session.lastFrameWidth,
-          session.lastFrameHeight,
-          (composite) => {
-            session.publisher.pushFrame(composite.buffer, composite.width, composite.height, /* I420 */ 5)
-          }
-        )
-      }
-
-      publisher.setPresenterCameraTrackHandler(async (event) => {
-        const session = sessions.get(id)
-        if (!session) return
-        if (!session.overlayConfig) return // overlay disabled for this session
-
-        try {
-          if (event.kind === 'active') {
-            // (Re)create the compositor with this track. The previous one — if any —
-            // was bound to an older track and must be released.
-            if (session.cameraOverlayCompositor) {
-              await session.cameraOverlayCompositor.stop().catch(() => {
-                /* best-effort cleanup */
-              })
-            }
-            session.presenterCameraActive = true
-            session.lastPresenterCameraTrack = event.track
-
-            // Only start the canvas pump if no embedded video is playing. The Phase-5
-            // ffmpeg path takes over while a video runs.
-            if (session.videoState !== 'playing' && session.videoState !== 'loading') {
-              await startCameraOverlayPump(session)
-            }
-
-            // If a video is currently playing, restart playback so ffmpeg picks up
-            // the camera input. A few hundred ms of stutter is acceptable for v1.
-            await restartPlaybackOnCameraFlip('activate')
-          } else {
-            // 'inactive' — release the compositor and fall back to heartbeat.
-            session.presenterCameraActive = false
-            session.lastPresenterCameraTrack = null
-            const old = session.cameraOverlayCompositor
-            session.cameraOverlayCompositor = null
-            if (old) {
-              await old.stop().catch(() => {
-                /* best-effort cleanup */
-              })
-            }
-            if (session.lastFrameBuffer) {
-              await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-            }
-
-            // If a video is currently playing, restart so ffmpeg drops the camera input.
-            await restartPlaybackOnCameraFlip('deactivate')
-          }
-        } catch (err) {
-          logger.warn(
-            `[presenter-camera] handler error (${event.kind}): ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
-      })
-
       // Render first slide
       const { buffer, width, height } = await renderer.renderSlide(0)
 
@@ -509,11 +433,9 @@ export async function createPresentationManager(
         lastFrameHeight: height,
         slideVideos,
         videoState: 'idle',
-        overlayConfig,
-        cameraOverlayCompositor: null,
-        presenterCameraActive: false,
-        lastPresenterCameraTrack: null,
-        startCameraOverlayPump,
+        cameraOverlay: overlay,
+        baseFrame: null,
+        baseI420: null,
         renderer,
         publisher,
         compositor: null,
@@ -533,6 +455,7 @@ export async function createPresentationManager(
       }
 
       sessions.set(id, session)
+      overlay.onCameraFrame(() => pushIdleFrame(session))
       await setupSlideOutput(session, buffer, width, height)
       metrics.increment('session_created_total', { status: 'success' })
       metrics.increment('active_sessions')
@@ -567,6 +490,8 @@ export async function createPresentationManager(
       if (renderer) {
         renderer.destroy()
       }
+      publisher.setPresenterCameraTrackHandler(null)
+      await overlay.stop().catch(() => undefined)
       await publisher.disconnect()
       throw err
     } finally {
@@ -882,24 +807,6 @@ export async function createPresentationManager(
     session.pausedVideoIndex = videoIndex
     if (seekSeconds === 0) session.videoElapsedBeforePause = 0
 
-    // Stop the canvas pump before handing the track to ffmpeg — two readers on a
-    // single VideoStream race. Keep `session.cameraOverlayCompositor` set so we
-    // can restart the pump in onEnd. The pump compositor instance is single-use
-    // (stop() releases its hoisted canvases and stream), so once stopped we drop
-    // the reference.
-    if (session.cameraOverlayCompositor && session.presenterCameraActive) {
-      await session.cameraOverlayCompositor.stop().catch(() => {
-        /* best-effort cleanup */
-      })
-      session.cameraOverlayCompositor = null
-    }
-
-    const cameraTrack = session.lastPresenterCameraTrack
-    const presenterCamera =
-      session.overlayConfig && session.presenterCameraActive && cameraTrack
-        ? { track: cameraTrack, overlayConfig: session.overlayConfig }
-        : undefined
-
     try {
       await compositor.startPlayback(
         videoPath,
@@ -910,7 +817,12 @@ export async function createPresentationManager(
         session.publisher,
         onAudioData,
         seekSeconds > 0 ? seekSeconds : undefined,
-        presenterCamera
+        (frame, width, height) => {
+          if (!session.cameraOverlay.isActive()) return frame
+          const out = Buffer.from(frame)
+          session.cameraOverlay.stamp(out, width, height)
+          return out
+        }
       )
     } catch (err) {
       compositor.cleanup()
@@ -943,51 +855,33 @@ export async function createPresentationManager(
 
     const endedCompositor = compositor
     compositor.onEnd(async () => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      if (session.compositor !== endedCompositor) return
+      resetBaseToSlide(session)
       session.videoState = 'idle'
       session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-
-      // If the camera is still active and the overlay is configured, restart the
-      // canvas pump on the last-seen track so slide+camera composition resumes.
-      if (
-        session.presenterCameraActive &&
-        session.overlayConfig &&
-        session.lastPresenterCameraTrack &&
-        session.lastFrameBuffer
-      ) {
-        try {
-          await session.startCameraOverlayPump(session)
-        } catch (err) {
-          logger.warn(
-            `Failed to restart canvas pump after video end: ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
+      await session.publisher.stopAudioPublishing().catch(() => undefined)
+      if (session.lastFrameBuffer) {
+        await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
       }
 
       metrics.increment('video_playback_total', { action: 'end' })
-      broadcastState(session).catch(() => {
-        /* noop */
-      })
+      broadcastState(session).catch(() => undefined)
       logger.info(`Video ended naturally for presentation ${session.id}`)
     })
 
     compositor.onError(async (reason) => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      if (session.compositor !== endedCompositor) return
+      resetBaseToSlide(session)
       const message = COMPOSITOR_ERROR_MESSAGES[reason]
       session.videoState = 'error'
       session.videoErrorCode = reason
       session.videoErrorReason = message
-      // Full teardown — clears latches/listeners and unlinks the slide temp file.
-      // The compositor's internal stopPlayback already killed FFmpeg, but cleanup
-      // is the documented session-side counterpart that releases the rest.
       endedCompositor.cleanup()
       session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
+      if (session.lastFrameBuffer) {
+        await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      }
+      await session.publisher.stopAudioPublishing().catch(() => undefined)
       await broadcastError(session, reason, message, { videoIndex })
       await broadcastState(session)
       logger.warn(`Video playback interrupted for presentation ${session.id}: ${reason}`)
@@ -1034,17 +928,8 @@ export async function createPresentationManager(
       const lastFrame = session.compositor.getLastFrame()
       session.compositor.cleanup()
       session.compositor = null
-
-      // Keep pushing the last video frame so viewers see a frozen video, not the slide placeholder.
-      // Last-frame fallback is I420 (already-composited frame from ffmpeg); we don't
-      // re-route it through the camera-overlay compositor because it isn't RGBA.
-      if (lastFrame) {
-        session.publisher.pushFrame(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-        session.publisher.startHeartbeat(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-      } else if (session.lastFrameBuffer) {
-        session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-        session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-      }
+      if (lastFrame) session.baseFrame = lastFrame
+      refreshIdleOutput(session)
 
       session.videoState = 'paused'
       metrics.increment('video_playback_total', { action: 'pause' })
@@ -1085,12 +970,8 @@ export async function createPresentationManager(
         logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
       }
 
-      if (session.cameraOverlayCompositor) {
-        await session.cameraOverlayCompositor.stop().catch(() => {
-          /* best-effort cleanup */
-        })
-        session.cameraOverlayCompositor = null
-      }
+      session.publisher.setPresenterCameraTrackHandler(null)
+      await session.cameraOverlay.stop().catch(() => undefined)
 
       try {
         await session.publisher.disconnect()

@@ -10,7 +10,7 @@ import { createHttpTracerComponent } from '@dcl/http-tracer-component'
 import { createMetricsComponent } from '@dcl/metrics'
 import { createTracedFetcherComponent } from '@dcl/traced-fetch-component'
 import { createTracerComponent } from '@dcl/tracer-component'
-import { createCameraOverlayCompositorComponent } from './adapters/camera-overlay-compositor'
+import { createCameraOverlayComponent } from './adapters/camera-overlay'
 import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
 import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
@@ -76,7 +76,7 @@ export async function initComponents(): Promise<AppComponents> {
   const pdfRenderer = createPdfRendererComponent()
   const pptxRenderer = createPptxRendererComponent()
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
-  const cameraOverlayCompositor = createCameraOverlayCompositorComponent()
+  const cameraOverlay = createCameraOverlayComponent()
 
   const presentationManager = await createPresentationManager({
     config,
@@ -86,7 +86,7 @@ export async function initComponents(): Promise<AppComponents> {
     pdfRenderer,
     pptxRenderer,
     videoCompositor,
-    cameraOverlayCompositor
+    cameraOverlay
   })
 
   return {
@@ -103,7 +103,7 @@ export async function initComponents(): Promise<AppComponents> {
     pdfRenderer,
     pptxRenderer,
     videoCompositor,
-    cameraOverlayCompositor,
+    cameraOverlay,
     networkValidator
   }
 }
