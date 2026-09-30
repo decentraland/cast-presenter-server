@@ -28,6 +28,7 @@ type fakeRoom struct {
 	publishErr  error
 	setErr      error
 	onDisc      func(ev room.Events)
+	onConnect   func(ev room.Events)
 }
 
 func (f *fakeRoom) Metadata() string { return f.metadata }
@@ -75,6 +76,9 @@ func fakeConnect(f *fakeRoom, err error, calls *[]connectCall) ConnectFunc {
 			return nil, err
 		}
 		f.ev = ev
+		if f.onConnect != nil {
+			f.onConnect(ev)
+		}
 		return f, nil
 	}
 }
@@ -220,6 +224,20 @@ func TestRunAcksUpdateMetadataAndShutdown(t *testing.T) {
 	}
 }
 
+func TestRunDropsRoomEventsBeforeReady(t *testing.T) {
+	f := &fakeRoom{count: 5, onConnect: func(ev room.Events) {
+		ev.OnParticipantCount(5)
+		ev.OnRoomMetadata("{}")
+		ev.OnData("0xabc", []byte("early"))
+	}}
+
+	_, events, raw := runLines(t, f, initLine)
+
+	if len(events) != 1 || events[0]["type"] != "ready" || events[0]["participantCount"] != float64(5) {
+		t.Fatalf("expected only ready, got %s", raw)
+	}
+}
+
 func TestRunReadySerialisesZeroParticipants(t *testing.T) {
 	_, _, raw := runLines(t, &fakeRoom{}, initLine)
 
@@ -334,17 +352,17 @@ func TestRunDoesNotReportSelfInitiatedDisconnects(t *testing.T) {
 	}
 }
 
-type session struct {
+type harness struct {
 	stdin  *io.PipeWriter
 	lines  chan map[string]any
 	result chan int
 }
 
-func startSession(t *testing.T, f *fakeRoom) *session {
+func startHarness(t *testing.T, f *fakeRoom) *harness {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	s := &session{stdin: inW, lines: make(chan map[string]any, 16), result: make(chan int, 1)}
+	s := &harness{stdin: inW, lines: make(chan map[string]any, 16), result: make(chan int, 1)}
 	go func() {
 		s.result <- run(inR, outW, fakeConnect(f, nil, nil))
 		_ = outW.Close()
@@ -367,14 +385,14 @@ func startSession(t *testing.T, f *fakeRoom) *session {
 	return s
 }
 
-func (s *session) send(t *testing.T, line string) {
+func (s *harness) send(t *testing.T, line string) {
 	t.Helper()
 	if _, err := io.WriteString(s.stdin, line+"\n"); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}
 }
 
-func (s *session) next(t *testing.T) map[string]any {
+func (s *harness) next(t *testing.T) map[string]any {
 	t.Helper()
 	select {
 	case ev, ok := <-s.lines:
@@ -388,7 +406,7 @@ func (s *session) next(t *testing.T) map[string]any {
 	return nil
 }
 
-func (s *session) exitCode(t *testing.T) int {
+func (s *harness) exitCode(t *testing.T) int {
 	t.Helper()
 	select {
 	case code := <-s.result:
@@ -401,7 +419,7 @@ func (s *session) exitCode(t *testing.T) int {
 
 func TestRunForwardsRoomEvents(t *testing.T) {
 	f := &fakeRoom{}
-	s := startSession(t, f)
+	s := startHarness(t, f)
 
 	f.ev.OnData("0xabc", []byte("hello"))
 	if ev := s.next(t); ev["type"] != "dataReceived" || ev["identity"] != "0xabc" || ev["payloadBase64"] != "aGVsbG8=" {
@@ -429,7 +447,7 @@ func TestRunForwardsRoomEvents(t *testing.T) {
 
 func TestRunExitsOneWhenTheRoomIsLost(t *testing.T) {
 	f := &fakeRoom{}
-	s := startSession(t, f)
+	s := startHarness(t, f)
 
 	f.ev.OnDisconnected("SIGNAL_CLOSED")
 
