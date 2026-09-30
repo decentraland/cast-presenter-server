@@ -4,14 +4,13 @@ import * as os from 'os'
 import * as path from 'path'
 import { GlobalFonts, type SKRSContext2D, createCanvas, loadImage } from '@napi-rs/canvas'
 import { MAX_EMBEDDED_MEDIA_BYTES, PPTXParser } from './parser/core/PPTXParser'
+import { fitRenderSize } from '../../logic/render-size'
 import type { Geometry } from './parser/models/Geometry'
 import type { Shape } from './parser/models/Shape'
 import type { Slide } from './parser/models/Slide'
 import type { Fill, Stroke, TextParagraph, TextRun } from './parser/models/types'
 import type { IRenderer, IRendererComponent, RenderResult } from '../renderer/types'
 import type { SlideVideoInfo } from '../video-compositor/types'
-
-const TARGET_WIDTH = 960
 
 // Emoji font: pick whichever is available on the system
 const EMOJI_FONT_FAMILY = GlobalFonts.has('Apple Color Emoji')
@@ -679,9 +678,7 @@ function createRenderer(): IRenderer {
       if (!parser) throw new Error('PPTX not initialized')
 
       const slide = await parser.getSlide(index)
-      const scale = TARGET_WIDTH / slide.width
-      const width = Math.round(slide.width * scale)
-      const height = Math.round(slide.height * scale)
+      const { scale, width, height } = fitRenderSize(slide.width, slide.height)
 
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d')
@@ -715,7 +712,7 @@ function createRenderer(): IRenderer {
       if (!parser) throw new Error('PPTX not initialized')
 
       const slide = await parser.getSlide(index)
-      const scale = TARGET_WIDTH / slide.width
+      const { scale } = fitRenderSize(slide.width, slide.height)
       const videos: SlideVideoInfo[] = []
 
       for (const shape of slide.getVideos()) {
