@@ -121,6 +121,147 @@ function createOversizedJsonContext(bodySize: number) {
   } as unknown as Parameters<typeof createPresentationHandler>[0]
 }
 
+interface PresenterSpies {
+  presentationManager: ReturnType<typeof createMockPresentationManager>
+  warn: jest.Mock
+}
+
+type HandlerContext = Parameters<typeof createPresentationHandler>[0]
+
+function createSpiedLogs(warn: jest.Mock) {
+  return {
+    getLogger: () => ({ info: jest.fn(), warn, error: jest.fn(), debug: jest.fn(), log: jest.fn() })
+  }
+}
+
+function createPresenterJsonContext(presenterIdentity: string | undefined, spies: PresenterSpies): HandlerContext {
+  const body = {
+    url: 'https://example.com/file.pdf',
+    livekitToken: 'token',
+    livekitUrl: 'wss://lk.example.com',
+    ...(presenterIdentity !== undefined ? { presenterIdentity } : {})
+  }
+  const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
+  return {
+    request: {
+      headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
+      arrayBuffer: async () => jsonBytes.buffer.slice(jsonBytes.byteOffset, jsonBytes.byteOffset + jsonBytes.byteLength)
+    },
+    components: {
+      logs: createSpiedLogs(spies.warn),
+      presentationManager: spies.presentationManager,
+      fileProvider: createMockFileProvider()
+    }
+  } as unknown as HandlerContext
+}
+
+function createPresenterMultipartContext(presenterIdentity: string | undefined, spies: PresenterSpies): HandlerContext {
+  const fileProvider = createMockFileProvider()
+  fileProvider.fromMultipart.mockResolvedValue({
+    buffer: Buffer.from('%PDF-1.7'),
+    filename: 'test.pdf',
+    fields: {
+      livekitToken: 'token',
+      livekitUrl: 'wss://lk.example.com',
+      ...(presenterIdentity !== undefined ? { presenterIdentity } : {})
+    }
+  })
+  return {
+    request: {
+      headers: { get: (name: string) => (name === 'content-type' ? 'multipart/form-data; boundary=x' : null) },
+      arrayBuffer: async () => new ArrayBuffer(0)
+    },
+    components: {
+      logs: createSpiedLogs(spies.warn),
+      presentationManager: spies.presentationManager,
+      fileProvider
+    }
+  } as unknown as HandlerContext
+}
+
+describe.each([
+  { path: 'JSON', buildContext: createPresenterJsonContext },
+  { path: 'multipart', buildContext: createPresenterMultipartContext }
+])('when handling a $path create presentation request', ({ buildContext }) => {
+  let result: IHttpServerComponent.IResponse
+  let spies: PresenterSpies
+
+  function lastCreatePresentationArgument(): unknown {
+    const args: unknown[] = spies.presentationManager.createPresentation.mock.calls[0]
+    return args[args.length - 1]
+  }
+
+  beforeEach(() => {
+    spies = { presentationManager: createMockPresentationManager(), warn: jest.fn() }
+  })
+
+  describe.each([
+    { label: 'a stream identity', presenterIdentity: 'stream:scene-1:abc' },
+    { label: 'a wallet address', presenterIdentity: '0x' + 'a1B2c3D4e5'.repeat(4) }
+  ])('and a presenterIdentity is provided as $label', ({ presenterIdentity }) => {
+    beforeEach(async () => {
+      result = await createPresentationHandler(buildContext(presenterIdentity, spies))
+    })
+
+    it('should respond with a 201', () => {
+      expect(result.status).toBe(201)
+    })
+
+    it('should pass the presenterIdentity as the last createPresentation argument', () => {
+      expect(lastCreatePresentationArgument()).toBe(presenterIdentity)
+    })
+
+    it('should not log a warning', () => {
+      expect(spies.warn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and no presenterIdentity is provided', () => {
+    beforeEach(async () => {
+      result = await createPresentationHandler(buildContext(undefined, spies))
+    })
+
+    it('should respond with a 201', () => {
+      expect(result.status).toBe(201)
+    })
+
+    it('should pass null as the last createPresentation argument', () => {
+      expect(lastCreatePresentationArgument()).toBeNull()
+    })
+
+    it('should not log a warning', () => {
+      expect(spies.warn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe.each([
+    { label: 'contains whitespace', presenterIdentity: 'evil name' },
+    { label: 'is a stream identity longer than 128 characters', presenterIdentity: 'stream:' + 'x'.repeat(130) },
+    { label: 'is a truncated address', presenterIdentity: '0x123' }
+  ])('and a presenterIdentity is provided that $label', ({ presenterIdentity }) => {
+    beforeEach(async () => {
+      result = await createPresentationHandler(buildContext(presenterIdentity, spies))
+    })
+
+    it('should respond with a 201', () => {
+      expect(result.status).toBe(201)
+    })
+
+    it('should pass null as the last createPresentation argument', () => {
+      expect(lastCreatePresentationArgument()).toBeNull()
+    })
+
+    it('should log exactly one warning', () => {
+      expect(spies.warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('should log at most 16 characters of the rejected value', () => {
+      const [, logged] = spies.warn.mock.calls[0]
+      expect(String(logged.presenterIdentity).length).toBeLessThanOrEqual(16)
+    })
+  })
+})
+
 describe('when handling a create presentation request', () => {
   let result: IHttpServerComponent.IResponse
 

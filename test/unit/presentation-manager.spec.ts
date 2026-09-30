@@ -4,11 +4,14 @@ import {
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
+import { encodeSlidePng } from '../../src/logic/slide-image'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
 import type { OverlayLayout } from '../../src/logic/overlay-layout'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
+
+jest.mock('../../src/logic/slide-image')
 
 function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
   return {
@@ -1418,6 +1421,236 @@ describe('when managing video playback in a presentation', () => {
       onAudioData(Buffer.alloc(50)) // total 130 residual
       onAudioData(Buffer.alloc(1920 - 130)) // completes frame 2
       expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(2)
+    })
+  })
+})
+describe('when client composition is enabled', () => {
+  const PUBLIC_BASE_URL = 'https://cast.example.com'
+  let components: ReturnType<typeof createMockComponents>
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let configValues: Record<string, string | undefined>
+  let encodeCount: number
+
+  function stateBroadcasts(): Array<Record<string, unknown>> {
+    return publisher.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
+  }
+
+  function lastSlideUrl(): unknown {
+    const states = stateBroadcasts()
+    return (states[states.length - 1].slide as { url: string }).url
+  }
+
+  beforeEach(() => {
+    encodeCount = 0
+    jest.mocked(encodeSlidePng).mockImplementation(async () => {
+      encodeCount++
+      return { hash: `h${encodeCount}`, png: Buffer.from(`png${encodeCount}`), width: 1920, height: 1080 }
+    })
+    configValues = { CLIENT_COMPOSITION_ENABLED: 'true', PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
+    publisher = createMockPublisher()
+    components = createMockComponents({ publisher })
+    components.config.getString.mockImplementation(async (key: string) => configValues[key])
+    const renderer = createMockRenderer()
+    renderer.getSlideCount.mockReturnValue(10)
+    renderer.getSlideVideos.mockResolvedValue([
+      { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
+    ])
+    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+  })
+
+  afterEach(() => {
+    jest.mocked(encodeSlidePng).mockReset()
+  })
+
+  describe('and PUBLIC_BASE_URL is unset', () => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = undefined
+    })
+
+    it('should reject creating the manager', async () => {
+      await expect(
+        createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
+      ).rejects.toThrow('PUBLIC_BASE_URL')
+    })
+  })
+
+  describe('and the manager is running', () => {
+    let manager: IPresentationManager
+    let presentationId: string
+
+    beforeEach(async () => {
+      manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+    })
+
+    describe('and a session is created with a presenterIdentity', () => {
+      let expectedFields: Record<string, unknown>
+
+      beforeEach(async () => {
+        const info = await manager.createPresentation(
+          Buffer.from('%PDF-1.7'),
+          'pdf',
+          'test-token',
+          'wss://lk.example.com',
+          'test.pdf',
+          'stream:p:1'
+        )
+        presentationId = info.id
+        expectedFields = {
+          slide: { url: `${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`, width: 1920, height: 1080 },
+          presenterIdentity: 'stream:p:1',
+          playingVideoIndex: null
+        }
+      })
+
+      it('should broadcast the slide, presenterIdentity and playingVideoIndex in the first state', () => {
+        expect(stateBroadcasts()[0]).toEqual(expect.objectContaining(expectedFields))
+      })
+
+      it('should put the same fields in the bot metadata', () => {
+        expect(publisher.updateMetadataState.mock.calls[0][0]).toEqual(expect.objectContaining(expectedFields))
+      })
+
+      describe('and the presenter navigates to the next slide', () => {
+        beforeEach(async () => {
+          await manager.navigate(presentationId, 'next')
+        })
+
+        it('should broadcast the new slide url', () => {
+          expect(lastSlideUrl()).toBe(`${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h2.png`)
+        })
+
+        it('should still serve the previous slide image', () => {
+          expect(manager.getSlideImage(presentationId, 'h1')).toEqual(Buffer.from('png1'))
+        })
+
+        it('should serve the current slide image', () => {
+          expect(manager.getSlideImage(presentationId, 'h2')).toEqual(Buffer.from('png2'))
+        })
+      })
+
+      describe('and the presenter navigates nine times', () => {
+        beforeEach(async () => {
+          for (let slide = 1; slide <= 9; slide++) {
+            await manager.navigate(presentationId, 'goto', slide)
+          }
+        })
+
+        it('should evict the oldest slide image', () => {
+          expect(manager.getSlideImage(presentationId, 'h1')).toBeNull()
+        })
+
+        it('should keep the latest slide image', () => {
+          expect(manager.getSlideImage(presentationId, 'h10')).toEqual(Buffer.from('png10'))
+        })
+      })
+
+      describe('and encoding the next slide fails', () => {
+        beforeEach(async () => {
+          jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+          await manager.navigate(presentationId, 'next').catch(() => undefined)
+        })
+
+        it('should keep the current slide', () => {
+          expect(manager.getState(presentationId)?.currentSlide).toBe(0)
+        })
+      })
+
+      describe('and the presenter plays video 0', () => {
+        beforeEach(async () => {
+          await manager.playVideo(presentationId, 0)
+        })
+
+        it('should broadcast playingVideoIndex 0 while loading', () => {
+          expect(stateBroadcasts().find((s) => s.videoState === 'loading')).toEqual(
+            expect.objectContaining({ playingVideoIndex: 0 })
+          )
+        })
+
+        it('should keep playingVideoIndex 0 while playing', () => {
+          expect(manager.getState(presentationId)).toEqual(
+            expect.objectContaining({ videoState: 'playing', playingVideoIndex: 0 })
+          )
+        })
+
+        describe('and the presenter stops the video', () => {
+          beforeEach(async () => {
+            await manager.stopVideo(presentationId)
+          })
+
+          it('should broadcast playingVideoIndex null', () => {
+            const states = stateBroadcasts()
+            expect(states[states.length - 1]).toEqual(
+              expect.objectContaining({ videoState: 'idle', playingVideoIndex: null })
+            )
+          })
+        })
+      })
+    })
+
+    describe('and a session is created without a presenterIdentity', () => {
+      beforeEach(async () => {
+        await manager.createPresentation(
+          Buffer.from('%PDF-1.7'),
+          'pdf',
+          'test-token',
+          'wss://lk.example.com',
+          'test.pdf'
+        )
+      })
+
+      it('should broadcast a null presenterIdentity', () => {
+        expect(stateBroadcasts()[0]).toEqual(expect.objectContaining({ presenterIdentity: null }))
+      })
+    })
+  })
+})
+
+describe('when client composition is disabled', () => {
+  let publisher: jest.Mocked<ILiveKitPublisher>
+
+  beforeEach(async () => {
+    publisher = createMockPublisher()
+    const components = createMockComponents({ publisher })
+    const manager = await createPresentationManager(
+      components as unknown as Parameters<typeof createPresentationManager>[0]
+    )
+    await manager.createPresentation(
+      Buffer.from('%PDF-1.7'),
+      'pdf',
+      'test-token',
+      'wss://lk.example.com',
+      'test.pdf',
+      'stream:p:1'
+    )
+  })
+
+  afterEach(() => {
+    jest.mocked(encodeSlidePng).mockReset()
+  })
+
+  describe('and a session is created', () => {
+    let state: Record<string, unknown>
+
+    beforeEach(() => {
+      state = publisher.publishData.mock.calls[0][0]
+    })
+
+    it('should not include a slide in the state', () => {
+      expect(state).not.toHaveProperty('slide')
+    })
+
+    it('should not include a presenterIdentity in the state', () => {
+      expect(state).not.toHaveProperty('presenterIdentity')
+    })
+
+    it('should not include a playingVideoIndex in the state', () => {
+      expect(state).not.toHaveProperty('playingVideoIndex')
+    })
+
+    it('should not encode a slide image', () => {
+      expect(encodeSlidePng).not.toHaveBeenCalled()
     })
   })
 })
