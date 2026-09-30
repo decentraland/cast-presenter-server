@@ -201,6 +201,27 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
+With `CLIENT_COMPOSITION_ENABLED=true` (which requires
+`PUBLIC_BASE_URL`), both channels also carry three fields for clients
+that composite the presentation themselves:
+
+- `slide: { url, width, height }`: the current slide as a PNG at
+  `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
+  `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
+  presence marks the v2 protocol. Each session caches the last 8
+  slides in memory; an evicted hash, or any hash after the session
+  stops, returns 404.
+- `presenterIdentity`: the identity of the participant who started
+  the presentation, or `null`. It comes from the optional
+  `presenterIdentity` field of `POST /presentations` (multipart or
+  JSON), which must be `stream:`-prefixed or a `0x` address, at most
+  128 characters. An absent or invalid value is stored as `null`, and
+  an invalid one is logged; it never causes a 400.
+- `playingVideoIndex`: the index into `slideVideos` while
+  `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
+
+With the flag off, none of these fields are emitted.
+
 ### Authorization
 
 Commands are accepted only from participants whose identity appears in

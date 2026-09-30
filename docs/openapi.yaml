@@ -88,6 +88,14 @@ paths:
                 livekitUrl:
                   type: string
                   description: LiveKit server WebSocket URL (must be `wss://`)
+                presenterIdentity:
+                  type: string
+                  maxLength: 128
+                  pattern: "^(stream:\\S{1,121}|0x[0-9a-fA-F]{40})$"
+                  description: >
+                    Optional identity of the participant starting the
+                    presentation. An absent or invalid value is stored as
+                    null and logged; it never causes a 400.
           application/json:
             schema:
               type: object
@@ -107,6 +115,14 @@ paths:
                 livekitUrl:
                   type: string
                   description: LiveKit server WebSocket URL (must be `wss://`)
+                presenterIdentity:
+                  type: string
+                  maxLength: 128
+                  pattern: "^(stream:\\S{1,121}|0x[0-9a-fA-F]{40})$"
+                  description: >
+                    Optional identity of the participant starting the
+                    presentation. An absent or invalid value is stored as
+                    null and logged; it never causes a 400.
       responses:
         "201":
           description: Presentation created
@@ -144,6 +160,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /presentations/{id}/slides/{file}:
+    get:
+      tags: [Presentations]
+      summary: Fetch a slide image
+      description: |
+        Returns the PNG of a recently shown slide. Only present when
+        `CLIENT_COMPOSITION_ENABLED=true`; clients read the URL from
+        `slide.url` in the presentation state. Each session keeps the
+        last 8 slides. Unauthenticated: the content hash is the capability.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Presentation session ID
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{16}\\.png$"
+          description: Content hash of the slide PNG followed by `.png`
+      responses:
+        "200":
+          description: Slide image
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=31536000, immutable
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: >
+            Malformed file name, unknown or stopped session, or a hash
+            that is not (or no longer) cached.
 
   /api/drive-video:
     get:
@@ -273,6 +331,34 @@ components:
             video disk budget").
         overlay:
           $ref: "#/components/schemas/OverlayLayout"
+        slide:
+          type: object
+          description: >
+            Present only when `CLIENT_COMPOSITION_ENABLED=true` and its
+            presence marks the v2 protocol. The current slide image and
+            its render size in pixels.
+          properties:
+            url:
+              type: string
+              format: uri
+              description: "`<PUBLIC_BASE_URL>/presentations/{id}/slides/{hash}.png`"
+            width:
+              type: integer
+            height:
+              type: integer
+        presenterIdentity:
+          type: string
+          nullable: true
+          description: >
+            Present only when `CLIENT_COMPOSITION_ENABLED=true`. Identity
+            of the participant who started the presentation, or null.
+        playingVideoIndex:
+          type: integer
+          nullable: true
+          description: >
+            Present only when `CLIENT_COMPOSITION_ENABLED=true`. Index
+            into `slideVideos` while `videoState` is `loading`,
+            `playing` or `paused`; otherwise null.
 
     OverlayLayout:
       type: object
