@@ -16,6 +16,15 @@ RUN yarn install --prod --frozen-lockfile
 
 ########################## END OF BUILD STAGE ##########################
 
+FROM golang:1.26-trixie@sha256:eae2aaa6add2936cbf350dd0d2628b363461542f0c4b3c0b558957e0f2997379 AS sidecarbuilder
+
+ENV GOTOOLCHAIN=local
+WORKDIR /sidecar
+COPY sidecar/go.mod sidecar/go.sum ./
+RUN go mod download
+COPY sidecar/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cast-sidecar ./cmd/cast-sidecar
+
 FROM node:24-trixie-slim@sha256:287c662bed62f3c7b68ea68544814eaff9d7ed2254d2fc9627f2df5957bb7401
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,6 +49,7 @@ COPY --chown=appuser:appuser --from=builderenv /app/dist /app/dist
 COPY --chown=appuser:appuser --from=builderenv /app/node_modules /app/node_modules
 COPY --chown=appuser:appuser --from=builderenv /app/package.json /app/package.json
 COPY --chown=appuser:appuser --from=builderenv /app/.env.default /app/.env.default
+COPY --from=sidecarbuilder /out/cast-sidecar /usr/local/bin/cast-sidecar
 
 USER appuser
 RUN echo "" > /app/.env
