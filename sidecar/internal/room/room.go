@@ -30,6 +30,11 @@ var (
 	ErrPublish = errors.New("publish failed")
 )
 
+var publisherCodecs = []livekit.Codec{
+	{Mime: webrtc.MimeTypeH264, FmtpLine: h264Fmtp},
+	{Mime: webrtc.MimeTypeOpus},
+}
+
 var accessTokenParam = regexp.MustCompile(`access_token=[^&\s]+`)
 
 // Redact replaces every access_token value in s.
@@ -62,7 +67,8 @@ type botMetadata struct {
 	PresentationID string `json:"presentationId"`
 }
 
-// Connect joins the room, sets the bot metadata and publishes both playback tracks.
+// Connect joins the room, sets the bot metadata, publishes both playback tracks and
+// writes one black keyframe to presentation-video so the SFU lists it before the first play.
 func Connect(url, token, presentationID string, ev Events) (*Room, error) {
 	r := &Room{}
 	r.lk = lksdk.NewRoom(&lksdk.RoomCallback{
@@ -89,7 +95,7 @@ func Connect(url, token, presentationID string, ev Events) (*Room, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
-	if err := r.lk.JoinWithContextAndToken(ctx, url, token, lksdk.WithAutoSubscribe(false)); err != nil {
+	if err := r.lk.JoinWithContextAndToken(ctx, url, token, lksdk.WithAutoSubscribe(false), lksdk.WithCodecs(publisherCodecs)); err != nil {
 		return nil, wrap(ErrConnect, err)
 	}
 
@@ -102,7 +108,7 @@ func Connect(url, token, presentationID string, ev Events) (*Room, error) {
 		r.lk.Disconnect()
 		return nil, err
 	}
-	if err := r.publishPlaybackTracks(); err != nil {
+	if err := r.publishPlaybackTracks(ctx); err != nil {
 		r.lk.Disconnect()
 		return nil, wrap(ErrPublish, err)
 	}
@@ -115,11 +121,10 @@ func (r *Room) serialized(notify func()) {
 	notify()
 }
 
-func (r *Room) publishPlaybackTracks() error {
+func (r *Room) publishPlaybackTracks(ctx context.Context) error {
 	video, err := r.publish(webrtc.RTPCodecCapability{
-		MimeType:    webrtc.MimeTypeH264,
-		ClockRate:   90000,
-		SDPFmtpLine: h264Fmtp,
+		MimeType:  webrtc.MimeTypeH264,
+		ClockRate: 90000,
 	}, videoTrackName, livekit.TrackSource_SCREEN_SHARE)
 	if err != nil {
 		return err
@@ -132,8 +137,16 @@ func (r *Room) publishPlaybackTracks() error {
 	if err != nil {
 		return err
 	}
+	if err := writeBlackKeyframe(ctx, video, func() bool { return video.IsBound() && r.publisherSRTPReady() }); err != nil {
+		return fmt.Errorf("%s keyframe: %w", videoTrackName, err)
+	}
 	r.video, r.audio = video, audio
 	return nil
+}
+
+func (r *Room) publisherSRTPReady() bool {
+	pc := r.lk.LocalParticipant.GetPublisherPeerConnection()
+	return pc != nil && pc.SCTP().Transport().State() == webrtc.DTLSTransportStateConnected
 }
 
 func (r *Room) publish(codec webrtc.RTPCodecCapability, name string, source livekit.TrackSource) (*lksdk.LocalSampleTrack, error) {
