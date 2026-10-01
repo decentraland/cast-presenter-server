@@ -1,5 +1,6 @@
 import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 
@@ -202,5 +203,42 @@ describe('when the presentation video track is published', () => {
 
   it('should publish it with the VP8 codec so tall slides are not dropped by the H.264 level limit', () => {
     expect(TrackPublishOptions).toHaveBeenCalledWith(expect.objectContaining({ videoCodec: 'VP8' }))
+  })
+})
+
+describe('when the LiveKit publisher receives a presentation data packet', () => {
+  let dataHandler: jest.Mock
+  let onData: (payload: Uint8Array, participant?: { identity?: string }) => void
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    const room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['Presenter-Id'] }) })
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+    dataHandler = jest.fn()
+    publisher.setDataHandler(dataHandler)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+  })
+
+  describe('and it comes from a presenter', () => {
+    beforeEach(() => {
+      onData(encodePresentationPacket({ type: 'presentation:navigate', action: 'next' }, 'scene-1'), {
+        identity: 'Presenter-Id'
+      })
+    })
+
+    it('should call the data handler with the message and the sender identity', () => {
+      expect(dataHandler).toHaveBeenCalledWith({ type: 'presentation:navigate', action: 'next' }, 'Presenter-Id')
+    })
+  })
+
+  describe('and a non-presenter sends presentation:presenter:claim', () => {
+    beforeEach(() => {
+      onData(encodePresentationPacket({ type: 'presentation:presenter:claim' }, 'scene-1'), { identity: 'Stranger' })
+    })
+
+    it('should not call the data handler', () => {
+      expect(dataHandler).not.toHaveBeenCalled()
+    })
   })
 })

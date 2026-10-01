@@ -1,19 +1,22 @@
+import fs from 'fs'
 import { DEFAULT_OVERLAY_LAYOUT } from '../../src/logic/overlay-layout'
 import {
   InvalidLivekitCredentialsError,
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
+import { SESSION_DISK_QUOTA_BYTES } from '../../src/logic/presentation-manager/component'
 import { encodeSlidePng } from '../../src/logic/slide-image'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 import type { IRenderer } from '../../src/adapters/renderer/types'
+import type { ISidecarPublisher } from '../../src/adapters/sidecar-publisher/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
 import type { OverlayLayout } from '../../src/logic/overlay-layout'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
 
 jest.mock('../../src/logic/slide-image')
 
-function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
+function createMockPublisher(): jest.Mocked<ISidecarPublisher> {
   return {
     connect: jest.fn().mockResolvedValue(undefined),
     startPublishing: jest.fn().mockResolvedValue(undefined),
@@ -27,7 +30,14 @@ function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
     updateMetadataState: jest.fn().mockResolvedValue(undefined),
     publishData: jest.fn().mockResolvedValue(undefined),
     getRemoteParticipantCount: jest.fn().mockReturnValue(0),
-    disconnect: jest.fn().mockResolvedValue(undefined)
+    disconnect: jest.fn().mockResolvedValue(undefined),
+    play: jest.fn().mockResolvedValue(undefined),
+    pause: jest.fn().mockResolvedValue(undefined),
+    resume: jest.fn().mockResolvedValue(undefined),
+    stopVideo: jest.fn().mockResolvedValue(undefined),
+    onPlaybackEnded: jest.fn(),
+    onPlaybackFailed: jest.fn(),
+    onFatal: jest.fn()
   }
 }
 
@@ -73,6 +83,14 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
     },
     liveKitPublisher: {
       createPublisher: jest.fn().mockReturnValue(publisher)
+    },
+    sidecarPublisher: {
+      createPublisher: jest.fn().mockReturnValue(publisher)
+    },
+    mediaEncoder: {
+      bake: jest.fn().mockResolvedValue({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg', bytes: 10 }),
+      promote: jest.fn(),
+      resolveEmbeddedVideo: jest.fn().mockReturnValue(null)
     },
     pdfRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
@@ -1431,6 +1449,7 @@ describe('when client composition is enabled', () => {
   let configValues: Record<string, string | undefined>
   let encodeCount: number
   let renderer: jest.Mocked<IRenderer>
+  let rmSync: jest.SpyInstance
 
   function stateBroadcasts(): Array<Record<string, unknown>> {
     return publisher.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
@@ -1442,6 +1461,7 @@ describe('when client composition is enabled', () => {
   }
 
   beforeEach(() => {
+    rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(() => undefined)
     encodeCount = 0
     jest.mocked(encodeSlidePng).mockImplementation(async () => {
       encodeCount++
@@ -1460,6 +1480,7 @@ describe('when client composition is enabled', () => {
   })
 
   afterEach(() => {
+    rmSync.mockRestore()
     jest.mocked(encodeSlidePng).mockReset()
   })
 
@@ -1692,5 +1713,581 @@ describe('when client composition is disabled', () => {
     it('should not encode a slide image', () => {
       expect(encodeSlidePng).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('when client composition is enabled and the sidecar publishes', () => {
+  const VIDEO_URL = 'https://example.com/video.mp4'
+  const DOWNLOADED_PATH = '/tmp/video.mp4'
+  const EMBEDDED_PATH = '/tmp/cast-pptx-video-a/v.mp4'
+  const V2_CONFIG: Record<string, string> = {
+    CLIENT_COMPOSITION_ENABLED: 'true',
+    PUBLIC_BASE_URL: 'https://cast.example.com'
+  }
+  let components: ReturnType<typeof createMockComponents>
+  let sidecar: jest.Mocked<ISidecarPublisher>
+  let compositor: jest.Mocked<IVideoCompositor>
+  let manager: IPresentationManager
+  let presentationId: string
+  let rmSync: jest.SpyInstance
+
+  function stateBroadcasts(): Array<Record<string, unknown>> {
+    return sidecar.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
+  }
+
+  function bakeSignal(call: number): AbortSignal {
+    return components.mediaEncoder.bake.mock.calls[call][2].signal
+  }
+
+  function pendingUntilAborted(signal: AbortSignal): Promise<never> {
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('Aborted'))))
+  }
+
+  function bakeUntilAborted(): void {
+    components.mediaEncoder.bake.mockImplementation((_source: string, _dir: string, options: { signal: AbortSignal }) =>
+      pendingUntilAborted(options.signal)
+    )
+  }
+
+  async function createSession(): Promise<void> {
+    const info = await manager.createPresentation(
+      Buffer.from('%PDF-1.7'),
+      'pdf',
+      'test-token',
+      'wss://lk.example.com',
+      'test.pdf',
+      'stream:p:1'
+    )
+    presentationId = info.id
+    await flushMicrotasks()
+  }
+
+  beforeEach(async () => {
+    jest.mocked(encodeSlidePng).mockResolvedValue({ hash: 'h1', png: Buffer.from('png1'), width: 1920, height: 1080 })
+    rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(() => undefined)
+    sidecar = createMockPublisher()
+    compositor = createMockCompositor()
+    components = createMockComponents({ publisher: sidecar })
+    components.config.getString.mockImplementation(async (key: string) => V2_CONFIG[key])
+    components.videoCompositor.createCompositor.mockReturnValue(compositor)
+    const renderer = createMockRenderer()
+    renderer.getSlideVideos.mockResolvedValue([
+      { url: VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } }
+    ])
+    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    manager = await createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
+  })
+
+  afterEach(() => {
+    rmSync.mockRestore()
+    jest.mocked(encodeSlidePng).mockReset()
+  })
+
+  describe('and a session is created', () => {
+    beforeEach(async () => {
+      await createSession()
+    })
+
+    it('should create the session publisher through the sidecar factory', () => {
+      expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledTimes(1)
+    })
+
+    it('should not create an rtc-node publisher for the session', () => {
+      expect(components.liveKitPublisher.createPublisher).not.toHaveBeenCalled()
+    })
+
+    it('should not publish a composite track', () => {
+      expect(sidecar.startPublishing).not.toHaveBeenCalled()
+    })
+
+    it('should not pump camera frames', () => {
+      expect(components._overlay.onCameraFrame).not.toHaveBeenCalled()
+    })
+
+    it('should start the prefetch bake right away, without the legacy timer', () => {
+      expect(components.mediaEncoder.bake).toHaveBeenCalledWith(DOWNLOADED_PATH, expect.any(String), {
+        priority: 'prefetch',
+        signal: expect.any(AbortSignal)
+      })
+    })
+  })
+
+  describe('and the presenter plays video 0', () => {
+    beforeEach(async () => {
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should bake the downloaded source', () => {
+      expect(components.mediaEncoder.bake.mock.calls[0][0]).toBe(DOWNLOADED_PATH)
+    })
+
+    it('should play the baked files on the sidecar', () => {
+      expect(sidecar.play).toHaveBeenCalledWith({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' })
+    })
+
+    it('should broadcast loading and then playing with playingVideoIndex 0', () => {
+      expect(stateBroadcasts().map((s) => [s.videoState, s.playingVideoIndex])).toEqual([
+        ['idle', null],
+        ['loading', 0],
+        ['playing', 0]
+      ])
+    })
+
+    describe('and the presenter stops it and plays it again', () => {
+      beforeEach(async () => {
+        await manager.stopVideo(presentationId)
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should delete the downloaded source after the bake', () => {
+        expect(rmSync).toHaveBeenCalledWith(DOWNLOADED_PATH, { force: true })
+      })
+
+      it('should download the source only once', () => {
+        expect(compositor.downloadVideo).toHaveBeenCalledTimes(1)
+      })
+
+      it('should bake only once', () => {
+        expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    describe('and the sidecar reports the natural end', () => {
+      beforeEach(async () => {
+        sidecar.onPlaybackEnded.mock.calls[0][0]()
+        await flushMicrotasks()
+      })
+
+      it('should go idle with a null playingVideoIndex', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'idle', playingVideoIndex: null })
+        )
+      })
+    })
+
+    describe('and the sidecar reports a playback failure', () => {
+      beforeEach(async () => {
+        sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error')
+        await flushMicrotasks()
+      })
+
+      it('should put the video in the interrupted error state', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-playback-interrupted' })
+        )
+      })
+
+      it('should publish a presentation:error', () => {
+        expect(sidecar.publishData).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'presentation:error', code: 'video-playback-interrupted', videoIndex: 0 })
+        )
+      })
+    })
+
+    describe('and the presenter navigates away', () => {
+      beforeEach(async () => {
+        await manager.navigate(presentationId, 'next')
+      })
+
+      it('should stop the sidecar playback', () => {
+        expect(sidecar.stopVideo).toHaveBeenCalledTimes(1)
+      })
+
+      it('should go idle', () => {
+        expect(manager.getState(presentationId)?.videoState).toBe('idle')
+      })
+    })
+
+    describe('and the presenter pauses and plays the same video', () => {
+      beforeEach(async () => {
+        await manager.pauseVideo(presentationId)
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should pause the sidecar before resuming it', () => {
+        expect(sidecar.pause.mock.invocationCallOrder[0]).toBeLessThan(sidecar.resume.mock.invocationCallOrder[0])
+      })
+
+      it('should not bake or play again', () => {
+        expect([components.mediaEncoder.bake.mock.calls.length, sidecar.play.mock.calls.length]).toEqual([1, 1])
+      })
+
+      it('should be playing', () => {
+        expect(manager.getState(presentationId)?.videoState).toBe('playing')
+      })
+    })
+  })
+
+  describe('and the source is an embedded PPTX video', () => {
+    beforeEach(() => {
+      components.mediaEncoder.resolveEmbeddedVideo.mockReturnValue({ path: EMBEDDED_PATH, bytes: 5 })
+    })
+
+    describe('and the presenter plays it', () => {
+      beforeEach(async () => {
+        await createSession()
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should bake the embedded file', () => {
+        expect(components.mediaEncoder.bake.mock.calls[0][0]).toBe(EMBEDDED_PATH)
+      })
+
+      it('should not download anything', () => {
+        expect(compositor.downloadVideo).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('and the bake output exceeds the session quota', () => {
+      beforeEach(async () => {
+        components.mediaEncoder.bake.mockResolvedValue({
+          videoPath: '/tmp/v.h264',
+          audioPath: '/tmp/a.ogg',
+          bytes: SESSION_DISK_QUOTA_BYTES + 1
+        })
+        await createSession()
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should put the video in the quota error state', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-quota-exceeded' })
+        )
+      })
+
+      it('should delete only the bake outputs, never the source', () => {
+        expect(rmSync.mock.calls.map(([target]) => target)).toEqual(['/tmp/v.h264', '/tmp/a.ogg'])
+      })
+    })
+  })
+
+  describe('and the bake output alone fits the quota but source plus output would not', () => {
+    beforeEach(async () => {
+      components.mediaEncoder.bake.mockResolvedValue({
+        videoPath: '/tmp/v.h264',
+        audioPath: '/tmp/a.ogg',
+        bytes: SESSION_DISK_QUOTA_BYTES - 1000
+      })
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should release the source bytes and play', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('playing')
+    })
+  })
+
+  describe('and a cancelled job rejects late after the same video was played again', () => {
+    let lateBake: ReturnType<typeof createDeferred<never>>
+
+    beforeEach(async () => {
+      lateBake = createDeferred<never>()
+      components.mediaEncoder.bake.mockReturnValueOnce(lateBake.promise)
+      await createSession()
+      const firstPlay = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      await manager.stopVideo(presentationId)
+      await manager.playVideo(presentationId, 0)
+      lateBake.reject(new Error('Aborted'))
+      await firstPlay
+      await flushMicrotasks()
+    })
+
+    it('should keep the second play playing', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('playing')
+    })
+
+    it('should bake twice in total', () => {
+      expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('and video 0 is played while its prefetch bake is still queued', () => {
+    beforeEach(async () => {
+      bakeUntilAborted()
+      await createSession()
+      manager.playVideo(presentationId, 0).catch(() => undefined)
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      await manager.stopPresentation(presentationId)
+    })
+
+    it('should promote the prefetch job', () => {
+      expect(components.mediaEncoder.promote).toHaveBeenCalledWith(bakeSignal(0))
+    })
+
+    it('should not start a second bake', () => {
+      expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('and video 0 is played while its prefetch download is still running', () => {
+    beforeEach(async () => {
+      const download = createDeferred<{ path: string; bytes: number }>()
+      compositor.downloadVideo.mockReturnValueOnce(download.promise)
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      download.resolve({ path: DOWNLOADED_PATH, bytes: 1024 })
+      await playing
+    })
+
+    it('should bake it with play priority', () => {
+      expect(components.mediaEncoder.bake).toHaveBeenCalledWith(
+        DOWNLOADED_PATH,
+        expect.any(String),
+        expect.objectContaining({ priority: 'play' })
+      )
+    })
+  })
+
+  describe('and the presenter stops while the download is pending', () => {
+    beforeEach(async () => {
+      compositor.downloadVideo.mockImplementationOnce((_url: string, signal?: AbortSignal) =>
+        pendingUntilAborted(signal ?? new AbortController().signal)
+      )
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      await manager.stopVideo(presentationId)
+      await playing
+    })
+
+    it('should abort the download', () => {
+      expect(compositor.downloadVideo.mock.calls[0][1]?.aborted).toBe(true)
+    })
+
+    it('should not bake', () => {
+      expect(components.mediaEncoder.bake).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the presenter stops while the bake is pending', () => {
+    beforeEach(async () => {
+      bakeUntilAborted()
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      await manager.stopVideo(presentationId)
+      await playing
+    })
+
+    it('should abort the bake', () => {
+      expect(bakeSignal(0).aborted).toBe(true)
+    })
+
+    it('should go idle', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('idle')
+    })
+
+    it('should not play on the sidecar', () => {
+      expect(sidecar.play).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the presenter navigates while the bake is pending', () => {
+    beforeEach(async () => {
+      bakeUntilAborted()
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      await manager.navigate(presentationId, 'next')
+      await playing
+    })
+
+    it('should abort the bake', () => {
+      expect(bakeSignal(0).aborted).toBe(true)
+    })
+
+    it('should not play on the sidecar', () => {
+      expect(sidecar.play).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the sidecar resume rejects', () => {
+    beforeEach(async () => {
+      sidecar.resume.mockRejectedValueOnce(new Error('Sidecar resume timed out'))
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      await manager.pauseVideo(presentationId)
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should put the video in the playback-failed error state', () => {
+      expect(manager.getState(presentationId)).toEqual(
+        expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-playback-failed' })
+      )
+    })
+
+    describe('and the presenter plays it again', () => {
+      beforeEach(async () => {
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should play', () => {
+        expect(manager.getState(presentationId)?.videoState).toBe('playing')
+      })
+    })
+  })
+
+  describe('and the presenter navigates while a resume is pending', () => {
+    let statesAfterNavigation: Array<Record<string, unknown>>
+
+    beforeEach(async () => {
+      const resume = createDeferred<void>()
+      sidecar.resume.mockReturnValueOnce(resume.promise)
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      await manager.pauseVideo(presentationId)
+      const resuming = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      const before = stateBroadcasts().length
+      await manager.navigate(presentationId, 'next')
+      resume.resolve()
+      await resuming
+      statesAfterNavigation = stateBroadcasts().slice(before)
+    })
+
+    it('should go idle', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('idle')
+    })
+
+    it('should stop the sidecar playback', () => {
+      expect(sidecar.stopVideo).toHaveBeenCalled()
+    })
+
+    it('should not broadcast playing after the navigation', () => {
+      expect(statesAfterNavigation.map((s) => s.videoState)).not.toContain('playing')
+    })
+  })
+
+  describe('and the video ends while a pause is pending', () => {
+    beforeEach(async () => {
+      const pause = createDeferred<void>()
+      sidecar.pause.mockReturnValueOnce(pause.promise)
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      const pausing = manager.pauseVideo(presentationId)
+      await flushMicrotasks()
+      sidecar.onPlaybackEnded.mock.calls[0][0]()
+      await flushMicrotasks()
+      pause.resolve()
+      await pausing
+    })
+
+    it('should stay idle', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('idle')
+    })
+  })
+
+  describe('and every bake fails', () => {
+    beforeEach(async () => {
+      components.mediaEncoder.bake.mockRejectedValue(new Error('Bake failed (code 1): boom'))
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should put the video in the playback-failed error state', () => {
+      expect(manager.getState(presentationId)).toEqual(
+        expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-playback-failed' })
+      )
+    })
+
+    describe('and the presenter plays it again', () => {
+      let bakesBefore: number
+
+      beforeEach(async () => {
+        bakesBefore = components.mediaEncoder.bake.mock.calls.length
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should bake again', () => {
+        expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(bakesBefore + 1)
+      })
+    })
+  })
+
+  describe('and the sidecar fails fatally', () => {
+    beforeEach(async () => {
+      await createSession()
+      sidecar.onFatal.mock.calls[0][0]('Sidecar exited (code=1)')
+      await flushMicrotasks()
+    })
+
+    it('should stop the session', () => {
+      expect(manager.getState(presentationId)).toBeNull()
+    })
+
+    it('should disconnect the sidecar', () => {
+      expect(sidecar.disconnect).toHaveBeenCalled()
+    })
+  })
+
+  describe('and a presenter claims the session', () => {
+    beforeEach(async () => {
+      await createSession()
+      sidecar.publishData.mockClear()
+      sidecar.updateMetadataState.mockClear()
+      const dataHandler = sidecar.setDataHandler.mock.calls[0][0]
+      dataHandler({ type: 'presentation:presenter:claim' }, 'stream:new:2')
+      await flushMicrotasks()
+    })
+
+    it('should broadcast the new presenterIdentity', () => {
+      expect(stateBroadcasts()[0]).toEqual(expect.objectContaining({ presenterIdentity: 'stream:new:2' }))
+    })
+
+    it('should put the new presenterIdentity in the bot metadata', () => {
+      expect(sidecar.updateMetadataState.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ presenterIdentity: 'stream:new:2' })
+      )
+    })
+  })
+
+  describe('and the session is stopped with a pending bake', () => {
+    beforeEach(async () => {
+      bakeUntilAborted()
+      await createSession()
+      await manager.stopPresentation(presentationId)
+    })
+
+    it('should abort the bake', () => {
+      expect(bakeSignal(0).aborted).toBe(true)
+    })
+  })
+})
+
+describe('when a presenter claims with client composition disabled', () => {
+  let components: ReturnType<typeof createMockComponents>
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let manager: IPresentationManager
+  let presentationId: string
+
+  beforeEach(async () => {
+    publisher = createMockPublisher()
+    components = createMockComponents({ publisher })
+    const created = await createManagerWithSession(components)
+    manager = created.manager
+    presentationId = created.info.id
+    publisher.publishData.mockClear()
+    publisher.updateMetadataState.mockClear()
+    const dataHandler = publisher.setDataHandler.mock.calls[0][0]
+    dataHandler({ type: 'presentation:presenter:claim' }, 'stream:x:1')
+    await flushMicrotasks()
+  })
+
+  it('should not publish any state', () => {
+    expect(publisher.publishData).not.toHaveBeenCalled()
+  })
+
+  it('should not update the bot metadata', () => {
+    expect(publisher.updateMetadataState).not.toHaveBeenCalled()
+  })
+
+  it('should not add a presenterIdentity to the state', () => {
+    expect(manager.getState(presentationId)).not.toHaveProperty('presenterIdentity')
   })
 })
