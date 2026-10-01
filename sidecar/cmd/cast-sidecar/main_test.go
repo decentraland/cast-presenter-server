@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/room"
+	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/webrtc/v4"
 )
 
 const initLine = `{"type":"init","url":"wss://lk.example","token":"tok-example123","presentationId":"p1"}`
@@ -33,6 +37,22 @@ type fakeRoom struct {
 
 func (f *fakeRoom) Metadata() string { return f.metadata }
 func (f *fakeRoom) RemoteCount() int { return f.count }
+
+func (f *fakeRoom) VideoTrack() *lksdk.LocalSampleTrack {
+	return unboundTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000})
+}
+
+func (f *fakeRoom) AudioTrack() *lksdk.LocalSampleTrack {
+	return unboundTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2})
+}
+
+func unboundTrack(codec webrtc.RTPCodecCapability) *lksdk.LocalSampleTrack {
+	track, err := lksdk.NewLocalSampleTrack(codec)
+	if err != nil {
+		panic(err)
+	}
+	return track
+}
 
 func (f *fakeRoom) PublishData(b []byte) error {
 	f.mu.Lock()
@@ -277,23 +297,91 @@ func TestRunReportsUpdateMetadataErrors(t *testing.T) {
 	}
 }
 
-func TestRunRejectsPlaybackCommandsUntilImplemented(t *testing.T) {
+func TestRunAnswersPlayFailedForAMissingFile(t *testing.T) {
+	missing, _ := json.Marshal(filepath.Join(t.TempDir(), "missing.h264"))
+
 	_, events, raw := runLines(t, &fakeRoom{}, initLine,
-		`{"type":"play","id":10,"videoPath":"/v","audioPath":null}`,
+		fmt.Sprintf(`{"type":"play","id":10,"videoPath":%s,"audioPath":null}`, missing),
+	)
+
+	if len(events) != 2 || events[1]["type"] != "error" || events[1]["code"] != "play-failed" || events[1]["id"] != float64(10) {
+		t.Fatalf("expected play-failed for id 10, got %s", raw)
+	}
+}
+
+func TestRunAcksPauseResumeAndStopWithoutPlayback(t *testing.T) {
+	_, events, raw := runLines(t, &fakeRoom{}, initLine,
 		`{"type":"pause","id":11}`,
 		`{"type":"resume","id":12}`,
 		`{"type":"stop","id":13}`,
 	)
 
-	if len(events) != 5 {
-		t.Fatalf("expected 5 events, got %s", raw)
+	if len(events) != 4 {
+		t.Fatalf("expected 4 events, got %s", raw)
 	}
-	for i, id := range []float64{10, 11, 12, 13} {
-		ev := events[i+1]
-		if ev["type"] != "error" || ev["code"] != "play-failed" || ev["message"] != "playback not implemented" || ev["id"] != id {
-			t.Fatalf("expected play-failed for id %v, got %v", id, ev)
+	for i, id := range []float64{11, 12, 13} {
+		if ev := events[i+1]; ev["type"] != "ack" || ev["id"] != id {
+			t.Fatalf("expected ack for id %v, got %v", id, ev)
 		}
 	}
+}
+
+func TestRunPlaysABakedFileToItsEnd(t *testing.T) {
+	s := startHarness(t, &fakeRoom{})
+
+	s.send(t, playLine(t, 20, 3))
+
+	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(20) {
+		t.Fatalf("expected ack 20, got %v", ev)
+	}
+	if ev := s.next(t); ev["type"] != "playbackEnded" {
+		t.Fatalf("expected playbackEnded, got %v", ev)
+	}
+	s.send(t, `{"type":"shutdown","id":21}`)
+	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(21) {
+		t.Fatalf("expected ack 21, got %v", ev)
+	}
+	if code := s.exitCode(t); code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+}
+
+func TestRunShutdownStopsAPlaybackWithoutPlaybackEnded(t *testing.T) {
+	f := &fakeRoom{}
+	s := startHarness(t, f)
+	s.send(t, playLine(t, 30, 300))
+	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(30) {
+		t.Fatalf("expected ack 30, got %v", ev)
+	}
+
+	s.send(t, `{"type":"shutdown","id":31}`)
+
+	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(31) {
+		t.Fatalf("expected ack 31, got %v", ev)
+	}
+	if code := s.exitCode(t); code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if ev, ok := <-s.lines; ok {
+		t.Fatalf("expected no event after the shutdown ack, got %v", ev)
+	}
+	if f.disconnectCount() != 1 {
+		t.Fatalf("expected one disconnect, got %d", f.disconnectCount())
+	}
+}
+
+func playLine(t *testing.T, id, frames int) string {
+	t.Helper()
+	stream := []byte{0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 1}
+	for i := 0; i < frames; i++ {
+		stream = append(stream, 0, 0, 0, 1, 0x65, 1, 2, 3)
+	}
+	path := filepath.Join(t.TempDir(), "bake.h264")
+	if err := os.WriteFile(path, stream, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quoted, _ := json.Marshal(path)
+	return fmt.Sprintf(`{"type":"play","id":%d,"videoPath":%s,"audioPath":null}`, id, quoted)
 }
 
 func TestRunRejectsUnknownCommands(t *testing.T) {
