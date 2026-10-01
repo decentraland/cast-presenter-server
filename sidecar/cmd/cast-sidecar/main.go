@@ -12,7 +12,9 @@ import (
 	"sync"
 
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/ipc"
+	"github.com/decentraland/cast-presenter-server/sidecar/internal/media"
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/room"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
 type Room interface {
@@ -20,6 +22,8 @@ type Room interface {
 	RemoteCount() int
 	PublishData(payload []byte) error
 	SetMetadata(metadata string) error
+	VideoTrack() *lksdk.LocalSampleTrack
+	AudioTrack() *lksdk.LocalSampleTrack
 	Disconnect()
 }
 
@@ -34,10 +38,11 @@ func connectRoom(url, token, presentationID string, ev room.Events) (Room, error
 }
 
 type session struct {
-	out   *ipc.Writer
-	lost  chan string
-	gate  sync.Mutex
-	ready bool
+	out    *ipc.Writer
+	lost   chan string
+	gate   sync.Mutex
+	ready  bool
+	engine *media.Engine
 }
 
 func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
@@ -73,6 +78,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 		return 1
 	}
 	s.open(rm)
+	s.engine = media.NewEngine(rm.VideoTrack(), rm.AudioTrack(), func(ev ipc.Event) { _ = out.Send(ev) })
 
 	for {
 		select {
@@ -81,7 +87,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 				return 0
 			}
 		case err := <-readDone:
-			rm.Disconnect()
+			s.shutdown(rm)
 			return exitCode(err)
 		case reason := <-s.lost:
 			log.Printf("room lost: %s", reason)
@@ -135,6 +141,13 @@ func (s *session) open(rm Room) {
 	s.ready = true
 }
 
+func (s *session) shutdown(rm Room) {
+	if err := s.engine.Stop(); err != nil {
+		log.Printf("stop playback: %v", err)
+	}
+	rm.Disconnect()
+}
+
 func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 	switch cmd.Type {
 	case "publishData":
@@ -145,11 +158,19 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 		s.reply(cmd.ID, "publish-failed", err)
 	case "updateMetadata":
 		s.reply(cmd.ID, "publish-failed", rm.SetMetadata(cmd.Metadata))
-	case "play", "pause", "resume", "stop":
-		_ = s.out.Error(cmd.ID, "play-failed", "playback not implemented")
+	case "play":
+		s.reply(cmd.ID, "play-failed", s.engine.Play(cmd.VideoPath, cmd.AudioPath))
+	case "pause":
+		s.engine.Pause()
+		_ = s.out.Ack(cmd.ID)
+	case "resume":
+		s.engine.Resume()
+		_ = s.out.Ack(cmd.ID)
+	case "stop":
+		s.reply(cmd.ID, "playback-failed", s.engine.Stop())
 	case "shutdown":
 		_ = s.out.Ack(cmd.ID)
-		rm.Disconnect()
+		s.shutdown(rm)
 		return true
 	default:
 		_ = s.out.Error(cmd.ID, "bad-command", fmt.Sprintf("unknown command %q", cmd.Type))

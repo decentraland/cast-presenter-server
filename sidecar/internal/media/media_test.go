@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -15,9 +16,7 @@ import (
 
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/ipc"
 	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/oggwriter"
 )
 
 const frame = time.Second / 30
@@ -112,28 +111,49 @@ func longVideo(frames, size int) []byte {
 	return annexB(nals...)
 }
 
-func oggStream(t *testing.T, timestamps ...uint32) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	w, err := oggwriter.NewWith(&buf, 48000, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, ts := range timestamps {
-		if err := w.WriteRTP(&rtp.Packet{Header: rtp.Header{Timestamp: ts}, Payload: []byte{0xfc, 1, 2, 3}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return buf.Bytes()
+func oggPage(headerType byte, granule uint64, seq uint32, payload []byte) []byte {
+	page := []byte("OggS")
+	page = append(page, 0, headerType)
+	page = binary.LittleEndian.AppendUint64(page, granule)
+	page = binary.LittleEndian.AppendUint32(page, 7)
+	page = binary.LittleEndian.AppendUint32(page, seq)
+	page = append(page, 0, 0, 0, 0, 1, byte(len(payload)))
+	page = append(page, payload...)
+	binary.LittleEndian.PutUint32(page[22:], oggCRC(page))
+	return page
 }
 
-func longAudio(t *testing.T, pages int) []byte {
-	t.Helper()
-	ts := make([]uint32, pages+1)
-	for i := range ts {
-		ts[i] = uint32(i * 960)
+func oggCRC(b []byte) uint32 {
+	var crc uint32
+	for _, v := range b {
+		crc ^= uint32(v) << 24
+		for range 8 {
+			if crc&0x80000000 != 0 {
+				crc = crc<<1 ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
 	}
-	return oggStream(t, ts...)
+	return crc
+}
+
+func oggStream(granules ...uint64) []byte {
+	head := append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0)
+	stream := oggPage(2, 0, 0, head)
+	stream = append(stream, oggPage(0, 0, 1, append([]byte("OpusTags"), 0, 0, 0, 0, 0, 0, 0, 0))...)
+	for i, granule := range granules {
+		stream = append(stream, oggPage(0, granule, uint32(i+2), []byte{0xfc, 1, 2, 3})...)
+	}
+	return stream
+}
+
+func longAudio(pages int) []byte {
+	granules := make([]uint64, pages)
+	for i := range granules {
+		granules[i] = uint64(i+1) * 960
+	}
+	return oggStream(granules...)
 }
 
 func writeFile(t *testing.T, name string, data []byte) string {
@@ -290,7 +310,7 @@ func TestPlayVideoPacesVCLAndWritesParameterSetsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []write{{4, 0}, {5, 0}, {20, frame}, {10, frame}, {11, frame}}
+	want := []write{{4, 0}, {5, 0}, {20, frameDuration}, {10, frameDuration}, {11, frameDuration}}
 	if got := w.snapshot(); !equalWrites(got, want) {
 		t.Fatalf("expected writes %v, got %v", want, got)
 	}
@@ -334,7 +354,7 @@ func TestPlayAudioUsesGranuleDeltasAndSkipsHeaderPages(t *testing.T) {
 	sleeps := recordSleeps(c)
 	w := &fakeWriter{}
 
-	if err := playAudio(context.Background(), w, bytes.NewReader(oggStream(t, 0, 960, 2880)), c); err != nil {
+	if err := playAudio(context.Background(), w, bytes.NewReader(oggStream(960, 960, 2880)), c); err != nil {
 		t.Fatal(err)
 	}
 
@@ -350,7 +370,7 @@ func TestPlayAudioUsesGranuleDeltasAndSkipsHeaderPages(t *testing.T) {
 func TestPlayAudioReportsATruncatedPage(t *testing.T) {
 	c := NewClock(t0)
 	recordSleeps(c)
-	stream := longAudio(t, 3)
+	stream := longAudio(3)
 
 	if err := playAudio(context.Background(), &fakeWriter{}, bytes.NewReader(stream[:len(stream)-2]), c); err == nil {
 		t.Fatal("expected an error for a truncated page")
@@ -404,7 +424,7 @@ func (h *engineHarness) quiet(t *testing.T) {
 func TestEngineSendsOnePlaybackEndedAtNaturalEOF(t *testing.T) {
 	h := newEngineHarness()
 	video := writeFile(t, "v.h264", longVideo(3, 8))
-	audio := writeFile(t, "a.ogg", longAudio(t, 3))
+	audio := writeFile(t, "a.ogg", longAudio(3))
 
 	if err := h.engine.Play(video, &audio); err != nil {
 		t.Fatal(err)
@@ -426,7 +446,7 @@ func TestEngineSendsOnePlaybackEndedAtNaturalEOF(t *testing.T) {
 func TestEngineStopSuppressesPlaybackEndedAndHaltsWriting(t *testing.T) {
 	h := newEngineHarness()
 	video := writeFile(t, "v.h264", longVideo(300, 8))
-	audio := writeFile(t, "a.ogg", longAudio(t, 500))
+	audio := writeFile(t, "a.ogg", longAudio(500))
 	if err := h.engine.Play(video, &audio); err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +511,7 @@ func TestEngineVideoWriteErrorStopsAudioAndReportsPlaybackFailedOnce(t *testing.
 	h := newEngineHarness()
 	h.video.failAt = 3
 	video := writeFile(t, "v.h264", longVideo(300, 8))
-	audio := writeFile(t, "a.ogg", longAudio(t, 500))
+	audio := writeFile(t, "a.ogg", longAudio(500))
 
 	if err := h.engine.Play(video, &audio); err != nil {
 		t.Fatal(err)
@@ -528,7 +548,7 @@ func TestEngineWithoutAudioPlaysVideoOnly(t *testing.T) {
 func TestEnginePauseHoldsWritesUntilResume(t *testing.T) {
 	h := newEngineHarness()
 	video := writeFile(t, "v.h264", longVideo(300, 8))
-	if err := h.engine.Play(video, ptr(writeFile(t, "a.ogg", longAudio(t, 500)))); err != nil {
+	if err := h.engine.Play(video, ptr(writeFile(t, "a.ogg", longAudio(500)))); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
