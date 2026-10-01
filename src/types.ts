@@ -8,7 +8,9 @@ import type { IFetchComponent, IHttpServerComponent } from '@dcl/core-commons'
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
+import type { IMediaEncoder } from './adapters/media-encoder'
 import type { IRendererComponent } from './adapters/pdf-renderer'
+import type { ISidecarPublisherComponent } from './adapters/sidecar-publisher'
 import type { IVideoCompositorComponent } from './adapters/video-compositor'
 import type { INetworkValidatorComponent } from './logic/network-validator'
 import type { IPresentationManager } from './logic/presentation-manager'
@@ -32,6 +34,8 @@ export interface BaseComponents {
   pdfRenderer: IRendererComponent
   pptxRenderer: IRendererComponent
   videoCompositor: IVideoCompositorComponent
+  sidecarPublisher: ISidecarPublisherComponent
+  mediaEncoder: IMediaEncoder
   networkValidator: INetworkValidatorComponent
 }
 

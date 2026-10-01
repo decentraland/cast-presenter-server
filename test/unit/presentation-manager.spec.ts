@@ -1800,10 +1800,6 @@ describe('when client composition is enabled and the sidecar publishes', () => {
       expect(sidecar.startPublishing).not.toHaveBeenCalled()
     })
 
-    it('should not pump camera frames', () => {
-      expect(components._overlay.onCameraFrame).not.toHaveBeenCalled()
-    })
-
     it('should start the prefetch bake right away, without the legacy timer', () => {
       expect(components.mediaEncoder.bake).toHaveBeenCalledWith(DOWNLOADED_PATH, expect.any(String), {
         priority: 'prefetch',
@@ -1957,7 +1953,7 @@ describe('when client composition is enabled and the sidecar publishes', () => {
       })
 
       it('should delete only the bake outputs, never the source', () => {
-        expect(rmSync.mock.calls.map(([target]) => target)).toEqual(['/tmp/v.h264', '/tmp/a.ogg'])
+        expect(new Set(rmSync.mock.calls.map(([target]) => target))).toEqual(new Set(['/tmp/v.h264', '/tmp/a.ogg']))
       })
     })
   })

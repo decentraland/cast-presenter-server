@@ -65,6 +65,12 @@ remote control through LiveKit data channels.
   validated against an HTTPS-only domain allowlist before download.
 - **Idle cleanup:** Sessions with no remote participants for 5
   minutes are automatically stopped and cleaned up.
+- **Client composition (v2):** With `CLIENT_COMPOSITION_ENABLED=true`
+  the bot publishes slide PNGs, `presenterIdentity` and pre-baked
+  video through the per-session Go sidecar `cast-sidecar`
+  (`src/adapters/sidecar-publisher/`, JSON-lines IPC), and never
+  composites or stamps a camera; see
+  [architecture.md](architecture.md#client-composition-v2).
 
 **Video playback lifecycle:**
 

@@ -135,6 +135,67 @@ Each presentation runs as an in-memory session identified by a UUID.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 
+## Client composition (v2)
+
+With `CLIENT_COMPOSITION_ENABLED=true`, clients composite the
+presentation themselves. The bot publishes the parts and never
+composites a frame:
+
+- **Slides** are PNGs served at
+  `GET /presentations/:id/slides/:hash.png` and announced in the
+  state's `slide.url` (see "State broadcast" below).
+- **Camera bubble:** clients draw the CAMERA track of
+  `presenterIdentity` themselves, using the existing `overlay` layout.
+  `presenterIdentity` comes from the `POST /presentations` request. A
+  presenter whose identity changed (a refresh, or the starter left)
+  takes it over with `presentation:presenter:claim`; the bot sets it to
+  the sender's LiveKit identity and broadcasts state, and the last
+  claim wins.
+- **Embedded video** is published by the Go sidecar `cast-sidecar`
+  (`SIDECAR_BINARY_PATH`, default `/usr/local/bin/cast-sidecar`), one
+  process per session, which owns the session's only LiveKit
+  connection. It publishes `presentation-video` (SCREENSHARE, H.264
+  constrained baseline level 4.0) and `presentation-audio`
+  (SCREENSHARE_AUDIO, Opus) once at connect, keeps them for the whole
+  session, and writes samples only while a video plays. There is no
+  `presentation` composite track.
+
+### Sidecar IPC
+
+The server drives the sidecar with JSON lines: commands on stdin,
+events on stdout, logs on stderr (redacted, logged at debug).
+
+- `init { url, token, presentationId }` is the first line, so the
+  token never appears on argv or in the environment. The sidecar
+  connects, sets the bot metadata, publishes both tracks and answers
+  `ready { roomMetadata, participantCount }`, or
+  `error { code: 'connect-failed' | 'publish-failed' }` and exits.
+- Every later command (`publishData`, `updateMetadata`, `play`,
+  `pause`, `resume`, `stop`, `shutdown`) carries an `id` and gets one
+  `ack` or `error` with that `id`. The server fails a command that has
+  no reply after 10 s.
+- Unsolicited events: `dataReceived` (the server decodes the packet
+  and applies the same presenter check as the rtc-node path),
+  `roomMetadata` (the presenters list), `participantCount` (feeds the
+  idle reaper), `playbackEnded`, `error { code: 'playback-failed' }`
+  and `disconnected`.
+- A `disconnected` event or an unexpected exit stops the session. The
+  sidecar never reconnects by itself. On session stop the server sends
+  `shutdown` (bounded at 5 s), waits up to 3 s for the exit, then
+  kills it.
+
+### Bake queue
+
+Every video is baked before it plays: native size capped to 1920×1080
+(1080×1920 portrait), 30 fps H.264 constrained baseline in Annex-B,
+and Opus in Ogg, by the process-wide `media-encoder`. It runs one bake
+at a time; play requests go ahead of prefetches, and a play for a
+queued prefetch promotes it. Each v2 session prefetches its videos one
+at a time right after creation. A downloaded source counts against the
+2 GB session quota until its bake finishes, and is then replaced by
+the bake output. See `docs/video-playback-lifecycle.md` for the
+playback state machine.
+
 ## Data channel protocol
 
 The bot communicates with Decentraland scenes through LiveKit data
@@ -153,6 +214,7 @@ strings sent with reliable delivery.
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
 { "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
+{ "type": "presentation:presenter:claim" }
 ```
 
 `presentation:overlay:update` changes only the fields it carries, and
@@ -172,6 +234,9 @@ width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
 `(1, 0)`, `(0, 1)` and `(1, 1)` are the four corner presets. Values of
 `x` and `y` are clamped to `[0, 1]`. A new session starts at
 `{ "x": 0, "y": 1, "size": "small" }`, bottom-left.
+
+`presentation:presenter:claim` is v2-only (it is ignored with the flag
+off): it sets `presenterIdentity` to the sender's identity.
 
 ### State broadcast (bot to all participants)
 
