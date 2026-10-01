@@ -5,6 +5,7 @@ import type {
   IMetricsComponent
 } from '@well-known-components/interfaces'
 import type { IFetchComponent, IHttpServerComponent } from '@dcl/core-commons'
+import type { ICameraOverlayComponent } from './adapters/camera-overlay'
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
@@ -32,6 +33,7 @@ export interface BaseComponents {
   pdfRenderer: IRendererComponent
   pptxRenderer: IRendererComponent
   videoCompositor: IVideoCompositorComponent
+  cameraOverlay: ICameraOverlayComponent
   networkValidator: INetworkValidatorComponent
 }
 

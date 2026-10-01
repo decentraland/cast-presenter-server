@@ -21,6 +21,7 @@ export function createMockPresentationState(): PresentationState {
     currentSlide: 1,
     fileType: 'pdf',
     slideVideos: [],
-    videoState: 'idle'
+    videoState: 'idle',
+    overlay: { x: 0, y: 1, size: 'small' }
   }
 }

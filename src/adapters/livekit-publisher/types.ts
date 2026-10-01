@@ -1,4 +1,12 @@
 import type { IBaseComponent, ILoggerComponent } from '@well-known-components/interfaces'
+import type { RemoteParticipant, RemoteVideoTrack } from '@livekit/rtc-node'
+
+/** Lifecycle event for the presenter's camera track. */
+export type PresenterCameraEvent =
+  | { kind: 'active'; track: RemoteVideoTrack; participant: RemoteParticipant }
+  | { kind: 'inactive' }
+
+export type PresenterCameraTrackHandler = (event: PresenterCameraEvent) => void
 
 /**
  * A LiveKit publisher instance bound to a single presentation session.
@@ -16,6 +24,13 @@ export interface ILiveKitPublisher {
   pushAudioFrame(pcmData: Int16Array, sampleRate: number, channels: number, samplesPerChannel: number): void
   stopAudioPublishing(): Promise<void>
   setDataHandler(handler: (data: Record<string, unknown>) => void): void
+  /**
+   * Registers a handler that fires whenever the presenter's camera track becomes
+   * active (subscribed + unmuted) or inactive (muted, unsubscribed, or presenter
+   * left the room). The handler is invoked with the latest event; missed events
+   * are not replayed if a previous handler unregistered.
+   */
+  setPresenterCameraTrackHandler(handler: PresenterCameraTrackHandler | null): void
   updateMetadataState(state: object): Promise<void>
   publishData(message: Record<string, unknown>): Promise<void>
   getRemoteParticipantCount(): number

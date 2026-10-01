@@ -1,4 +1,5 @@
 import type { IBaseComponent } from '@well-known-components/interfaces'
+import type { OverlayLayout } from '../../adapters/camera-overlay'
 import type { SlideVideoInfo } from '../../adapters/video-compositor/types'
 import type { FileType } from '../file-validator'
 
@@ -44,6 +45,8 @@ export interface PresentationState {
    * type without having had to catch the transient `presentation:error`.
    */
   videoErrorCode?: string
+  /** Camera-bubble layout; bubble centre as fractions of the slide. */
+  overlay: OverlayLayout
 }
 
 /**

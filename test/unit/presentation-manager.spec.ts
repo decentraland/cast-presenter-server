@@ -1,12 +1,16 @@
+import { DEFAULT_OVERLAY_LAYOUT } from '../../src/adapters/camera-overlay'
+import { i420FrameSize, rgbaToI420 } from '../../src/logic/color-convert'
 import {
   InvalidLivekitCredentialsError,
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
-import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
+import type { ICameraOverlay, OverlayLayout } from '../../src/adapters/camera-overlay'
+import type { ILiveKitPublisher, PresenterCameraTrackHandler } from '../../src/adapters/livekit-publisher/types'
 import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
+import type { RemoteParticipant, RemoteVideoTrack } from '@livekit/rtc-node'
 
 function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
   return {
@@ -19,6 +23,7 @@ function createMockPublisher(): jest.Mocked<ILiveKitPublisher> {
     pushAudioFrame: jest.fn(),
     stopAudioPublishing: jest.fn().mockResolvedValue(undefined),
     setDataHandler: jest.fn(),
+    setPresenterCameraTrackHandler: jest.fn(),
     updateMetadataState: jest.fn().mockResolvedValue(undefined),
     publishData: jest.fn().mockResolvedValue(undefined),
     getRemoteParticipantCount: jest.fn().mockReturnValue(0),
@@ -48,8 +53,44 @@ function createMockCompositor(): jest.Mocked<IVideoCompositor> {
   }
 }
 
-function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPublisher> }) {
+function createMockOverlay(): jest.Mocked<ICameraOverlay> {
+  let layout: OverlayLayout = { ...DEFAULT_OVERLAY_LAYOUT }
+  return {
+    start: jest.fn(),
+    stop: jest.fn().mockResolvedValue(undefined),
+    setLayout: jest.fn((next: OverlayLayout) => {
+      layout = { ...next }
+    }),
+    getLayout: jest.fn(() => ({ ...layout })),
+    isActive: jest.fn().mockReturnValue(false),
+    stamp: jest.fn(),
+    onCameraFrame: jest.fn()
+  }
+}
+
+function emitCameraFrame(overlay: jest.Mocked<ICameraOverlay>): void {
+  for (const [callback] of overlay.onCameraFrame.mock.calls) callback()
+}
+
+function getCameraHandler(publisher: jest.Mocked<ILiveKitPublisher>): PresenterCameraTrackHandler {
+  const handler = publisher.setPresenterCameraTrackHandler.mock.calls[0]?.[0]
+  if (!handler) throw new Error('presenter camera handler was not registered')
+  return handler
+}
+
+function createMockComponents(overrides?: {
+  publisher?: jest.Mocked<ILiveKitPublisher>
+  overlay?: jest.Mocked<ICameraOverlay>
+}) {
   const publisher = overrides?.publisher ?? createMockPublisher()
+  const overlay = overrides?.overlay ?? createMockOverlay()
+  const logger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+    log: jest.fn()
+  }
   return {
     config: {
       getString: jest.fn().mockResolvedValue(undefined),
@@ -58,13 +99,7 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       requireNumber: jest.fn().mockResolvedValue(0)
     },
     logs: {
-      getLogger: jest.fn().mockReturnValue({
-        info: jest.fn(),
-        warn: jest.fn(),
-        error: jest.fn(),
-        debug: jest.fn(),
-        log: jest.fn()
-      })
+      getLogger: jest.fn().mockReturnValue(logger)
     },
     liveKitPublisher: {
       createPublisher: jest.fn().mockReturnValue(publisher)
@@ -79,6 +114,9 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       createCompositor: jest.fn().mockReturnValue(createMockCompositor()),
       destroyTempDir: jest.fn()
     },
+    cameraOverlay: {
+      createOverlay: jest.fn().mockReturnValue(overlay)
+    },
     metrics: {
       increment: jest.fn(),
       decrement: jest.fn(),
@@ -87,7 +125,9 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       getValue: jest.fn(),
       startTimer: jest.fn()
     },
-    _publisher: publisher
+    _publisher: publisher,
+    _overlay: overlay,
+    _logger: logger
   }
 }
 
@@ -305,6 +345,163 @@ describe('when handling data channel messages', () => {
 
     it('should not broadcast video loading state', () => {
       expect(publisher.publishData).not.toHaveBeenCalledWith(expect.objectContaining({ videoState: 'loading' }))
+    })
+  })
+})
+
+describe('when a presenter sends presentation:overlay:update', () => {
+  const OVERLAY_UPDATE = 'presentation:overlay:update'
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let overlay: jest.Mocked<ICameraOverlay>
+  let manager: IPresentationManager
+  let sessionId: string
+  let dataHandler: (message: Record<string, unknown>) => Promise<void>
+
+  function stateBroadcasts(): Array<Record<string, unknown>> {
+    return publisher.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
+  }
+
+  async function advanceBroadcastInterval(): Promise<void> {
+    await jest.advanceTimersByTimeAsync(250)
+    await flushMicrotasks()
+  }
+
+  beforeEach(async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+    publisher = createMockPublisher()
+    overlay = createMockOverlay()
+    const created = await createManagerWithSession(createMockComponents({ publisher, overlay }))
+    manager = created.manager
+    sessionId = created.info.id
+    dataHandler = publisher.setDataHandler.mock.calls[0][0] as (message: Record<string, unknown>) => Promise<void>
+    publisher.publishData.mockClear()
+    publisher.updateMetadataState.mockClear()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  describe('and it carries x, y and size', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5, y: 0.25, size: 'large' })
+    })
+
+    it('should set the full layout on the overlay', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 0.5, y: 0.25, size: 'large' })
+    })
+  })
+
+  describe('and it carries only size', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.3, y: 0.6 })
+      overlay.setLayout.mockClear()
+      await dataHandler({ type: OVERLAY_UPDATE, size: 'large' })
+    })
+
+    it('should keep the previous x and y', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 0.3, y: 0.6, size: 'large' })
+    })
+  })
+
+  describe('and x and y are outside [0, 1]', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 2, y: -1 })
+    })
+
+    it('should store them clamped to the nearest edge', () => {
+      expect(overlay.setLayout).toHaveBeenCalledWith({ x: 1, y: 0, size: 'small' })
+    })
+  })
+
+  describe.each([
+    { label: 'x is NaN', fields: { x: NaN } },
+    { label: 'x is a numeric string', fields: { x: '0.5' } },
+    { label: 'y is Infinity', fields: { y: Infinity } },
+    { label: 'size is unknown', fields: { size: 'medium' } }
+  ])('and $label', ({ fields }) => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5, ...fields })
+    })
+
+    it('should not set the layout', () => {
+      expect(overlay.setLayout).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and it carries no layout fields', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE })
+      await advanceBroadcastInterval()
+    })
+
+    it('should not set the layout', () => {
+      expect(overlay.setLayout).not.toHaveBeenCalled()
+    })
+
+    it('should not broadcast state', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+  })
+
+  describe('and three valid updates arrive within 100 ms', () => {
+    const lastOverlay = { x: 0.3, y: 1, size: 'large' }
+
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.1 })
+      await jest.advanceTimersByTimeAsync(50)
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.2 })
+      await jest.advanceTimersByTimeAsync(50)
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.3, size: 'large' })
+    })
+
+    it('should not broadcast state before the interval elapses', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+
+    describe('and the broadcast interval elapses', () => {
+      beforeEach(async () => {
+        await advanceBroadcastInterval()
+      })
+
+      it('should broadcast state exactly once with the last overlay', () => {
+        const broadcasts = stateBroadcasts()
+        expect(broadcasts).toHaveLength(1)
+        expect(broadcasts[0]).toEqual(expect.objectContaining({ overlay: lastOverlay }))
+      })
+
+      it('should update the metadata once with the last overlay', () => {
+        expect(publisher.updateMetadataState).toHaveBeenCalledTimes(1)
+        expect(publisher.updateMetadataState).toHaveBeenCalledWith(expect.objectContaining({ overlay: lastOverlay }))
+      })
+    })
+  })
+
+  describe('and a presenter requests the state after session creation', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: 'presentation:get-state' })
+    })
+
+    it('should broadcast the default overlay layout', () => {
+      expect(stateBroadcasts()).toEqual([expect.objectContaining({ overlay: DEFAULT_OVERLAY_LAYOUT })])
+    })
+  })
+
+  describe('and the session stops while a broadcast is pending', () => {
+    beforeEach(async () => {
+      await dataHandler({ type: OVERLAY_UPDATE, x: 0.5 })
+      await manager.stopPresentation(sessionId)
+      publisher.publishData.mockClear()
+      publisher.updateMetadataState.mockClear()
+      await advanceBroadcastInterval()
+    })
+
+    it('should not broadcast state', () => {
+      expect(stateBroadcasts()).toHaveLength(0)
+    })
+
+    it('should not update the metadata', () => {
+      expect(publisher.updateMetadataState).not.toHaveBeenCalled()
     })
   })
 })
@@ -626,7 +823,8 @@ describe('when managing video playback in a presentation', () => {
           expect.any(Number),
           publisher,
           expect.any(Function),
-          undefined
+          undefined,
+          expect.any(Function)
         )
       })
     })
@@ -1074,8 +1272,7 @@ describe('when managing video playback in a presentation', () => {
             type: 'presentation:error',
             code: 'video-permission-denied',
             message: expect.stringContaining('not authorized'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
+            videoIndex: 0
           })
         )
       })
@@ -1149,8 +1346,7 @@ describe('when managing video playback in a presentation', () => {
             type: 'presentation:error',
             code: 'video-playback-interrupted',
             message: expect.stringContaining('interrupted'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
+            videoIndex: 0
           })
         )
       })
@@ -1260,6 +1456,343 @@ describe('when managing video playback in a presentation', () => {
       onAudioData(Buffer.alloc(50)) // total 130 residual
       onAudioData(Buffer.alloc(1920 - 130)) // completes frame 2
       expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(2)
+    })
+  })
+})
+
+describe('when the presenter camera drives the overlay', () => {
+  const SLIDE_WIDTH = 4
+  const SLIDE_HEIGHT = 4
+  const SLIDE_I420_SIZE = i420FrameSize(SLIDE_WIDTH, SLIDE_HEIGHT)
+  const FROZEN_WIDTH = 8
+  const FROZEN_HEIGHT = 6
+  const FROZEN_I420_SIZE = i420FrameSize(FROZEN_WIDTH, FROZEN_HEIGHT)
+  const STAMP_BYTE = 0xee
+  let components: ReturnType<typeof createMockComponents>
+  let publisher: jest.Mocked<ILiveKitPublisher>
+  let overlay: jest.Mocked<ICameraOverlay>
+  let compositor: jest.Mocked<IVideoCompositor>
+  let renderer: jest.Mocked<IRenderer>
+  let slideBuffer: Buffer
+  let frozenBuffer: Buffer
+  let track: RemoteVideoTrack
+  let participant: RemoteParticipant
+
+  function expectHandlerClearedBeforeOverlayStop(): void {
+    const clearIndex = publisher.setPresenterCameraTrackHandler.mock.calls.findIndex(([handler]) => handler === null)
+    expect(clearIndex).toBeGreaterThanOrEqual(0)
+    expect(overlay.stop).toHaveBeenCalled()
+    expect(publisher.setPresenterCameraTrackHandler.mock.invocationCallOrder[clearIndex]).toBeLessThan(
+      overlay.stop.mock.invocationCallOrder[0]
+    )
+  }
+
+  function lastOnEndCallback(): () => void {
+    const calls = compositor.onEnd.mock.calls
+    return calls[calls.length - 1][0]
+  }
+
+  beforeEach(() => {
+    publisher = createMockPublisher()
+    overlay = createMockOverlay()
+    overlay.stamp.mockImplementation((i420: Buffer) => {
+      i420.fill(STAMP_BYTE)
+    })
+    compositor = createMockCompositor()
+    frozenBuffer = Buffer.alloc(FROZEN_I420_SIZE, 50)
+    compositor.getLastFrame.mockReturnValue({
+      buffer: frozenBuffer,
+      width: FROZEN_WIDTH,
+      height: FROZEN_HEIGHT,
+      bufferType: 5
+    })
+    components = createMockComponents({ publisher, overlay })
+    components.videoCompositor.createCompositor.mockReturnValue(compositor)
+    slideBuffer = Buffer.alloc(SLIDE_WIDTH * SLIDE_HEIGHT * 4, 200)
+    renderer = createMockRenderer()
+    renderer.renderSlide.mockResolvedValue({ buffer: slideBuffer, width: SLIDE_WIDTH, height: SLIDE_HEIGHT })
+    renderer.getSlideVideos.mockResolvedValue([
+      { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 2, height: 2 } }
+    ])
+    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    track = { sid: 'TR_camera' } as unknown as RemoteVideoTrack
+    participant = { identity: 'presenter' } as unknown as RemoteParticipant
+  })
+
+  describe('and an active event arrives after the session exists', () => {
+    beforeEach(async () => {
+      await createManagerWithSession(components)
+      getCameraHandler(publisher)({ kind: 'active', track, participant })
+      await flushMicrotasks()
+    })
+
+    it('should start the overlay with the camera track', () => {
+      expect(overlay.start).toHaveBeenCalledWith(track)
+    })
+  })
+
+  describe('and the camera activates during connect, before the session exists', () => {
+    beforeEach(async () => {
+      publisher.connect.mockImplementation(() => {
+        getCameraHandler(publisher)({ kind: 'active', track, participant })
+        overlay.isActive.mockReturnValue(true)
+        return Promise.resolve()
+      })
+      await createManagerWithSession(components)
+      publisher.pushFrame.mockClear()
+      emitCameraFrame(overlay)
+    })
+
+    it('should start the overlay with the camera track', () => {
+      expect(overlay.start).toHaveBeenCalledWith(track)
+    })
+
+    it('should push a stamped I420 frame from the camera frame callback', () => {
+      expect(publisher.pushFrame).toHaveBeenCalledWith(
+        Buffer.alloc(SLIDE_I420_SIZE, STAMP_BYTE),
+        SLIDE_WIDTH,
+        SLIDE_HEIGHT,
+        5
+      )
+    })
+  })
+
+  describe('and a camera frame arrives while idle with the overlay active', () => {
+    beforeEach(async () => {
+      await createManagerWithSession(components)
+      overlay.isActive.mockReturnValue(true)
+      overlay.stamp.mockClear()
+      publisher.pushFrame.mockClear()
+      publisher.startHeartbeat.mockClear()
+      emitCameraFrame(overlay)
+    })
+
+    it('should stamp an I420-sized copy of the slide', () => {
+      expect(overlay.stamp).toHaveBeenCalledTimes(1)
+      const [stamped, width, height] = overlay.stamp.mock.calls[0]
+      expect(stamped).toHaveLength(SLIDE_I420_SIZE)
+      expect(width).toBe(SLIDE_WIDTH)
+      expect(height).toBe(SLIDE_HEIGHT)
+    })
+
+    it('should push the stamped buffer as I420', () => {
+      const stamped = overlay.stamp.mock.calls[0][0]
+      expect(publisher.pushFrame).toHaveBeenCalledWith(stamped, SLIDE_WIDTH, SLIDE_HEIGHT, 5)
+      expect(publisher.pushFrame.mock.calls[0][0]).toBe(stamped)
+    })
+
+    it('should restart the heartbeat with the same stamped buffer', () => {
+      const stamped = overlay.stamp.mock.calls[0][0]
+      expect(publisher.startHeartbeat).toHaveBeenCalledWith(stamped, SLIDE_WIDTH, SLIDE_HEIGHT, 5)
+      expect(publisher.startHeartbeat.mock.calls[0][0]).toBe(stamped)
+    })
+  })
+
+  describe('and creating the presentation fails after connect', () => {
+    beforeEach(async () => {
+      renderer.getSlideCount.mockReturnValue(0)
+      const manager = await createPresentationManager(
+        components as unknown as Parameters<typeof createPresentationManager>[0]
+      )
+      await expect(
+        manager.createPresentation(Buffer.from('%PDF-1.7'), 'pdf', 'token', 'wss://lk.example.com')
+      ).rejects.toThrow('PDF contains no pages')
+    })
+
+    it('should clear the camera handler before stopping the overlay', () => {
+      expectHandlerClearedBeforeOverlayStop()
+    })
+  })
+
+  describe('and a camera frame arrives while a video is playing', () => {
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      overlay.isActive.mockReturnValue(true)
+      await manager.playVideo(info.id, 0)
+      compositor.getIsPlaying.mockReturnValue(true)
+      publisher.pushFrame.mockClear()
+      emitCameraFrame(overlay)
+    })
+
+    it('should not push an idle frame', () => {
+      expect(publisher.pushFrame).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the camera becomes inactive', () => {
+    beforeEach(async () => {
+      await createManagerWithSession(components)
+      overlay.isActive.mockReturnValue(true)
+      overlay.stop.mockImplementation(() => {
+        overlay.isActive.mockReturnValue(false)
+        return Promise.resolve()
+      })
+      publisher.pushFrame.mockClear()
+      publisher.startHeartbeat.mockClear()
+      getCameraHandler(publisher)({ kind: 'inactive' })
+      await flushMicrotasks()
+    })
+
+    it('should stop the overlay', () => {
+      expect(overlay.stop).toHaveBeenCalled()
+    })
+
+    it('should push the plain slide as RGBA', () => {
+      expect(publisher.pushFrame).toHaveBeenCalledWith(slideBuffer, SLIDE_WIDTH, SLIDE_HEIGHT, 0)
+    })
+
+    it('should restart the heartbeat with the plain slide', () => {
+      expect(publisher.startHeartbeat).toHaveBeenCalledWith(slideBuffer, SLIDE_WIDTH, SLIDE_HEIGHT, 0)
+    })
+  })
+
+  describe('and a video is playing', () => {
+    let decorateFrame: (frame: Buffer, width: number, height: number) => Buffer
+    let frame: Buffer
+
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      await manager.playVideo(info.id, 0)
+      decorateFrame = compositor.startPlayback.mock.calls[0][8] as unknown as typeof decorateFrame
+      frame = Buffer.alloc(SLIDE_I420_SIZE, 1)
+    })
+
+    describe('and the overlay is inactive', () => {
+      it('should return the same frame without stamping', () => {
+        expect(decorateFrame(frame, SLIDE_WIDTH, SLIDE_HEIGHT)).toBe(frame)
+        expect(overlay.stamp).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('and the overlay is active', () => {
+      let decorated: Buffer
+
+      beforeEach(() => {
+        overlay.isActive.mockReturnValue(true)
+        decorated = decorateFrame(frame, SLIDE_WIDTH, SLIDE_HEIGHT)
+      })
+
+      it('should return a different, stamped buffer', () => {
+        expect(decorated).not.toBe(frame)
+        expect(overlay.stamp).toHaveBeenCalledWith(decorated, SLIDE_WIDTH, SLIDE_HEIGHT)
+      })
+
+      it('should leave the original frame unstamped', () => {
+        expect(frame).toEqual(Buffer.alloc(SLIDE_I420_SIZE, 1))
+      })
+    })
+  })
+
+  describe('and the video is paused with the overlay active', () => {
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      overlay.isActive.mockReturnValue(true)
+      await manager.playVideo(info.id, 0)
+      await manager.pauseVideo(info.id)
+      overlay.stamp.mockClear()
+      publisher.pushFrame.mockClear()
+      emitCameraFrame(overlay)
+    })
+
+    it('should stamp a copy sized from the frozen frame', () => {
+      expect(overlay.stamp).toHaveBeenCalledTimes(1)
+      const [stamped, width, height] = overlay.stamp.mock.calls[0]
+      expect(stamped).toHaveLength(FROZEN_I420_SIZE)
+      expect(stamped).not.toBe(frozenBuffer)
+      expect(width).toBe(FROZEN_WIDTH)
+      expect(height).toBe(FROZEN_HEIGHT)
+    })
+
+    it('should push the stamped frozen frame as I420', () => {
+      expect(publisher.pushFrame).toHaveBeenCalledWith(
+        Buffer.alloc(FROZEN_I420_SIZE, STAMP_BYTE),
+        FROZEN_WIDTH,
+        FROZEN_HEIGHT,
+        5
+      )
+    })
+
+    it('should leave the frozen frame unstamped', () => {
+      expect(frozenBuffer).toEqual(Buffer.alloc(FROZEN_I420_SIZE, 50))
+    })
+  })
+
+  describe('and the video ends naturally with the overlay inactive', () => {
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      await manager.playVideo(info.id, 0)
+      publisher.startHeartbeat.mockClear()
+      await Promise.resolve(lastOnEndCallback()())
+    })
+
+    it('should restore the heartbeat with the plain slide', () => {
+      expect(publisher.startHeartbeat).toHaveBeenCalledWith(slideBuffer, SLIDE_WIDTH, SLIDE_HEIGHT, 0)
+    })
+  })
+
+  describe('and a resumed video ends while a camera frame lands during the audio teardown', () => {
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      overlay.isActive.mockReturnValue(true)
+      await manager.playVideo(info.id, 0)
+      await manager.pauseVideo(info.id)
+      await manager.playVideo(info.id, 0)
+      const audioStopped = createDeferred<void>()
+      publisher.stopAudioPublishing.mockReturnValueOnce(audioStopped.promise)
+      overlay.stamp.mockClear()
+      const ended = Promise.resolve(lastOnEndCallback()())
+      emitCameraFrame(overlay)
+      audioStopped.resolve()
+      await ended
+    })
+
+    it('should stamp the slide rather than the frozen video frame', () => {
+      expect(overlay.stamp.mock.calls[0]).toEqual([expect.any(Buffer), SLIDE_WIDTH, SLIDE_HEIGHT])
+    })
+  })
+
+  describe('and the video ends while the overlay is active and stamping throws', () => {
+    let ended: Promise<void>
+
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      await manager.playVideo(info.id, 0)
+      overlay.isActive.mockReturnValue(true)
+      overlay.stamp.mockImplementation(() => {
+        throw new Error('stamp failed')
+      })
+      publisher.pushFrame.mockClear()
+      components._logger.warn.mockClear()
+      ended = Promise.resolve(lastOnEndCallback()())
+      await ended.catch(() => undefined)
+    })
+
+    it('should resolve without rejecting', async () => {
+      await expect(ended).resolves.toBeUndefined()
+    })
+
+    it('should push an unstamped I420 copy of the slide', () => {
+      expect(publisher.pushFrame).toHaveBeenCalledWith(
+        rgbaToI420(slideBuffer, SLIDE_WIDTH, SLIDE_HEIGHT),
+        SLIDE_WIDTH,
+        SLIDE_HEIGHT,
+        5
+      )
+    })
+
+    it('should log a warning', () => {
+      expect(components._logger.warn).toHaveBeenCalledWith(expect.stringContaining('stamp'))
+    })
+  })
+
+  describe('and the presentation is stopped', () => {
+    beforeEach(async () => {
+      const { manager, info } = await createManagerWithSession(components)
+      await manager.stopPresentation(info.id)
+    })
+
+    it('should clear the camera handler before stopping the overlay', () => {
+      expectHandlerClearedBeforeOverlayStop()
     })
   })
 })

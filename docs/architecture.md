@@ -135,6 +135,35 @@ Each presentation runs as an in-memory session identified by a UUID.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 
+## Loom-style camera overlay
+
+Every session draws the first presenter's camera as a circular bubble
+on the presentation track while that camera track is active and
+unmuted. Muting or unpublishing the camera hides the bubble; there is
+no separate visibility flag.
+
+One stamping step in `src/adapters/camera-overlay/` blends the bubble
+into each I420 frame just before `publisher.pushFrame`. ffmpeg never
+receives a camera input:
+
+- **Slide or paused video:** each camera frame (up to ~20 fps) stamps
+  the bubble over the current slide or the frozen video frame and
+  pushes the result. The heartbeat repeats the last stamped frame, so
+  a stalled camera still yields output.
+- **Playing video:** ffmpeg frames drive output, and each one is
+  decorated with the bubble before it is pushed.
+
+The layout is the bubble centre `x`, `y` as fractions of the slide
+width and height, plus a `size` of `small` (15% of slide width) or
+`large` (25%). The bubble keeps a margin of 2% of the slide width from
+every edge, so `(0, 0)`, `(1, 0)`, `(0, 1)` and `(1, 1)` are the four
+corner presets. The default is `{ "x": 0, "y": 1, "size": "small" }`,
+bottom-left.
+
+Presenters move or resize the bubble at runtime with
+`presentation:overlay:update`. The next frame uses the new layout,
+with no ffmpeg restart.
+
 ## Data channel protocol
 
 The bot communicates with Decentraland scenes through LiveKit data
@@ -152,7 +181,11 @@ strings sent with reliable delivery.
 { "type": "presentation:video:stop" }
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
+{ "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
 ```
+
+`presentation:overlay:update` changes only the fields it carries, and
+the bot drops the whole command if any field is invalid.
 
 ### State broadcast (bot to all participants)
 
@@ -173,7 +206,8 @@ broadcasts:
       "geometry": { "x": 100, "y": 200, "width": 640, "height": 360 }
     }
   ],
-  "videoState": "idle"
+  "videoState": "idle",
+  "overlay": { "x": 0, "y": 1, "size": "small" }
 }
 ```
 

@@ -4,6 +4,9 @@ import {
   AudioSource,
   LocalAudioTrack,
   LocalVideoTrack,
+  RemoteParticipant,
+  RemoteTrackPublication,
+  RemoteVideoTrack,
   Room,
   RoomEvent,
   TrackPublishOptions,
@@ -14,7 +17,8 @@ import {
   VideoSource
 } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
-import type { ILiveKitPublisher, ILiveKitPublisherComponent } from './types'
+import type { ILiveKitPublisher, ILiveKitPublisherComponent, PresenterCameraTrackHandler } from './types'
+import type { RemoteTrack } from '@livekit/rtc-node'
 
 const PROTOCOL_VERSION = 100
 const MSG_TYPE_COMMS_DATA = 3
@@ -58,9 +62,12 @@ function parsePresentersFromRoomMetadata(metadata: string | undefined): Set<stri
   try {
     if (!metadata) return new Set()
     const parsed = JSON.parse(metadata)
-    return Array.isArray(parsed?.presenters)
-      ? new Set(parsed.presenters.map((p: string) => p.toLowerCase()))
-      : new Set()
+    if (!Array.isArray(parsed?.presenters)) return new Set()
+    return new Set(
+      parsed.presenters
+        .filter((p: unknown): p is string => typeof p === 'string' && p.length > 0)
+        .map((p: string) => p.toLowerCase())
+    )
   } catch {
     return new Set()
   }
@@ -76,6 +83,65 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
   let dataHandler: ((data: Record<string, unknown>) => void) | null = null
   let presenters: Set<string> = new Set()
   let lastSceneId = ''
+  let presenterCameraHandler: PresenterCameraTrackHandler | null = null
+  // Tracks the currently-active presenter camera so we don't fire 'active' twice
+  // for the same publication if multiple presenters race to enable their cameras.
+  let activePresenterCameraSid: string | null = null
+
+  function maybeActivatePresenterCamera(
+    track: RemoteTrack,
+    publication: RemoteTrackPublication,
+    participant: RemoteParticipant
+  ): void {
+    if (!(track instanceof RemoteVideoTrack)) return
+    if (publication.source !== TrackSource.SOURCE_CAMERA) return
+    if (publication.muted) return
+    const identity = (participant.identity || '').toLowerCase()
+    if (!identity) return // never trust an anonymous participant against the presenters set
+    if (!presenters.has(identity)) return
+    // First-wins: if another presenter already has an active camera, ignore.
+    if (activePresenterCameraSid && activePresenterCameraSid !== track.sid) return
+    activePresenterCameraSid = track.sid ?? null
+    logger.info(`[presenter-camera] active: ${participant.identity} sid=${track.sid}`)
+    presenterCameraHandler?.({ kind: 'active', track, participant })
+  }
+
+  function deactivatePresenterCamera(): void {
+    if (!activePresenterCameraSid) return
+    logger.info(`[presenter-camera] inactive (sid was ${activePresenterCameraSid})`)
+    activePresenterCameraSid = null
+    presenterCameraHandler?.({ kind: 'inactive' })
+  }
+
+  /**
+   * Sub/unsub every SOURCE_CAMERA publication on a participant based on whether
+   * they're a presenter. Idempotent (setSubscribed is a no-op when state matches).
+   * setSubscribed's TS signature returns void but the runtime call may throw or
+   * reject — both paths are caught and logged.
+   */
+  function applyPresenterSubscription(participant: RemoteParticipant, isPresenter: boolean): void {
+    for (const publication of participant.trackPublications.values()) {
+      if (publication.source !== TrackSource.SOURCE_CAMERA) continue
+      try {
+        const maybe = publication.setSubscribed(isPresenter) as unknown
+        if (maybe && typeof (maybe as Promise<unknown>).catch === 'function') {
+          ;(maybe as Promise<unknown>).catch((err: unknown) => {
+            logger.warn(
+              `Failed to ${isPresenter ? 'subscribe to' : 'unsubscribe from'} camera publication: ${err instanceof Error ? err.message : String(err)}`
+            )
+          })
+        }
+      } catch (err) {
+        logger.warn(
+          `Failed to ${isPresenter ? 'subscribe to' : 'unsubscribe from'} camera publication: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      const track = publication.track
+      if (isPresenter && track instanceof RemoteVideoTrack) {
+        maybeActivatePresenterCamera(track, publication, participant)
+      }
+    }
+  }
 
   return {
     async connect(url: string, token: string): Promise<void> {
@@ -113,10 +179,30 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       logger.info(`[connect] Initial presenters: ${[...presenters].join(', ') || 'none'}`)
 
       room.on(RoomEvent.RoomMetadataChanged, (metadata: string) => {
-        presenters = parsePresentersFromRoomMetadata(metadata)
-        logger.info(`[RoomMetadataChanged] Presenters updated: ${[...presenters].join(', ') || 'none'}`, {
+        const prev = presenters
+        const next = parsePresentersFromRoomMetadata(metadata)
+        presenters = next
+
+        // Only act on identities whose presenter status flipped — avoids re-touching
+        // every camera publication in the room on every metadata change.
+        const flipped = new Map<string, boolean>() // identity -> isPresenter (after)
+        for (const id of next) if (!prev.has(id)) flipped.set(id, true)
+        for (const id of prev) if (!next.has(id)) flipped.set(id, false)
+
+        if (flipped.size === 0) return
+
+        const added = [...flipped].filter(([, v]) => v).map(([k]) => k)
+        const removed = [...flipped].filter(([, v]) => !v).map(([k]) => k)
+        logger.info(`[RoomMetadataChanged] presenters Δ +[${added.join(',') || '-'}] -[${removed.join(',') || '-'}]`, {
           rawMetadata: metadata
         })
+
+        for (const participant of room?.remoteParticipants.values() ?? []) {
+          const identity = (participant.identity || '').toLowerCase()
+          const isPresenter = flipped.get(identity)
+          if (isPresenter === undefined) continue
+          applyPresenterSubscription(participant, isPresenter)
+        }
       })
 
       room.on(
@@ -182,6 +268,52 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           dataHandler(message)
         }
       )
+
+      room.on(
+        RoomEvent.TrackSubscribed,
+        (track: RemoteTrack, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+          maybeActivatePresenterCamera(track, publication, participant)
+        }
+      )
+
+      room.on(
+        RoomEvent.TrackUnsubscribed,
+        (track: RemoteTrack, _publication: RemoteTrackPublication, _participant: RemoteParticipant) => {
+          if (activePresenterCameraSid && track.sid === activePresenterCameraSid) {
+            deactivatePresenterCamera()
+          }
+        }
+      )
+
+      room.on(RoomEvent.TrackMuted, (publication, _participant) => {
+        if (activePresenterCameraSid && publication.sid === activePresenterCameraSid) {
+          deactivatePresenterCamera()
+        }
+      })
+
+      room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
+        if (!(publication instanceof RemoteTrackPublication)) return
+        if (!(participant instanceof RemoteParticipant)) return
+        if (!presenters.has((participant.identity || '').toLowerCase())) return
+        if (publication.source !== TrackSource.SOURCE_CAMERA) return
+        const track = publication.track
+        if (track instanceof RemoteVideoTrack) {
+          maybeActivatePresenterCamera(track, publication, participant)
+        }
+      })
+
+      // Explicit subscription fallback: @livekit/rtc-node may not auto-subscribe to
+      // remote tracks depending on room/server config. We can't verify the live
+      // behaviour from this environment, so we eagerly call setSubscribed(true) on
+      // every PRESENTER camera publication present at connect time. Non-presenter
+      // cameras are intentionally skipped — subscribing to them wastes bandwidth
+      // and the application would never use the decoded frames (see security-review.md
+      // Medium — Eager setSubscribed(true) on every camera publication).
+      for (const participant of room.remoteParticipants.values()) {
+        const identity = (participant.identity || '').toLowerCase()
+        if (!presenters.has(identity)) continue
+        applyPresenterSubscription(participant, true)
+      }
     },
 
     async startPublishing(width: number, height: number): Promise<void> {
@@ -191,7 +323,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       videoTrack = LocalVideoTrack.createVideoTrack('presentation', videoSource)
       const publishOptions = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE,
-        videoCodec: VideoCodec.H264,
+        videoCodec: VideoCodec.VP8,
         videoEncoding: {
           maxBitrate: BigInt(6_000_000),
           maxFramerate: 30
@@ -273,6 +405,10 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       dataHandler = handler
     },
 
+    setPresenterCameraTrackHandler(handler: PresenterCameraTrackHandler | null): void {
+      presenterCameraHandler = handler
+    },
+
     async updateMetadataState(state: object): Promise<void> {
       if (!room?.localParticipant) return
       await room.localParticipant.updateMetadata(JSON.stringify({ role: 'presentation', presentationId, ...state }))
@@ -304,6 +440,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       this.stopHeartbeat()
       await this.stopAudioPublishing()
       presenters = new Set()
+      activePresenterCameraSid = null
+      presenterCameraHandler = null
 
       // WORKAROUND: @livekit/rtc-node leaks file descriptors and memory on disconnect
       // because Room.disconnect() never disposes its native FFI handle. We manually

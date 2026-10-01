@@ -43,6 +43,32 @@ export function validateFilterParam(value: number, name: string, max = 7680): vo
   }
 }
 
+/**
+ * Validates remote-media (camera/video) frame dimensions before they are used
+ * for resource allocation (canvas/buffer) or interpolated into ffmpeg argv.
+ *
+ * @throws {Error} If width or height is not a positive integer ≤ max.
+ */
+export function validateMediaDimensions(width: number, height: number, ctx: string, max = 7680): void {
+  if (!Number.isInteger(width) || width < 1 || width > max) {
+    throw new Error(`Invalid media dimensions ${ctx}: width=${width}, must be integer 1-${max}`)
+  }
+  if (!Number.isInteger(height) || height < 1 || height > max) {
+    throw new Error(`Invalid media dimensions ${ctx}: height=${height}, must be integer 1-${max}`)
+  }
+}
+
+/**
+ * Build the ffmpeg `-filter_complex` graph that scales input [1] (video) and
+ * overlays it on input [0] (slide) at the PDF geometry.
+ *
+ * Exported so unit tests can pin the exact filter string.
+ */
+export function buildFilterComplex(opts: { videoOverlay: { x: number; y: number; w: number; h: number } }): string {
+  const { x, y, w: vw, h: vh } = opts.videoOverlay
+  return `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
+}
+
 function createVideoCompositor(
   logger: ILoggerComponent.ILogger,
   networkValidator: INetworkValidatorComponent,
@@ -395,7 +421,8 @@ function createVideoCompositor(
       slideHeight: number,
       publisher: ILiveKitPublisher,
       onAudioData?: (pcmChunk: Buffer) => void,
-      seekSeconds?: number
+      seekSeconds?: number,
+      decorateFrame?: (frame: Buffer, width: number, height: number) => Buffer
     ): Promise<void> {
       isPlaying = true
       cleanedUp = false
@@ -430,8 +457,7 @@ function createVideoCompositor(
       currentSlidePath = path.join(dir, `slide-${Date.now()}.rgba`)
       await fs.promises.writeFile(currentSlidePath, slideBuffer)
 
-      // Overlay video at PDF geometry coordinates
-      const filterComplex = `[1:v]scale=${vw}:${vh}[vid];[0:v][vid]overlay=${x}:${y}:shortest=1`
+      const filterComplex = buildFilterComplex({ videoOverlay: { x, y, w: vw, h: vh } })
 
       // -ss before -i for input seeking (used for resume after pause)
       // Modern FFmpeg enables -accurate_seek by default, so input seeking
@@ -560,7 +586,8 @@ function createVideoCompositor(
 
         audioProcess.on('close', (code) => {
           if (code && code !== 0 && !cleanedUp) {
-            logger.warn(`Audio process exited with error`, { code, stderr: audioStderr })
+            logger.warn(`Audio process exited with error`, { code })
+            logger.debug(`Audio process stderr`, { stderr: audioStderr })
           }
           audioProcess = null
         })
@@ -635,7 +662,16 @@ function createVideoCompositor(
             height: slideHeight,
             bufferType: VIDEO_BUFFER_TYPE_I420
           }
-          publisher.pushFrame(frameCopy, slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
+          let out = frameCopy
+          if (decorateFrame) {
+            try {
+              out = decorateFrame(frameCopy, slideWidth, slideHeight)
+            } catch (err) {
+              logger.warn(`decorateFrame threw: ${err instanceof Error ? err.message : String(err)}`)
+              out = frameCopy
+            }
+          }
+          publisher.pushFrame(out, slideWidth, slideHeight, VIDEO_BUFFER_TYPE_I420)
           readOffset += compositeFrameSize
         }
 
@@ -654,7 +690,8 @@ function createVideoCompositor(
       compositeProcess.on('close', (code) => {
         const abnormal = code !== null && code !== 0
         if (abnormal && !cleanedUp) {
-          logger.warn(`Composite process exited with error`, { code, stderr: compositeStderr })
+          logger.warn(`Composite process exited with error`, { code })
+          logger.debug(`Composite process stderr`, { stderr: compositeStderr })
         }
         if (!cleanedUp && isPlaying) {
           stopPlayback(publisher, slideBuffer, slideWidth, slideHeight)

@@ -55,7 +55,9 @@ export interface IVideoCompositor {
     slideHeight: number,
     publisher: ILiveKitPublisher,
     onAudioData?: (pcmChunk: Buffer) => void,
-    seekSeconds?: number
+    seekSeconds?: number,
+    /** Returns the frame to publish; the undecorated frame is kept for `getLastFrame`. */
+    decorateFrame?: (frame: Buffer, width: number, height: number) => Buffer
   ): Promise<void>
   /**
    * Registers a callback for natural end-of-stream (FFmpeg exit code 0).

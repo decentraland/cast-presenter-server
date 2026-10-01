@@ -4,17 +4,23 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { OVERLAY_SIZES } from '../../adapters/camera-overlay'
+import { rgbaToI420 } from '../color-convert'
 import { FILE_TYPES } from '../file-validator'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
+import type { ICameraOverlay, OverlayLayout } from '../../adapters/camera-overlay'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/renderer/types'
-import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { CompositorErrorReason, IVideoCompositor, VideoFrameSnapshot } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 import type { FileType } from '../file-validator'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
+const BUFFER_TYPE_RGBA = 0
+const BUFFER_TYPE_I420 = 5
+const OVERLAY_BROADCAST_INTERVAL_MS = 250
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -31,6 +37,11 @@ interface InternalSession extends PresentationSession {
   renderer: IRenderer
   publisher: ILiveKitPublisher
   compositor: IVideoCompositor | null
+  cameraOverlay: ICameraOverlay
+  /** Frame shown when no video is playing: the RGBA slide or the unstamped I420 frozen video frame. */
+  baseFrame: VideoFrameSnapshot | null
+  /** I420 conversion of an RGBA `baseFrame`, keyed by its source buffer. */
+  baseI420: { source: Buffer; i420: Buffer } | null
   cachedVideoPaths: Map<string, string>
   navigating: boolean
   tempDir: string
@@ -42,6 +53,7 @@ interface InternalSession extends PresentationSession {
   videoErrorReason: string | null
   videoErrorCode: VideoErrorCode | null
   preDownloadTimer: ReturnType<typeof setTimeout> | null
+  overlayBroadcastTimer: ReturnType<typeof setTimeout> | null
   // Signalled when the session stops; cancels in-flight downloads so we don't
   // race with tempDir cleanup or write to a deleted directory.
   abortController: AbortController
@@ -117,6 +129,22 @@ function classifyVideoError(err: Error): VideoErrorInfo {
   return { code: 'video-playback-failed', message: 'Video unavailable' }
 }
 
+function parseOverlayUpdate(message: Record<string, unknown>): Partial<OverlayLayout> | null {
+  const patch: Partial<OverlayLayout> = {}
+  for (const axis of ['x', 'y'] as const) {
+    const value = message[axis]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+    patch[axis] = Math.min(1, Math.max(0, value))
+  }
+  const size = message.size
+  if (size !== undefined) {
+    if (typeof size !== 'string' || !(OVERLAY_SIZES as readonly string[]).includes(size)) return null
+    patch.size = size as OverlayLayout['size']
+  }
+  return patch
+}
+
 /**
  * Creates the presentation manager logic component.
  *
@@ -134,10 +162,18 @@ function classifyVideoError(err: Error): VideoErrorInfo {
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
+    | 'config'
+    | 'logs'
+    | 'metrics'
+    | 'liveKitPublisher'
+    | 'pdfRenderer'
+    | 'pptxRenderer'
+    | 'videoCompositor'
+    | 'cameraOverlay'
   >
 ): Promise<IPresentationManager> {
-  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
+  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor, cameraOverlay } =
+    components
   const logger = logs.getLogger('presentation-manager')
 
   // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
@@ -190,6 +226,80 @@ export async function createPresentationManager(
     }
   }
 
+  function baseAsI420(session: InternalSession): Buffer | null {
+    const base = session.baseFrame
+    if (!base) return null
+    if (base.bufferType === BUFFER_TYPE_I420) return base.buffer
+    if (session.baseI420?.source !== base.buffer) {
+      session.baseI420 = { source: base.buffer, i420: rgbaToI420(base.buffer, base.width, base.height) }
+    }
+    return session.baseI420.i420
+  }
+
+  function pushIdleFrame(session: InternalSession): void {
+    if (session.compositor?.getIsPlaying() || !session.cameraOverlay.isActive() || !session.baseFrame) return
+    const i420 = baseAsI420(session)
+    if (!i420) return
+    const { width, height } = session.baseFrame
+    let frame: Buffer
+    try {
+      frame = Buffer.from(i420)
+      session.cameraOverlay.stamp(frame, width, height)
+    } catch (err) {
+      logger.warn(`Camera overlay stamp failed: ${err instanceof Error ? err.message : String(err)}`)
+      frame = Buffer.from(i420)
+    }
+    session.publisher.pushFrame(frame, width, height, BUFFER_TYPE_I420)
+    session.publisher.startHeartbeat(frame, width, height, BUFFER_TYPE_I420)
+  }
+
+  function refreshIdleOutput(session: InternalSession): void {
+    const base = session.baseFrame
+    if (session.compositor?.getIsPlaying() || !base) return
+    if (session.cameraOverlay.isActive()) {
+      pushIdleFrame(session)
+      return
+    }
+    session.publisher.pushFrame(base.buffer, base.width, base.height, base.bufferType)
+    session.publisher.startHeartbeat(base.buffer, base.width, base.height, base.bufferType)
+  }
+
+  function resetBaseToSlide(session: InternalSession): void {
+    if (!session.lastFrameBuffer) return
+    session.baseFrame = {
+      buffer: session.lastFrameBuffer,
+      width: session.lastFrameWidth,
+      height: session.lastFrameHeight,
+      bufferType: BUFFER_TYPE_RGBA
+    }
+  }
+
+  async function setupSlideOutput(
+    session: InternalSession,
+    buffer: Buffer,
+    width: number,
+    height: number
+  ): Promise<void> {
+    session.lastFrameBuffer = buffer
+    session.lastFrameWidth = width
+    session.lastFrameHeight = height
+    resetBaseToSlide(session)
+
+    if (session.videoState === 'playing' || session.videoState === 'loading') {
+      return
+    }
+
+    refreshIdleOutput(session)
+  }
+
+  function scheduleOverlayBroadcast(session: InternalSession): void {
+    if (session.overlayBroadcastTimer) return
+    session.overlayBroadcastTimer = setTimeout(() => {
+      session.overlayBroadcastTimer = null
+      broadcastState(session).catch(() => undefined)
+    }, OVERLAY_BROADCAST_INTERVAL_MS)
+  }
+
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
     try {
@@ -217,15 +327,14 @@ export async function createPresentationManager(
     session: InternalSession,
     code: VideoErrorCode,
     message: string,
-    context?: { videoIndex?: number; videoUrl?: string }
+    context?: { videoIndex?: number }
   ): Promise<void> {
     try {
       await session.publisher.publishData({
         type: 'presentation:error',
         code,
         message,
-        ...(context?.videoIndex !== undefined ? { videoIndex: context.videoIndex } : {}),
-        ...(context?.videoUrl !== undefined ? { videoUrl: context.videoUrl } : {})
+        ...(context?.videoIndex !== undefined ? { videoIndex: context.videoIndex } : {})
       })
     } catch (err) {
       logger.warn(`Failed to broadcast error: ${err instanceof Error ? err.message : String(err)}`)
@@ -249,6 +358,23 @@ export async function createPresentationManager(
 
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const publisher = liveKitPublisher.createPublisher(id, publisherLogger)
+    const overlay = cameraOverlay.createOverlay(publisherLogger)
+
+    publisher.setPresenterCameraTrackHandler(async (event) => {
+      try {
+        if (event.kind === 'active') {
+          overlay.start(event.track)
+          return
+        }
+        await overlay.stop()
+        const session = sessions.get(id)
+        if (session) refreshIdleOutput(session)
+      } catch (err) {
+        logger.warn(
+          `[presenter-camera] handler error (${event.kind}): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    })
 
     let renderer: IRenderer | null = null
     let tempDir: string | null = null
@@ -298,6 +424,13 @@ export async function createPresentationManager(
             case 'presentation:stop':
               await stopSession(session)
               break
+            case 'presentation:overlay:update': {
+              const patch = parseOverlayUpdate(message)
+              if (!patch || Object.keys(patch).length === 0) break
+              session.cameraOverlay.setLayout({ ...session.cameraOverlay.getLayout(), ...patch })
+              scheduleOverlayBroadcast(session)
+              break
+            }
             case 'presentation:get-state':
               await broadcastState(session)
               break
@@ -312,9 +445,6 @@ export async function createPresentationManager(
 
       // Start publishing video track
       await publisher.startPublishing(width, height)
-
-      publisher.pushFrame(buffer, width, height)
-      publisher.startHeartbeat(buffer, width, height)
 
       // Get video annotations for first slide
       const slideVideos = await renderer.getSlideVideos(0)
@@ -337,6 +467,9 @@ export async function createPresentationManager(
         lastFrameHeight: height,
         slideVideos,
         videoState: 'idle',
+        cameraOverlay: overlay,
+        baseFrame: null,
+        baseI420: null,
         renderer,
         publisher,
         compositor: null,
@@ -351,11 +484,14 @@ export async function createPresentationManager(
         videoErrorReason: null,
         videoErrorCode: null,
         preDownloadTimer: null,
+        overlayBroadcastTimer: null,
         abortController: new AbortController(),
         bytesDownloaded: 0
       }
 
       sessions.set(id, session)
+      overlay.onCameraFrame(() => pushIdleFrame(session))
+      await setupSlideOutput(session, buffer, width, height)
       metrics.increment('session_created_total', { status: 'success' })
       metrics.increment('active_sessions')
       await broadcastState(session)
@@ -389,6 +525,8 @@ export async function createPresentationManager(
       if (renderer) {
         renderer.destroy()
       }
+      publisher.setPresenterCameraTrackHandler(null)
+      await overlay.stop().catch(() => undefined)
       await publisher.disconnect()
       throw err
     } finally {
@@ -512,15 +650,11 @@ export async function createPresentationManager(
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
-      session.publisher.pushFrame(buffer, width, height)
-      session.publisher.startHeartbeat(buffer, width, height)
+      await setupSlideOutput(session, buffer, width, height)
 
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
       session.currentSlide = targetSlide
-      session.lastFrameBuffer = buffer
-      session.lastFrameWidth = width
-      session.lastFrameHeight = height
       session.slideVideos = slideVideos
 
       metrics.increment('slide_navigations_total', { action })
@@ -583,7 +717,7 @@ export async function createPresentationManager(
         const info = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
         session.videoErrorCode = info.code
         session.videoErrorReason = info.message
-        await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
+        await broadcastError(session, info.code, info.message, { videoIndex })
         await broadcastState(session)
         logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
         return
@@ -610,7 +744,7 @@ export async function createPresentationManager(
         const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
         session.videoErrorCode = info.code
         session.videoErrorReason = info.message
-        await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
+        await broadcastError(session, info.code, info.message, { videoIndex })
         await broadcastState(session)
         logger.warn(`Video download failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`)
         return
@@ -717,7 +851,13 @@ export async function createPresentationManager(
         session.lastFrameHeight,
         session.publisher,
         onAudioData,
-        seekSeconds > 0 ? seekSeconds : undefined
+        seekSeconds > 0 ? seekSeconds : undefined,
+        (frame, width, height) => {
+          if (!session.cameraOverlay.isActive()) return frame
+          const out = Buffer.from(frame)
+          session.cameraOverlay.stamp(out, width, height)
+          return out
+        }
       )
     } catch (err) {
       compositor.cleanup()
@@ -729,7 +869,7 @@ export async function createPresentationManager(
       await session.publisher.stopAudioPublishing().catch(() => {
         /* noop */
       })
-      await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
+      await broadcastError(session, info.code, info.message, { videoIndex })
       await broadcastState(session)
       throw err
     }
@@ -750,34 +890,34 @@ export async function createPresentationManager(
 
     const endedCompositor = compositor
     compositor.onEnd(async () => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      if (session.compositor !== endedCompositor) return
+      resetBaseToSlide(session)
       session.videoState = 'idle'
       session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
+      await session.publisher.stopAudioPublishing().catch(() => undefined)
+      if (session.lastFrameBuffer) {
+        await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      }
+
       metrics.increment('video_playback_total', { action: 'end' })
-      broadcastState(session).catch(() => {
-        /* noop */
-      })
+      broadcastState(session).catch(() => undefined)
       logger.info(`Video ended naturally for presentation ${session.id}`)
     })
 
     compositor.onError(async (reason) => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
+      if (session.compositor !== endedCompositor) return
+      resetBaseToSlide(session)
       const message = COMPOSITOR_ERROR_MESSAGES[reason]
       session.videoState = 'error'
       session.videoErrorCode = reason
       session.videoErrorReason = message
-      // Full teardown — clears latches/listeners and unlinks the slide temp file.
-      // The compositor's internal stopPlayback already killed FFmpeg, but cleanup
-      // is the documented session-side counterpart that releases the rest.
       endedCompositor.cleanup()
       session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-      await broadcastError(session, reason, message, { videoIndex, videoUrl: videoInfo.url })
+      if (session.lastFrameBuffer) {
+        await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      }
+      await session.publisher.stopAudioPublishing().catch(() => undefined)
+      await broadcastError(session, reason, message, { videoIndex })
       await broadcastState(session)
       logger.warn(`Video playback interrupted for presentation ${session.id}: ${reason}`)
     })
@@ -804,8 +944,7 @@ export async function createPresentationManager(
     session.videoElapsedBeforePause = 0
 
     if (session.lastFrameBuffer) {
-      session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-      session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+      await setupSlideOutput(session, session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
     }
 
     metrics.increment('video_playback_total', { action: 'stop' })
@@ -824,15 +963,8 @@ export async function createPresentationManager(
       const lastFrame = session.compositor.getLastFrame()
       session.compositor.cleanup()
       session.compositor = null
-
-      // Keep pushing the last video frame so viewers see a frozen video, not the slide placeholder
-      if (lastFrame) {
-        session.publisher.pushFrame(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-        session.publisher.startHeartbeat(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-      } else if (session.lastFrameBuffer) {
-        session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-        session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-      }
+      if (lastFrame) session.baseFrame = lastFrame
+      refreshIdleOutput(session)
 
       session.videoState = 'paused'
       metrics.increment('video_playback_total', { action: 'pause' })
@@ -855,6 +987,10 @@ export async function createPresentationManager(
       clearTimeout(session.preDownloadTimer)
       session.preDownloadTimer = null
     }
+    if (session.overlayBroadcastTimer) {
+      clearTimeout(session.overlayBroadcastTimer)
+      session.overlayBroadcastTimer = null
+    }
 
     // Abort any in-flight downloads so they don't race with tempDir cleanup below
     session.abortController.abort()
@@ -872,6 +1008,9 @@ export async function createPresentationManager(
       } catch (err) {
         logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
       }
+
+      session.publisher.setPresenterCameraTrackHandler(null)
+      await session.cameraOverlay.stop().catch(() => undefined)
 
       try {
         await session.publisher.disconnect()
@@ -904,6 +1043,7 @@ export async function createPresentationManager(
       fileType: session.fileType,
       slideVideos: session.slideVideos,
       videoState: session.videoState,
+      overlay: session.cameraOverlay.getLayout(),
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
         : {}),
