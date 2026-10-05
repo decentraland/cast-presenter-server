@@ -2200,6 +2200,10 @@ describe('when client composition is enabled and the sidecar publishes', () => {
       )
     })
 
+    it('should report the message that matches the playback-failed code, not a download message', () => {
+      expect(manager.getState(presentationId)?.videoErrorReason).toBe('Video unavailable')
+    })
+
     describe('and the presenter plays it again', () => {
       beforeEach(async () => {
         await manager.playVideo(presentationId, 0)

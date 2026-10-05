@@ -106,6 +106,9 @@ const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
   'audio-processing-failed': 'Audio processing failed during playback'
 }
 
+/** User-facing message paired with the `video-playback-failed` code. */
+const PLAYBACK_FAILED_MESSAGE = 'Video unavailable'
+
 /** Maps download/playback errors to a stable code + user-friendly reason. */
 function classifyVideoError(err: Error): VideoErrorInfo {
   if (err instanceof SessionDiskQuotaExceededError) {
@@ -139,7 +142,7 @@ function classifyVideoError(err: Error): VideoErrorInfo {
       message: 'Video format is not supported — the file may be private or require authentication'
     }
   }
-  return { code: 'video-playback-failed', message: 'Video unavailable' }
+  return { code: 'video-playback-failed', message: PLAYBACK_FAILED_MESSAGE }
 }
 
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
@@ -727,14 +730,12 @@ export async function createPresentationManager(
   }
 
   async function failV2Playback(session: InternalSession, videoIndex: number, err: unknown): Promise<void> {
-    const error = err instanceof Error ? err : new Error(String(err))
-    const { message } = classifyVideoError(error)
     session.videoState = 'error'
     session.videoErrorCode = 'video-playback-failed'
-    session.videoErrorReason = message
-    await broadcastError(session, 'video-playback-failed', message, { videoIndex })
+    session.videoErrorReason = PLAYBACK_FAILED_MESSAGE
+    await broadcastError(session, 'video-playback-failed', PLAYBACK_FAILED_MESSAGE, { videoIndex })
     await broadcastState(session)
-    logger.warn(`Sidecar playback failed for ${session.id}: ${error.message}`)
+    logger.warn(`Sidecar playback failed for ${session.id}: ${errorMessage(err)}`)
   }
 
   async function markV2Playing(session: InternalSession, videoIndex: number): Promise<void> {
