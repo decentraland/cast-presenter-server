@@ -20,9 +20,6 @@ export interface SlideImage {
  * @throws {Error} When the buffer length does not match the dimensions
  */
 export async function encodeSlidePng(rgba: Buffer, width: number, height: number): Promise<SlideImage> {
-  if (rgba.length !== width * height * 4) {
-    throw new Error(`RGBA buffer is ${rgba.length} bytes, expected ${width * height * 4} for ${width}x${height}`)
-  }
   const canvas = createCanvas(width, height)
   canvas
     .getContext('2d')

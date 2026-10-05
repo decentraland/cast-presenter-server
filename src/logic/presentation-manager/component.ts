@@ -130,9 +130,8 @@ function classifyVideoError(err: Error): VideoErrorInfo {
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
   session.slideImages.delete(image.hash)
   session.slideImages.set(image.hash, image)
-  while (session.slideImages.size > SLIDE_IMAGE_CACHE_SIZE) {
-    const oldest = session.slideImages.keys().next().value
-    if (oldest === undefined) break
+  if (session.slideImages.size > SLIDE_IMAGE_CACHE_SIZE) {
+    const [oldest] = session.slideImages.keys()
     session.slideImages.delete(oldest)
   }
   session.currentSlideImage = image

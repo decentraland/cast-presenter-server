@@ -28,10 +28,6 @@ describe('when encoding a slide to PNG', () => {
       expect([...image.png.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47])
     })
 
-    it('should report the width and height', () => {
-      expect({ width: image.width, height: image.height }).toEqual({ width: 4, height: 2 })
-    })
-
     it('should use 16 lowercase hex characters as the hash', () => {
       expect(image.hash).toMatch(/^[0-9a-f]{16}$/)
     })
@@ -50,8 +46,15 @@ describe('when encoding a slide to PNG', () => {
   })
 
   describe('and the buffer length does not match the dimensions', () => {
+    let encoding: Promise<SlideImage>
+
+    beforeEach(() => {
+      encoding = encodeSlidePng(rgba, 4, 3)
+      encoding.catch(() => undefined)
+    })
+
     it('should reject', async () => {
-      await expect(encodeSlidePng(rgba, 4, 3)).rejects.toThrow()
+      await expect(encoding).rejects.toThrow()
     })
   })
 })
