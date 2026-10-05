@@ -78,7 +78,7 @@ export async function initComponents(): Promise<AppComponents> {
   const pptxRenderer = createPptxRendererComponent()
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
   const sidecarPublisher = await createSidecarPublisherComponent({ config })
-  const mediaEncoder = createMediaEncoderComponent({ logs })
+  const mediaEncoder = await createMediaEncoderComponent({ logs })
 
   const presentationManager = await createPresentationManager({
     config,
