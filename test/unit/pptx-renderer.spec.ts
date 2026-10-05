@@ -55,17 +55,18 @@ describe('when a PPTX slide carries an embedded video', () => {
   })
 
   describe('and the slide is requested again while the extracted file is being consumed', () => {
-    beforeEach(() => {
+    let secondPath: string
+
+    beforeEach(async () => {
       fs.writeFileSync(extractedPath, 'bytes-written-by-the-bake')
+      secondPath = (await renderer.getSlideVideos(0))[0].url
     })
 
-    it('should return the path extracted the first time', async () => {
-      const videos = await renderer.getSlideVideos(0)
-      expect(videos[0].url).toBe(extractedPath)
+    it('should return the path extracted the first time', () => {
+      expect(secondPath).toBe(extractedPath)
     })
 
-    it('should leave the extracted file untouched instead of re-writing it', async () => {
-      await renderer.getSlideVideos(0)
+    it('should leave the extracted file untouched instead of re-writing it', () => {
       expect(fs.readFileSync(extractedPath, 'utf8')).toBe('bytes-written-by-the-bake')
     })
   })

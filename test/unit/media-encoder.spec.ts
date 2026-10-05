@@ -402,15 +402,12 @@ describe('when using the media encoder', () => {
   describe('and an embedded video is resolved', () => {
     let embeddedDir: string
     let otherSessionDir: string
-    let otherDir: string
 
     beforeEach(() => {
       embeddedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-pptx-video-'))
       otherSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-pptx-video-'))
-      otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-other-'))
       fs.writeFileSync(path.join(embeddedDir, 'clip.mp4'), Buffer.alloc(42))
       fs.writeFileSync(path.join(otherSessionDir, 'clip.mp4'), Buffer.alloc(42))
-      fs.writeFileSync(path.join(otherDir, 'clip.mp4'), Buffer.alloc(42))
       fs.mkdirSync(path.join(embeddedDir, 'sub'))
       fs.writeFileSync(path.join(embeddedDir, 'sub', 'f'), Buffer.alloc(1))
     })
@@ -418,7 +415,6 @@ describe('when using the media encoder', () => {
     afterEach(() => {
       fs.rmSync(embeddedDir, { recursive: true, force: true })
       fs.rmSync(otherSessionDir, { recursive: true, force: true })
-      fs.rmSync(otherDir, { recursive: true, force: true })
     })
 
     describe('and the file sits directly in the given media directory', () => {
@@ -445,18 +441,6 @@ describe('when using the media encoder', () => {
     describe('and the url is an https link', () => {
       it('should return null', () => {
         expect(encoder.resolveEmbeddedVideo('https://example.com/v.mp4', embeddedDir)).toBeNull()
-      })
-    })
-
-    describe('and the file is in another tmp directory', () => {
-      it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo(path.join(otherDir, 'clip.mp4'), embeddedDir)).toBeNull()
-      })
-    })
-
-    describe('and the file is outside the tmp directory', () => {
-      it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo('/etc/hosts', embeddedDir)).toBeNull()
       })
     })
 

@@ -4,6 +4,7 @@ import { PassThrough } from 'stream'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { decodePresentationPacket, encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
 import { createSidecarPublisherComponent } from '../../src/adapters/sidecar-publisher/component'
+import { createLoggerMock } from '../mocks/context'
 import type { ISidecarPublisher } from '../../src/adapters/sidecar-publisher/types'
 import type { ChildProcess } from 'child_process'
 
@@ -41,16 +42,6 @@ function createFakeProcess(): FakeProcess {
   })
 }
 
-function createLogger(): jest.Mocked<ILoggerComponent.ILogger> {
-  return {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    log: jest.fn()
-  }
-}
-
 async function flush(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve))
 }
@@ -82,7 +73,7 @@ describe('when using the sidecar publisher', () => {
   beforeEach(async () => {
     fake = createFakeProcess()
     jest.mocked(spawn).mockReturnValue(fake as unknown as ChildProcess)
-    logger = createLogger()
+    logger = createLoggerMock()
     const component = await createSidecarPublisherComponent({
       config: {
         getString: jest.fn().mockResolvedValue(BINARY_PATH),
@@ -221,14 +212,11 @@ describe('when using the sidecar publisher', () => {
         line = lastLine()
       })
 
-      it('should write a publishData command', () => {
-        expect(line.type).toBe('publishData')
-      })
-
-      it('should encode the message so the shared codec decodes it back', () => {
-        expect(decodePresentationPacket(Buffer.from(String(line.payloadBase64), 'base64'))?.message).toEqual({
-          type: 'presentation:state'
-        })
+      it('should write a publishData command carrying the message the shared codec decodes back', () => {
+        expect([
+          line.type,
+          decodePresentationPacket(Buffer.from(String(line.payloadBase64), 'base64'))?.message
+        ]).toEqual(['publishData', { type: 'presentation:state' }])
       })
     })
 
