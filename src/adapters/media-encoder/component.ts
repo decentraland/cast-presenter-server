@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { removeQuietly } from '../../logic/remove-quietly'
 import type { BakePriority, BakeResult, IMediaEncoder } from './types'
 import type { AppComponents } from '../../types'
 
@@ -133,14 +134,6 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
     }
   }
 
-  function removeQuietly(filePath: string): void {
-    try {
-      fs.rmSync(filePath, { force: true })
-    } catch (err) {
-      logger.warn('Failed to remove bake output', { filePath, error: err instanceof Error ? err.message : String(err) })
-    }
-  }
-
   function runProcess(
     command: string,
     args: string[],
@@ -214,8 +207,8 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
       const bytes = fs.statSync(videoPath).size + (audioPath ? fs.statSync(audioPath).size : 0)
       return { videoPath, audioPath, bytes }
     } catch (err) {
-      removeQuietly(videoPath)
-      removeQuietly(audioOutput)
+      removeQuietly(videoPath, logger)
+      removeQuietly(audioOutput, logger)
       throw err
     }
   }

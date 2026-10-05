@@ -6,6 +6,7 @@ import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfac
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import { FILE_TYPES } from '../file-validator'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
+import { removeQuietly } from '../remove-quietly'
 import { encodeSlidePng } from '../slide-image'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
@@ -614,14 +615,6 @@ export async function createPresentationManager(
     logger.warn(`Video playback interrupted for presentation ${session.id}: ${message}`)
   }
 
-  function removeQuietly(filePath: string): void {
-    try {
-      fs.rmSync(filePath, { force: true })
-    } catch (err) {
-      logger.warn('Failed to remove file', { filePath, error: err instanceof Error ? err.message : String(err) })
-    }
-  }
-
   async function downloadForBake(
     session: InternalSession,
     url: string,
@@ -637,7 +630,7 @@ export async function createPresentationManager(
     try {
       const result = await downloader.downloadVideo(url, signal)
       if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
-        removeQuietly(result.path)
+        removeQuietly(result.path, logger)
         throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
       }
       session.bytesDownloaded += result.bytes
@@ -660,13 +653,13 @@ export async function createPresentationManager(
       result = await mediaEncoder.bake(source.path, session.tempDir, { priority: job.priority, signal })
     } finally {
       if (!embedded) {
-        removeQuietly(source.path)
+        removeQuietly(source.path, logger)
         session.bytesDownloaded -= source.bytes
       }
     }
     if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
-      removeQuietly(result.videoPath)
-      if (result.audioPath) removeQuietly(result.audioPath)
+      removeQuietly(result.videoPath, logger)
+      if (result.audioPath) removeQuietly(result.audioPath, logger)
       throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
     }
     session.bytesDownloaded += result.bytes
