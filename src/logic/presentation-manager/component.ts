@@ -526,6 +526,7 @@ export async function createPresentationManager(
           break
         }
         if (session.cachedVideoPaths.has(url)) continue
+        if (mediaEncoder.resolveEmbeddedVideo(url)) continue
         if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
           logger.info(
             `Pre-download stopped: session disk quota reached (${session.bytesDownloaded}/${SESSION_DISK_QUOTA_BYTES} bytes)`

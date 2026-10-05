@@ -1476,6 +1476,48 @@ describe('when managing video playback in a presentation', () => {
     })
   })
 })
+
+describe('when the legacy compositor pre-downloads the deck videos', () => {
+  const EMBEDDED_PATH = '/tmp/cast-pptx-video-abc/media1.mp4'
+  const REMOTE_URL = 'https://example.com/clip.mp4'
+  let components: ReturnType<typeof createMockComponents>
+  let compositor: jest.Mocked<IVideoCompositor>
+
+  beforeEach(async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+    compositor = createMockCompositor()
+    components = createMockComponents()
+    components.videoCompositor.createCompositor.mockReturnValue(compositor)
+    components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((url: string) =>
+      url === EMBEDDED_PATH ? { path: EMBEDDED_PATH, bytes: 5 } : null
+    )
+    const renderer = createMockRenderer()
+    renderer.getSlideCount.mockReturnValue(1)
+    renderer.getSlideVideos.mockResolvedValue([
+      { url: EMBEDDED_PATH, geometry: { x: 0, y: 0, width: 640, height: 480 } },
+      { url: REMOTE_URL, geometry: { x: 0, y: 0, width: 640, height: 480 } }
+    ])
+    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    await createManagerWithSession(components)
+    compositor.downloadVideo.mockClear()
+    jest.advanceTimersByTime(3000)
+    await flushMicrotasks()
+    await flushMicrotasks()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('should download the remote video', () => {
+    expect(compositor.downloadVideo).toHaveBeenCalledWith(REMOTE_URL, expect.any(AbortSignal))
+  })
+
+  it('should leave the file the PPTX renderer already extracted alone', () => {
+    expect(compositor.downloadVideo).not.toHaveBeenCalledWith(EMBEDDED_PATH, expect.anything())
+  })
+})
+
 describe('when client composition is enabled', () => {
   const PUBLIC_BASE_URL = 'https://cast.example.com'
   let components: ReturnType<typeof createMockComponents>
