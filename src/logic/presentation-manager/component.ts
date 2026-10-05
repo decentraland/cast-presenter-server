@@ -539,11 +539,7 @@ export async function createPresentationManager(
           // Enforce quota post-download: per-file cap already bounds one download,
           // and aborting a live HTTPS stream at an exact byte count is awkward.
           if (session.bytesDownloaded + bytes > SESSION_DISK_QUOTA_BYTES) {
-            try {
-              fs.unlinkSync(rawPath)
-            } catch {
-              /* ignore */
-            }
+            removeQuietly(rawPath, logger)
             logger.warn(
               `Pre-download dropped ${url}: would exceed session quota (${session.bytesDownloaded + bytes}/${SESSION_DISK_QUOTA_BYTES} bytes)`
             )
@@ -974,11 +970,7 @@ export async function createPresentationManager(
       try {
         const result = await compositor.downloadVideo(videoInfo.url, session.abortController.signal)
         if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
-          try {
-            fs.unlinkSync(result.path)
-          } catch {
-            /* ignore */
-          }
+          removeQuietly(result.path, logger)
           throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
         }
         videoPath = result.path
