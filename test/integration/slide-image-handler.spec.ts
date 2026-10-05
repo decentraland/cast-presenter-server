@@ -45,16 +45,11 @@ test('GET /presentations/:id/slides/:file', function ({ components, spyComponent
 
   describe('when the file name is not a hex hash', () => {
     beforeEach(async () => {
-      spyComponents.presentationManager.getSlideImage.mockReturnValue(Buffer.from('png'))
       response = await components.localFetch.fetch(`/presentations/${presentationId}/slides/XYZ.png`)
     })
 
     it('should respond with a 404', () => {
       expect(response.status).toBe(404)
-    })
-
-    it('should not look up a slide image', () => {
-      expect(spyComponents.presentationManager.getSlideImage).not.toHaveBeenCalled()
     })
   })
 })

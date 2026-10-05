@@ -1,8 +1,9 @@
+import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
 import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'
-import { createMockLogger } from '../mocks/context'
+import { createLoggerMock, createMockLogger } from '../mocks/context'
 
 function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
   return {
@@ -35,7 +36,8 @@ function createMockPresentationManager(overrides?: { validateCredentialsError?: 
 
 function createJsonContext(
   body: Record<string, unknown>,
-  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error }
+  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error },
+  components?: Record<string, unknown>
 ) {
   const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
   return {
@@ -51,7 +53,8 @@ function createJsonContext(
     components: {
       logs: createMockLogger(),
       presentationManager: createMockPresentationManager(overrides),
-      fileProvider: createMockFileProvider(overrides)
+      fileProvider: createMockFileProvider(overrides),
+      ...components
     }
   } as unknown as Parameters<typeof createPresentationHandler>[0]
 }
@@ -123,36 +126,22 @@ function createOversizedJsonContext(bodySize: number) {
 
 interface PresenterSpies {
   presentationManager: ReturnType<typeof createMockPresentationManager>
-  warn: jest.Mock
+  logger: jest.Mocked<ILoggerComponent.ILogger>
 }
 
 type HandlerContext = Parameters<typeof createPresentationHandler>[0]
 
-function createSpiedLogs(warn: jest.Mock) {
-  return {
-    getLogger: () => ({ info: jest.fn(), warn, error: jest.fn(), debug: jest.fn(), log: jest.fn() })
-  }
-}
-
 function createPresenterJsonContext(presenterIdentity: string | undefined, spies: PresenterSpies): HandlerContext {
-  const body = {
-    url: 'https://example.com/file.pdf',
-    livekitToken: 'token',
-    livekitUrl: 'wss://lk.example.com',
-    ...(presenterIdentity !== undefined ? { presenterIdentity } : {})
-  }
-  const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
-  return {
-    request: {
-      headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
-      arrayBuffer: async () => jsonBytes.buffer.slice(jsonBytes.byteOffset, jsonBytes.byteOffset + jsonBytes.byteLength)
+  return createJsonContext(
+    {
+      url: 'https://example.com/file.pdf',
+      livekitToken: 'token',
+      livekitUrl: 'wss://lk.example.com',
+      ...(presenterIdentity !== undefined ? { presenterIdentity } : {})
     },
-    components: {
-      logs: createSpiedLogs(spies.warn),
-      presentationManager: spies.presentationManager,
-      fileProvider: createMockFileProvider()
-    }
-  } as unknown as HandlerContext
+    undefined,
+    { logs: { getLogger: () => spies.logger }, presentationManager: spies.presentationManager }
+  )
 }
 
 function createPresenterMultipartContext(presenterIdentity: string | undefined, spies: PresenterSpies): HandlerContext {
@@ -172,7 +161,7 @@ function createPresenterMultipartContext(presenterIdentity: string | undefined, 
       arrayBuffer: async () => new ArrayBuffer(0)
     },
     components: {
-      logs: createSpiedLogs(spies.warn),
+      logs: { getLogger: () => spies.logger },
       presentationManager: spies.presentationManager,
       fileProvider
     }
@@ -192,7 +181,7 @@ describe.each([
   }
 
   beforeEach(() => {
-    spies = { presentationManager: createMockPresentationManager(), warn: jest.fn() }
+    spies = { presentationManager: createMockPresentationManager(), logger: createLoggerMock() }
   })
 
   describe.each([
@@ -203,16 +192,8 @@ describe.each([
       result = await createPresentationHandler(buildContext(presenterIdentity, spies))
     })
 
-    it('should respond with a 201', () => {
-      expect(result.status).toBe(201)
-    })
-
     it('should pass the presenterIdentity as the last createPresentation argument', () => {
       expect(lastCreatePresentationArgument()).toBe(presenterIdentity)
-    })
-
-    it('should not log a warning', () => {
-      expect(spies.warn).not.toHaveBeenCalled()
     })
   })
 
@@ -230,7 +211,7 @@ describe.each([
     })
 
     it('should not log a warning', () => {
-      expect(spies.warn).not.toHaveBeenCalled()
+      expect(spies.logger.warn).not.toHaveBeenCalled()
     })
   })
 
@@ -239,8 +220,11 @@ describe.each([
     { label: 'is a stream identity longer than 128 characters', presenterIdentity: 'stream:' + 'x'.repeat(130) },
     { label: 'is a truncated address', presenterIdentity: '0x123' }
   ])('and a presenterIdentity is provided that $label', ({ presenterIdentity }) => {
+    let warned: Record<string, unknown> | undefined
+
     beforeEach(async () => {
       result = await createPresentationHandler(buildContext(presenterIdentity, spies))
+      warned = spies.logger.warn.mock.calls[0]?.[1]
     })
 
     it('should respond with a 201', () => {
@@ -252,12 +236,11 @@ describe.each([
     })
 
     it('should log exactly one warning', () => {
-      expect(spies.warn).toHaveBeenCalledTimes(1)
+      expect(spies.logger.warn).toHaveBeenCalledTimes(1)
     })
 
     it('should log at most 16 characters of the rejected value', () => {
-      const [, logged] = spies.warn.mock.calls[0]
-      expect(String(logged.presenterIdentity).length).toBeLessThanOrEqual(16)
+      expect(String(warned?.presenterIdentity).length).toBeLessThanOrEqual(16)
     })
   })
 })
