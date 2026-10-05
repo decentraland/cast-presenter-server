@@ -14,27 +14,11 @@ type Clock struct {
 	pausedAt time.Time
 	paused   bool
 	resumed  chan struct{}
-	sleep    func(ctx context.Context, until time.Time) error
 }
 
 // NewClock returns a running clock whose pts 0 is now.
 func NewClock(now time.Time) *Clock {
-	return &Clock{base: now, sleep: sleepUntil}
-}
-
-func sleepUntil(ctx context.Context, until time.Time) error {
-	d := time.Until(until)
-	if d <= 0 {
-		return ctx.Err()
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return &Clock{base: now}
 }
 
 // Wait blocks until base+pts, or for as long as the clock is paused; it returns ctx.Err() on cancel.
@@ -51,16 +35,15 @@ func (c *Clock) Wait(ctx context.Context, pts time.Duration) error {
 				return ctx.Err()
 			}
 		}
-		target := c.base.Add(pts)
+		d := time.Until(c.base.Add(pts))
 		c.mu.Unlock()
-		if err := c.sleep(ctx, target); err != nil {
-			return err
+		if d <= 0 {
+			return ctx.Err()
 		}
-		c.mu.Lock()
-		moved := c.paused || !c.base.Add(pts).Equal(target)
-		c.mu.Unlock()
-		if !moved {
-			return nil
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

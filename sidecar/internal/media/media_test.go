@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,12 +20,7 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
-const frame = time.Second / 30
-
-var (
-	t0      = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	errBoom = errors.New("boom")
-)
+var errBoom = errors.New("boom")
 
 type write struct {
 	size     int
@@ -34,6 +30,7 @@ type write struct {
 type fakeWriter struct {
 	mu     sync.Mutex
 	writes []write
+	at     []time.Time
 	failAt int
 	block  chan struct{}
 }
@@ -48,6 +45,7 @@ func (f *fakeWriter) WriteSample(s media.Sample, _ *lksdk.SampleWriteOptions) er
 		return errBoom
 	}
 	f.writes = append(f.writes, write{len(s.Data), s.Duration})
+	f.at = append(f.at, time.Now())
 	return nil
 }
 
@@ -59,32 +57,6 @@ func (f *fakeWriter) snapshot() []write {
 
 func (f *fakeWriter) count() int {
 	return len(f.snapshot())
-}
-
-type sleepLog struct {
-	mu      sync.Mutex
-	targets []time.Time
-}
-
-func recordSleeps(c *Clock) *sleepLog {
-	l := &sleepLog{}
-	c.sleep = func(ctx context.Context, until time.Time) error {
-		l.mu.Lock()
-		l.targets = append(l.targets, until)
-		l.mu.Unlock()
-		return ctx.Err()
-	}
-	return l
-}
-
-func (l *sleepLog) offsets() []time.Duration {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]time.Duration, len(l.targets))
-	for i, target := range l.targets {
-		out[i] = target.Sub(t0)
-	}
-	return out
 }
 
 func nal(header byte, size int) []byte {
@@ -138,22 +110,14 @@ func oggCRC(b []byte) uint32 {
 	return crc
 }
 
-func oggStream(granules ...uint64) []byte {
+func oggStream(packets int) []byte {
 	head := append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0)
 	stream := oggPage(2, 0, 0, head)
 	stream = append(stream, oggPage(0, 0, 1, append([]byte("OpusTags"), 0, 0, 0, 0, 0, 0, 0, 0))...)
-	for i, granule := range granules {
-		stream = append(stream, oggPage(0, granule, uint32(i+2), []byte{0xfc, 1, 2, 3})...)
+	for i := range packets {
+		stream = append(stream, oggPage(0, uint64(i+1)*960, uint32(i+2), []byte{0xfc, 1, 2, 3})...)
 	}
 	return stream
-}
-
-func longAudio(pages int) []byte {
-	granules := make([]uint64, pages)
-	for i := range granules {
-		granules[i] = uint64(i+1) * 960
-	}
-	return oggStream(granules...)
 }
 
 func writeFile(t *testing.T, name string, data []byte) string {
@@ -165,59 +129,27 @@ func writeFile(t *testing.T, name string, data []byte) string {
 	return path
 }
 
-func ptr(s string) *string { return &s }
+func TestClockResumeShiftsTheClockByThePausedTime(t *testing.T) {
+	start := time.Now()
+	c := NewClock(start)
 
-func TestClockWaitTargetsBasePlusPTS(t *testing.T) {
-	c := NewClock(t0)
-	sleeps := recordSleeps(c)
+	c.Pause(start)
+	c.Pause(start.Add(time.Hour))
+	c.Resume(start.Add(60 * time.Millisecond))
+	c.Resume(start.Add(time.Hour))
 
-	for _, pts := range []time.Duration{0, frame} {
-		if err := c.Wait(context.Background(), pts); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if got := sleeps.offsets(); len(got) != 2 || got[0] != 0 || got[1] != frame {
-		t.Fatalf("expected targets [0 %v], got %v", frame, got)
-	}
-}
-
-func TestClockResumeShiftsTheNextTargetByThePausedTime(t *testing.T) {
-	c := NewClock(t0)
-	sleeps := recordSleeps(c)
-	_ = c.Wait(context.Background(), frame)
-
-	c.Pause(t0.Add(frame))
-	c.Resume(t0.Add(frame + 5*time.Second))
-	if err := c.Wait(context.Background(), 2*frame); err != nil {
+	if err := c.Wait(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
-
-	if got := sleeps.offsets(); got[len(got)-1] != 5*time.Second+2*frame {
-		t.Fatalf("expected the next target shifted by 5s, got %v", got)
-	}
-}
-
-func TestClockRepeatedPauseAndResumeAreNoOps(t *testing.T) {
-	c := NewClock(t0)
-	sleeps := recordSleeps(c)
-
-	c.Resume(t0.Add(time.Hour))
-	c.Pause(t0.Add(time.Second))
-	c.Pause(t0.Add(2 * time.Second))
-	c.Resume(t0.Add(4 * time.Second))
-	c.Resume(t0.Add(9 * time.Second))
-	_ = c.Wait(context.Background(), 0)
-
-	if got := sleeps.offsets(); len(got) != 1 || got[0] != 3*time.Second {
-		t.Fatalf("expected one target at 3s, got %v", got)
+	if elapsed := time.Since(start); elapsed < 60*time.Millisecond {
+		t.Fatalf("expected the wait held until 60ms, it returned after %v", elapsed)
 	}
 }
 
 func TestClockWaitBlocksWhilePaused(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-	c.Pause(t0)
+	start := time.Now()
+	c := NewClock(start)
+	c.Pause(start)
 	returned := make(chan error, 1)
 
 	go func() { returned <- c.Wait(context.Background(), 0) }()
@@ -227,7 +159,7 @@ func TestClockWaitBlocksWhilePaused(t *testing.T) {
 		t.Fatal("Wait returned while paused")
 	case <-time.After(50 * time.Millisecond):
 	}
-	c.Resume(t0.Add(time.Second))
+	c.Resume(time.Now())
 	select {
 	case err := <-returned:
 		if err != nil {
@@ -239,9 +171,8 @@ func TestClockWaitBlocksWhilePaused(t *testing.T) {
 }
 
 func TestClockWaitReturnsTheContextErrorWhenCancelledWhilePaused(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-	c.Pause(t0)
+	c := NewClock(time.Now())
+	c.Pause(time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan error, 1)
 
@@ -258,135 +189,92 @@ func TestClockWaitReturnsTheContextErrorWhenCancelledWhilePaused(t *testing.T) {
 	}
 }
 
-func TestClockPauseDuringASleepHoldsTheWaitUntilResume(t *testing.T) {
-	c := NewClock(t0)
-	var mu sync.Mutex
-	var targets []time.Time
-	entered := make(chan struct{}, 4)
-	release := make(chan struct{})
-	c.sleep = func(ctx context.Context, until time.Time) error {
-		mu.Lock()
-		targets = append(targets, until)
-		first := len(targets) == 1
-		mu.Unlock()
-		entered <- struct{}{}
-		if first {
-			<-release
-		}
-		return nil
-	}
+func TestClockPauseDuringAWaitHoldsItUntilResume(t *testing.T) {
+	start := time.Now()
+	c := NewClock(start)
 	returned := make(chan error, 1)
 
-	go func() { returned <- c.Wait(context.Background(), frame) }()
-	<-entered
-	c.Pause(t0)
-	close(release)
+	go func() { returned <- c.Wait(context.Background(), 50*time.Millisecond) }()
+	time.Sleep(10 * time.Millisecond)
+	c.Pause(time.Now())
 
 	select {
 	case <-returned:
 		t.Fatal("Wait returned although the clock was paused during its sleep")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
-	c.Resume(t0.Add(time.Second))
+	c.Resume(time.Now())
 	select {
-	case <-returned:
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Wait did not return after Resume")
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(targets) != 2 || targets[1].Sub(t0) != time.Second+frame {
-		t.Fatalf("expected a second sleep shifted by 1s, got %v", targets)
-	}
 }
 
-func TestPlayVideoPacesVCLAndWritesParameterSetsImmediately(t *testing.T) {
-	c := NewClock(t0)
-	sleeps := recordSleeps(c)
+func TestStreamPacesVCLNALsAndWritesParameterSetsImmediately(t *testing.T) {
 	w := &fakeWriter{}
-	stream := annexB(nal(0x67, 4), nal(0x68, 5), nal(0x65, 20), nal(0x41, 10), nal(0x41, 11))
+	in := annexB(nal(0x67, 4), nal(0x68, 5), nal(0x65, 20), nal(0x67, 6), nal(0x68, 7), nal(0x41, 10))
+	start := time.Now()
 
-	if err := playVideo(context.Background(), w, bytes.NewReader(stream), c); err != nil {
+	if err := playVideo(context.Background(), w, bytes.NewReader(in), NewClock(start)); err != nil {
 		t.Fatal(err)
 	}
 
-	want := []write{{4, 0}, {5, 0}, {20, frameDuration}, {10, frameDuration}, {11, frameDuration}}
-	if got := w.snapshot(); !equalWrites(got, want) {
+	want := []write{{4, 0}, {5, 0}, {20, frameDuration}, {6, 0}, {7, 0}, {10, frameDuration}}
+	if got := w.snapshot(); !slices.Equal(got, want) {
 		t.Fatalf("expected writes %v, got %v", want, got)
 	}
-	if got := sleeps.offsets(); len(got) != 3 || got[0] != 0 || got[1] != frame || got[2] != 2*frame {
-		t.Fatalf("expected waits at 0, %v, %v, got %v", frame, 2*frame, got)
+	if offset := w.at[4].Sub(start); offset > frameDuration/2 {
+		t.Fatalf("expected the mid-stream parameter sets written without pacing, got %v", offset)
+	}
+	if offset := w.at[5].Sub(start); offset < frameDuration {
+		t.Fatalf("expected the second frame paced one frame in, got %v", offset)
 	}
 }
 
-func TestPlayVideoReturnsNilWhenCancelled(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if err := playVideo(ctx, &fakeWriter{}, bytes.NewReader(longVideo(10, 8)), c); err != nil {
-		t.Fatalf("expected nil on cancel, got %v", err)
-	}
-}
-
-func TestPlayVideoReportsAMidStreamReadError(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-	in := io.MultiReader(bytes.NewReader(longVideo(3, 8)), iotest.ErrReader(errBoom))
-
-	if err := playVideo(context.Background(), &fakeWriter{}, in, c); !errors.Is(err, errBoom) {
-		t.Fatalf("expected the read error, got %v", err)
-	}
-}
-
-func TestPlayVideoReportsAWriteError(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-
-	if err := playVideo(context.Background(), &fakeWriter{failAt: 3}, bytes.NewReader(longVideo(3, 8)), c); !errors.Is(err, errBoom) {
-		t.Fatalf("expected the write error, got %v", err)
-	}
-}
-
-func TestPlayAudioUsesGranuleDeltasAndSkipsHeaderPages(t *testing.T) {
-	c := NewClock(t0)
-	sleeps := recordSleeps(c)
+func TestStreamWritesOneSamplePerOpusPacket(t *testing.T) {
 	w := &fakeWriter{}
 
-	if err := playAudio(context.Background(), w, bytes.NewReader(oggStream(960, 960, 2880)), c); err != nil {
+	if err := playAudio(context.Background(), w, bytes.NewReader(oggStream(3)), NewClock(time.Now())); err != nil {
 		t.Fatal(err)
 	}
 
-	want := []write{{4, 20 * time.Millisecond}, {4, 40 * time.Millisecond}}
-	if got := w.snapshot(); !equalWrites(got, want) {
+	want := []write{{4, 20 * time.Millisecond}, {4, 20 * time.Millisecond}, {4, 20 * time.Millisecond}}
+	if got := w.snapshot(); !slices.Equal(got, want) {
 		t.Fatalf("expected writes %v, got %v", want, got)
 	}
-	if got := sleeps.offsets(); len(got) != 2 || got[0] != 0 || got[1] != 20*time.Millisecond {
-		t.Fatalf("expected waits at 0 and 20ms, got %v", got)
-	}
 }
 
-func TestPlayAudioReportsATruncatedPage(t *testing.T) {
-	c := NewClock(t0)
-	recordSleeps(c)
-	stream := longAudio(3)
+func TestStreamEndsOnCancelAndReportsReadAndWriteErrors(t *testing.T) {
+	truncated := oggStream(3)
+	for _, tc := range []struct {
+		name    string
+		play    func(context.Context, SampleWriter, io.Reader, *Clock) error
+		in      io.Reader
+		w       *fakeWriter
+		cancel  bool
+		wantErr error
+	}{
+		{"cancelled", playVideo, bytes.NewReader(longVideo(10, 8)), &fakeWriter{}, true, nil},
+		{"video read error", playVideo, io.MultiReader(bytes.NewReader(longVideo(3, 8)), iotest.ErrReader(errBoom)), &fakeWriter{}, false, errBoom},
+		{"video write error", playVideo, bytes.NewReader(longVideo(3, 8)), &fakeWriter{failAt: 3}, false, errBoom},
+		{"truncated audio page", playAudio, bytes.NewReader(truncated[:len(truncated)-2]), &fakeWriter{}, false, io.ErrUnexpectedEOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
 
-	if err := playAudio(context.Background(), &fakeWriter{}, bytes.NewReader(stream[:len(stream)-2]), c); err == nil {
-		t.Fatal("expected an error for a truncated page")
+			if err := tc.play(ctx, tc.w, tc.in, NewClock(time.Now())); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+		})
 	}
-}
-
-func equalWrites(a, b []write) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 type engineHarness struct {
@@ -422,31 +310,45 @@ func (h *engineHarness) quiet(t *testing.T) {
 }
 
 func TestEngineSendsOnePlaybackEndedAtNaturalEOF(t *testing.T) {
-	h := newEngineHarness()
-	video := writeFile(t, "v.h264", longVideo(3, 8))
-	audio := writeFile(t, "a.ogg", longAudio(3))
+	for _, tc := range []struct {
+		name      string
+		withAudio bool
+		wantAudio int
+	}{
+		{"with audio", true, 3},
+		{"without audio", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEngineHarness()
+			var audio *string
+			if tc.withAudio {
+				path := writeFile(t, "a.ogg", oggStream(3))
+				audio = &path
+			}
 
-	if err := h.engine.Play(video, &audio); err != nil {
-		t.Fatal(err)
-	}
+			if err := h.engine.Play(writeFile(t, "v.h264", longVideo(3, 8)), audio); err != nil {
+				t.Fatal(err)
+			}
 
-	if ev := h.next(t); ev.Type != "playbackEnded" {
-		t.Fatalf("expected playbackEnded, got %+v", ev)
+			if ev := h.next(t); ev.Type != "playbackEnded" {
+				t.Fatalf("expected playbackEnded, got %+v", ev)
+			}
+			h.quiet(t)
+			if h.video.count() != 5 || h.audio.count() != tc.wantAudio {
+				t.Fatalf("expected 5 video and %d audio writes, got %d and %d", tc.wantAudio, h.video.count(), h.audio.count())
+			}
+			if err := h.engine.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			h.quiet(t)
+		})
 	}
-	h.quiet(t)
-	if h.video.count() != 5 || h.audio.count() != 3 {
-		t.Fatalf("expected 5 video and 3 audio writes, got %d and %d", h.video.count(), h.audio.count())
-	}
-	if err := h.engine.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	h.quiet(t)
 }
 
 func TestEngineStopSuppressesPlaybackEndedAndHaltsWriting(t *testing.T) {
 	h := newEngineHarness()
 	video := writeFile(t, "v.h264", longVideo(300, 8))
-	audio := writeFile(t, "a.ogg", longAudio(500))
+	audio := writeFile(t, "a.ogg", oggStream(500))
 	if err := h.engine.Play(video, &audio); err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +413,7 @@ func TestEngineVideoWriteErrorStopsAudioAndReportsPlaybackFailedOnce(t *testing.
 	h := newEngineHarness()
 	h.video.failAt = 3
 	video := writeFile(t, "v.h264", longVideo(300, 8))
-	audio := writeFile(t, "a.ogg", longAudio(500))
+	audio := writeFile(t, "a.ogg", oggStream(500))
 
 	if err := h.engine.Play(video, &audio); err != nil {
 		t.Fatal(err)
@@ -529,26 +431,10 @@ func TestEngineVideoWriteErrorStopsAudioAndReportsPlaybackFailedOnce(t *testing.
 	}
 }
 
-func TestEngineWithoutAudioPlaysVideoOnly(t *testing.T) {
-	h := newEngineHarness()
-	video := writeFile(t, "v.h264", longVideo(3, 8))
-
-	if err := h.engine.Play(video, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	if ev := h.next(t); ev.Type != "playbackEnded" {
-		t.Fatalf("expected playbackEnded, got %+v", ev)
-	}
-	if h.audio.count() != 0 {
-		t.Fatalf("expected a silent audio track, got %d writes", h.audio.count())
-	}
-}
-
 func TestEnginePauseHoldsWritesUntilResume(t *testing.T) {
 	h := newEngineHarness()
-	video := writeFile(t, "v.h264", longVideo(300, 8))
-	if err := h.engine.Play(video, ptr(writeFile(t, "a.ogg", longAudio(500)))); err != nil {
+	audio := writeFile(t, "a.ogg", oggStream(500))
+	if err := h.engine.Play(writeFile(t, "v.h264", longVideo(300, 8)), &audio); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)

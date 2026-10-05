@@ -3,7 +3,6 @@ package media
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -48,31 +47,30 @@ func (e *Engine) Play(videoPath string, audioPath *string) error {
 		return err
 	}
 	streams := []func(context.Context, *Clock) error{
-		func(ctx context.Context, clock *Clock) error { return playVideo(ctx, e.video, video, clock) },
+		func(ctx context.Context, clock *Clock) error {
+			defer video.Close()
+			return playVideo(ctx, e.video, video, clock)
+		},
 	}
-	files := []io.Closer{video}
 	if audioPath != nil {
 		audio, err := os.Open(*audioPath)
 		if err != nil {
 			_ = video.Close()
 			return err
 		}
-		streams = append(streams, func(ctx context.Context, clock *Clock) error { return playAudio(ctx, e.audio, audio, clock) })
-		files = append(files, audio)
+		streams = append(streams, func(ctx context.Context, clock *Clock) error {
+			defer audio.Close()
+			return playAudio(ctx, e.audio, audio, clock)
+		})
 	}
-	e.cur = e.start(streams, files)
-	return nil
-}
 
-func (e *Engine) start(streams []func(context.Context, *Clock) error, files []io.Closer) *playback {
 	ctx, cancel := context.WithCancel(context.Background())
 	pb := &playback{cancel: cancel, done: make(chan struct{}), clock: NewClock(time.Now())}
 	errs := make(chan error, len(streams))
 	var wg sync.WaitGroup
-	for i, stream := range streams {
+	for _, play := range streams {
 		wg.Go(func() {
-			defer files[i].Close()
-			if err := stream(ctx, pb.clock); err != nil {
+			if err := play(ctx, pb.clock); err != nil {
 				errs <- err
 				cancel()
 			}
@@ -91,7 +89,8 @@ func (e *Engine) start(streams []func(context.Context, *Clock) error, files []io
 		}
 		close(pb.done)
 	}()
-	return pb
+	e.cur = pb
+	return nil
 }
 
 // Pause freezes the current playback. It is a no-op without one.
