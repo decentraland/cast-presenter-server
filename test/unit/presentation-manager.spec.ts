@@ -2135,6 +2135,37 @@ describe('when client composition is enabled and the sidecar publishes', () => {
     })
   })
 
+  describe('and the presenter navigates while the loading broadcast is still in flight', () => {
+    beforeEach(async () => {
+      bakeUntilAborted()
+      await createSession()
+      sidecar.publishData.mockImplementation(async (message: Record<string, unknown>) => {
+        if (message.type !== 'presentation:state' || message.videoState !== 'loading') return
+        sidecar.publishData.mockResolvedValue(undefined)
+        await manager.navigate(presentationId, 'next')
+      })
+      manager.playVideo(presentationId, 0).catch(() => undefined)
+      await flushMicrotasks()
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      await manager.stopPresentation(presentationId)
+    })
+
+    it('should not enqueue a play-priority bake for the slide that was left', () => {
+      expect(components.mediaEncoder.bake).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({ priority: 'play' })
+      )
+    })
+
+    it('should leave the session idle', () => {
+      expect(manager.getState(presentationId)?.videoState).toBe('idle')
+    })
+  })
+
   describe('and the presenter navigates while the bake is pending', () => {
     beforeEach(async () => {
       bakeUntilAborted()

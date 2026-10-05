@@ -792,6 +792,12 @@ export async function createPresentationManager(
       }
     }
 
+    if (!stillWanted()) {
+      if (session.videoState === 'loading') session.videoState = 'idle'
+      await broadcastState(session)
+      return
+    }
+
     const job = ensureBakeJob(session, url, 'play')
     let files: BakeResult
     try {
