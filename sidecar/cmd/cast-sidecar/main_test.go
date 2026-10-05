@@ -252,77 +252,83 @@ func TestRunDropsRoomEventsBeforeReady(t *testing.T) {
 	}
 }
 
-func TestRunPublishesDecodedData(t *testing.T) {
-	f := &fakeRoom{}
-
-	_, events, raw := runLines(t, f, initLine, `{"type":"publishData","id":5,"payloadBase64":"aGVsbG8="}`)
-
-	if len(events) != 2 || events[1]["type"] != "ack" || events[1]["id"] != float64(5) {
-		t.Fatalf("expected ack 5, got %s", raw)
-	}
-	if len(f.published) != 1 || string(f.published[0]) != "hello" {
-		t.Fatalf("expected decoded payload, got %q", f.published)
-	}
+type reply struct {
+	typ, code string
+	id        float64
 }
 
-func TestRunReportsPublishDataErrors(t *testing.T) {
-	f := &fakeRoom{publishErr: errors.New("closed")}
-
-	_, events, raw := runLines(t, f, initLine,
-		`{"type":"publishData","id":6,"payloadBase64":"!!!"}`,
-		`{"type":"publishData","id":7,"payloadBase64":"aGVsbG8="}`,
-	)
-
-	if len(events) != 3 {
-		t.Fatalf("expected 3 events, got %s", raw)
-	}
-	for i, id := range []float64{6, 7} {
-		ev := events[i+1]
-		if ev["type"] != "error" || ev["code"] != "publish-failed" || ev["id"] != id {
-			t.Fatalf("expected publish-failed for id %v, got %v", id, ev)
-		}
-	}
-	if len(f.published) != 1 {
-		t.Fatalf("expected only the valid payload to be published, got %d", len(f.published))
-	}
-}
-
-func TestRunReportsUpdateMetadataErrors(t *testing.T) {
-	f := &fakeRoom{setErr: errors.New("denied")}
-
-	_, events, raw := runLines(t, f, initLine, `{"type":"updateMetadata","id":8,"metadata":"{}"}`)
-
-	if len(events) != 2 || events[1]["code"] != "publish-failed" || events[1]["id"] != float64(8) {
-		t.Fatalf("expected publish-failed for id 8, got %s", raw)
-	}
-}
-
-func TestRunAnswersPlayFailedForAMissingFile(t *testing.T) {
+func TestRunAnswersEveryCommand(t *testing.T) {
 	missing, _ := json.Marshal(filepath.Join(t.TempDir(), "missing.h264"))
+	for _, tc := range []struct {
+		name      string
+		room      *fakeRoom
+		lines     []string
+		want      []reply
+		published []string
+	}{
+		{
+			name:      "publishes decoded data",
+			room:      &fakeRoom{},
+			lines:     []string{`{"type":"publishData","id":5,"payloadBase64":"aGVsbG8="}`},
+			want:      []reply{{"ack", "", 5}},
+			published: []string{"hello"},
+		},
+		{
+			name: "reports undecodable payloads and publish failures",
+			room: &fakeRoom{publishErr: errors.New("closed")},
+			lines: []string{
+				`{"type":"publishData","id":6,"payloadBase64":"!!!"}`,
+				`{"type":"publishData","id":7,"payloadBase64":"aGVsbG8="}`,
+			},
+			want:      []reply{{"error", "publish-failed", 6}, {"error", "publish-failed", 7}},
+			published: []string{"hello"},
+		},
+		{
+			name:  "reports metadata failures",
+			room:  &fakeRoom{setErr: errors.New("denied")},
+			lines: []string{`{"type":"updateMetadata","id":8,"metadata":"{}"}`},
+			want:  []reply{{"error", "publish-failed", 8}},
+		},
+		{
+			name:  "answers play-failed for a missing file",
+			room:  &fakeRoom{},
+			lines: []string{fmt.Sprintf(`{"type":"play","id":10,"videoPath":%s,"audioPath":null}`, missing)},
+			want:  []reply{{"error", "play-failed", 10}},
+		},
+		{
+			name:  "acks pause, resume and stop without a playback",
+			room:  &fakeRoom{},
+			lines: []string{`{"type":"pause","id":11}`, `{"type":"resume","id":12}`, `{"type":"stop","id":13}`},
+			want:  []reply{{"ack", "", 11}, {"ack", "", 12}, {"ack", "", 13}},
+		},
+		{
+			name:  "rejects unknown commands",
+			room:  &fakeRoom{},
+			lines: []string{`{"type":"seek","id":14}`, `{"type":"init","id":15}`},
+			want:  []reply{{"error", "bad-command", 14}, {"error", "bad-command", 15}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, events, raw := runLines(t, tc.room, append([]string{initLine}, tc.lines...)...)
 
-	_, events, raw := runLines(t, &fakeRoom{}, initLine,
-		fmt.Sprintf(`{"type":"play","id":10,"videoPath":%s,"audioPath":null}`, missing),
-	)
-
-	if len(events) != 2 || events[1]["type"] != "error" || events[1]["code"] != "play-failed" || events[1]["id"] != float64(10) {
-		t.Fatalf("expected play-failed for id 10, got %s", raw)
-	}
-}
-
-func TestRunAcksPauseResumeAndStopWithoutPlayback(t *testing.T) {
-	_, events, raw := runLines(t, &fakeRoom{}, initLine,
-		`{"type":"pause","id":11}`,
-		`{"type":"resume","id":12}`,
-		`{"type":"stop","id":13}`,
-	)
-
-	if len(events) != 4 {
-		t.Fatalf("expected 4 events, got %s", raw)
-	}
-	for i, id := range []float64{11, 12, 13} {
-		if ev := events[i+1]; ev["type"] != "ack" || ev["id"] != id {
-			t.Fatalf("expected ack for id %v, got %v", id, ev)
-		}
+			if len(events) != len(tc.want)+1 {
+				t.Fatalf("expected %d events, got %s", len(tc.want)+1, raw)
+			}
+			for i, want := range tc.want {
+				ev := events[i+1]
+				if ev["type"] != want.typ || ev["id"] != want.id || (want.code != "" && ev["code"] != want.code) {
+					t.Fatalf("expected %+v, got %v", want, ev)
+				}
+			}
+			if len(tc.room.published) != len(tc.published) {
+				t.Fatalf("expected %d published payloads, got %q", len(tc.published), tc.room.published)
+			}
+			for i, want := range tc.published {
+				if string(tc.room.published[i]) != want {
+					t.Fatalf("expected published %q, got %q", want, tc.room.published[i])
+				}
+			}
+		})
 	}
 }
 
@@ -331,16 +337,10 @@ func TestRunPlaysABakedFileToItsEnd(t *testing.T) {
 
 	s.send(t, playLine(t, 20, 3))
 
-	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(20) {
-		t.Fatalf("expected ack 20, got %v", ev)
-	}
-	if ev := s.next(t); ev["type"] != "playbackEnded" {
-		t.Fatalf("expected playbackEnded, got %v", ev)
-	}
+	s.expectEvent(t, "ack", 20)
+	s.expectEvent(t, "playbackEnded", 0)
 	s.send(t, `{"type":"shutdown","id":21}`)
-	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(21) {
-		t.Fatalf("expected ack 21, got %v", ev)
-	}
+	s.expectEvent(t, "ack", 21)
 	if code := s.exitCode(t); code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -350,15 +350,11 @@ func TestRunShutdownStopsAPlaybackWithoutPlaybackEnded(t *testing.T) {
 	f := &fakeRoom{}
 	s := startHarness(t, f)
 	s.send(t, playLine(t, 30, 300))
-	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(30) {
-		t.Fatalf("expected ack 30, got %v", ev)
-	}
+	s.expectEvent(t, "ack", 30)
 
 	s.send(t, `{"type":"shutdown","id":31}`)
 
-	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(31) {
-		t.Fatalf("expected ack 31, got %v", ev)
-	}
+	s.expectEvent(t, "ack", 31)
 	if code := s.exitCode(t); code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -382,20 +378,6 @@ func playLine(t *testing.T, id, frames int) string {
 	}
 	quoted, _ := json.Marshal(path)
 	return fmt.Sprintf(`{"type":"play","id":%d,"videoPath":%s,"audioPath":null}`, id, quoted)
-}
-
-func TestRunRejectsUnknownCommands(t *testing.T) {
-	_, events, raw := runLines(t, &fakeRoom{}, initLine, `{"type":"seek","id":14}`, `{"type":"init","id":15}`)
-
-	if len(events) != 3 {
-		t.Fatalf("expected 3 events, got %s", raw)
-	}
-	for i, id := range []float64{14, 15} {
-		ev := events[i+1]
-		if ev["type"] != "error" || ev["code"] != "bad-command" || ev["id"] != id {
-			t.Fatalf("expected bad-command for id %v, got %v", id, ev)
-		}
-	}
 }
 
 func TestRunDisconnectsOnStdinEOFAfterInit(t *testing.T) {
@@ -456,10 +438,15 @@ func startHarness(t *testing.T, f *fakeRoom) *harness {
 	}()
 	t.Cleanup(func() { _ = inW.Close() })
 	s.send(t, initLine)
-	if ev := s.next(t); ev["type"] != "ready" {
-		t.Fatalf("expected ready, got %v", ev)
-	}
+	s.expectEvent(t, "ready", 0)
 	return s
+}
+
+func (s *harness) expectEvent(t *testing.T, typ string, id float64) {
+	t.Helper()
+	if ev := s.next(t); ev["type"] != typ || (id != 0 && ev["id"] != id) {
+		t.Fatalf("expected %s %v, got %v", typ, id, ev)
+	}
 }
 
 func (s *harness) send(t *testing.T, line string) {
@@ -511,14 +498,6 @@ func TestRunForwardsRoomEvents(t *testing.T) {
 	f.ev.OnParticipantCount(0)
 	if ev := s.next(t); ev["type"] != "participantCount" || ev["count"] != float64(0) {
 		t.Fatalf("unexpected participantCount: %v", ev)
-	}
-
-	s.send(t, `{"type":"shutdown","id":9}`)
-	if ev := s.next(t); ev["type"] != "ack" || ev["id"] != float64(9) {
-		t.Fatalf("expected ack 9, got %v", ev)
-	}
-	if code := s.exitCode(t); code != 0 {
-		t.Fatalf("expected exit 0, got %d", code)
 	}
 }
 
