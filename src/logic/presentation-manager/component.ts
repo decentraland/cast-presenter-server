@@ -950,8 +950,9 @@ export async function createPresentationManager(
     const compositorLogger = logs.getLogger(`video-compositor:${session.id}`)
     const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
 
-    let videoPath = session.cachedVideoPaths.get(videoInfo.url)
-    if (!videoPath || !fs.existsSync(videoPath)) {
+    const embeddedPath = mediaEncoder.resolveEmbeddedVideo(videoInfo.url)?.path
+    let videoPath = embeddedPath ?? session.cachedVideoPaths.get(videoInfo.url)
+    if (!videoPath || (!embeddedPath && !fs.existsSync(videoPath))) {
       if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
         compositor.cleanup()
         session.videoState = 'error'
@@ -963,7 +964,6 @@ export async function createPresentationManager(
         logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
         return
       }
-      // Download before playback — FFmpeg must only use file protocol
       try {
         const result = await compositor.downloadVideo(videoInfo.url, session.abortController.signal)
         if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {

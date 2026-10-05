@@ -765,6 +765,40 @@ describe('when managing video playback in a presentation', () => {
     })
   })
 
+  describe('when playing a video embedded in the PPTX', () => {
+    const embeddedPath = '/tmp/cast-pptx-video-abc/media1.mp4'
+
+    beforeEach(async () => {
+      compositor = createMockCompositor()
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      components.videoCompositor.createCompositor.mockReturnValue(compositor)
+      components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((url: string) =>
+        url === embeddedPath ? { path: embeddedPath, bytes: 5 } : null
+      )
+
+      const renderer = createMockRenderer()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: embeddedPath, geometry: { x: 100, y: 100, width: 640, height: 480 } }
+      ])
+      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+
+      const result = await createManagerWithSession(components)
+      manager = result.manager
+      presentationId = result.info.id
+      compositor.downloadVideo.mockClear()
+
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should play the extracted file without downloading it', () => {
+      expect({
+        downloaded: compositor.downloadVideo.mock.calls.length,
+        playedPath: compositor.startPlayback.mock.calls[0]?.[0]
+      }).toEqual({ downloaded: 0, playedPath: embeddedPath })
+    })
+  })
+
   describe('when managing audio during video playback', () => {
     describe('when playing a video', () => {
       beforeEach(async () => {
