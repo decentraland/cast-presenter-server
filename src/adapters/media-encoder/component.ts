@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import type { BakeResult, IMediaEncoder } from './types'
+import type { BakePriority, BakeResult, IMediaEncoder } from './types'
 import type { AppComponents } from '../../types'
 
 const PROBE_TIMEOUT_MS = 30_000
@@ -18,16 +18,13 @@ const SCALE_FILTER =
 interface QueueEntry {
   run: () => Promise<void>
   signal: AbortSignal
+  priority: BakePriority
 }
 
 interface ProcessOutcome {
   code: number | null
   stdout: string
   stderr: string
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error('Aborted')
 }
 
 function probeArgs(sourcePath: string): string[] {
@@ -116,7 +113,7 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
  * Creates the process-wide media encoder. Register it once: its queue is what bounds baking to one ffmpeg.
  *
  * Each bake runs in order:
- * 1. wait in the play or prefetch queue until nothing else is baking (play first);
+ * 1. wait in the queue until nothing else is baking (play requests first);
  * 2. probe the source for an audio stream with ffprobe;
  * 3. encode it with a niced ffmpeg into `bake-<uuid>.h264` and, when audio exists, `bake-<uuid>.ogg`;
  * 4. on any failure, timeout or abort, SIGKILL the process, delete the partial outputs and reject.
@@ -124,14 +121,16 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
  * @param components - `logs` for the `media-encoder` logger.
  * @returns the media encoder.
  */
-export function createMediaEncoderComponent(components: Pick<AppComponents, 'logs'>): IMediaEncoder {
+export async function createMediaEncoderComponent(components: Pick<AppComponents, 'logs'>): Promise<IMediaEncoder> {
   const logger = components.logs.getLogger('media-encoder')
-  const playQueue: QueueEntry[] = []
-  const prefetchQueue: QueueEntry[] = []
+  const queue: QueueEntry[] = []
   let running = false
 
   function queueLengths(): Record<string, number> {
-    return { playQueue: playQueue.length, prefetchQueue: prefetchQueue.length }
+    return {
+      playQueue: queue.filter((entry) => entry.priority === 'play').length,
+      prefetchQueue: queue.filter((entry) => entry.priority === 'prefetch').length
+    }
   }
 
   function removeQuietly(filePath: string): void {
@@ -149,31 +148,25 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
     timeoutMs: number,
     timeoutMessage: string
   ): Promise<ProcessOutcome> {
-    if (signal.aborted) return Promise.reject(abortReason(signal))
+    signal.throwIfAborted()
     return new Promise((resolve, reject) => {
       const proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = ''
       let stderr = ''
-      let settled = false
       let failure: { reason: unknown } | null = null
 
       const kill = (reason: unknown): void => {
         failure = { reason }
         proc.kill('SIGKILL')
       }
-      const onAbort = (): void => kill(abortReason(signal))
+      const onAbort = (): void => kill(signal.reason)
       const timeout = setTimeout(() => kill(new Error(timeoutMessage)), timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
 
       const settle = (finish: () => void): void => {
-        if (settled) return
-        settled = true
         clearTimeout(timeout)
         signal.removeEventListener('abort', onAbort)
         finish()
-      }
-      const onStreamError = (err: Error): void => {
-        logger.warn('Bake process stream error', { command, error: err.message })
       }
 
       proc.stdout?.on('data', (chunk: Buffer) => {
@@ -182,8 +175,9 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
       proc.stderr?.on('data', (chunk: Buffer) => {
         stderr = (stderr + chunk.toString()).slice(-STDERR_TAIL_CHARS)
       })
-      proc.stdout?.on('error', onStreamError)
-      proc.stderr?.on('error', onStreamError)
+      for (const stream of [proc.stdout, proc.stderr]) {
+        stream?.on('error', (err: Error) => logger.warn('Bake process stream error', { command, error: err.message }))
+      }
       proc.on('close', (code: number | null) =>
         settle(() => (failure ? reject(failure.reason) : resolve({ code, stdout, stderr })))
       )
@@ -207,10 +201,8 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
     const id = randomUUID()
     const videoPath = path.join(outDir, `bake-${id}.h264`)
     const audioOutput = path.join(outDir, `bake-${id}.ogg`)
-    let hasAudio = false
     try {
-      hasAudio = await probeAudio(sourcePath, signal)
-      const audioPath = hasAudio ? audioOutput : null
+      const audioPath = (await probeAudio(sourcePath, signal)) ? audioOutput : null
       const { code, stderr } = await runProcess(
         'nice',
         bakeArgs(sourcePath, videoPath, audioPath),
@@ -223,25 +215,15 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
       return { videoPath, audioPath, bytes }
     } catch (err) {
       removeQuietly(videoPath)
-      if (hasAudio) removeQuietly(audioOutput)
+      removeQuietly(audioOutput)
       throw err
     }
   }
 
-  function removeQueued(entry: QueueEntry): boolean {
-    for (const queue of [playQueue, prefetchQueue]) {
-      const index = queue.indexOf(entry)
-      if (index !== -1) {
-        queue.splice(index, 1)
-        return true
-      }
-    }
-    return false
-  }
-
   function pump(): void {
     if (running) return
-    const next = playQueue.shift() ?? prefetchQueue.shift()
+    const playIndex = queue.findIndex((entry) => entry.priority === 'play')
+    const [next] = queue.splice(playIndex === -1 ? 0 : playIndex, 1)
     if (!next) return
     running = true
     const release = (): void => {
@@ -252,14 +234,18 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
   }
 
   return {
-    bake(sourcePath, outDir, { priority, signal }) {
-      if (signal.aborted) return Promise.reject(abortReason(signal))
+    async bake(sourcePath, outDir, { priority, signal }) {
+      signal.throwIfAborted()
       return new Promise<BakeResult>((resolve, reject) => {
         const onQueuedAbort = (): void => {
-          if (removeQueued(entry)) reject(abortReason(signal))
+          const index = queue.indexOf(entry)
+          if (index === -1) return
+          queue.splice(index, 1)
+          reject(signal.reason)
         }
         const entry: QueueEntry = {
           signal,
+          priority,
           run: async () => {
             signal.removeEventListener('abort', onQueuedAbort)
             const startedAt = Date.now()
@@ -283,20 +269,17 @@ export function createMediaEncoderComponent(components: Pick<AppComponents, 'log
           }
         }
         signal.addEventListener('abort', onQueuedAbort, { once: true })
-        ;(priority === 'play' ? playQueue : prefetchQueue).push(entry)
+        queue.push(entry)
         pump()
       })
     },
 
     promote(signal) {
-      for (const queue of [playQueue, prefetchQueue]) {
-        const index = queue.findIndex((entry) => entry.signal === signal)
-        if (index !== -1) {
-          const [entry] = queue.splice(index, 1)
-          playQueue.unshift(entry)
-          return
-        }
-      }
+      const index = queue.findIndex((entry) => entry.signal === signal)
+      if (index === -1) return
+      const [entry] = queue.splice(index, 1)
+      entry.priority = 'play'
+      queue.unshift(entry)
     },
 
     resolveEmbeddedVideo(url) {
