@@ -526,7 +526,7 @@ export async function createPresentationManager(
           break
         }
         if (session.cachedVideoPaths.has(url)) continue
-        if (mediaEncoder.resolveEmbeddedVideo(url)) continue
+        if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir())) continue
         if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
           logger.info(
             `Pre-download stopped: session disk quota reached (${session.bytesDownloaded}/${SESSION_DISK_QUOTA_BYTES} bytes)`
@@ -656,7 +656,7 @@ export async function createPresentationManager(
     job: Pick<BakeJob, 'abort' | 'priority'>
   ): Promise<BakeResult> {
     const { signal } = job.abort
-    const embedded = mediaEncoder.resolveEmbeddedVideo(url)
+    const embedded = mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir())
     const source = embedded ?? (await downloadForBake(session, url, signal))
     let result: BakeResult
     try {
@@ -957,7 +957,7 @@ export async function createPresentationManager(
     const compositorLogger = logs.getLogger(`video-compositor:${session.id}`)
     const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
 
-    const embeddedPath = mediaEncoder.resolveEmbeddedVideo(videoInfo.url)?.path
+    const embeddedPath = mediaEncoder.resolveEmbeddedVideo(videoInfo.url, session.renderer.getEmbeddedMediaDir())?.path
     let videoPath = embeddedPath ?? session.cachedVideoPaths.get(videoInfo.url)
     if (!videoPath || (!embeddedPath && !fs.existsSync(videoPath))) {
       if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {

@@ -401,12 +401,15 @@ describe('when using the media encoder', () => {
 
   describe('and an embedded video is resolved', () => {
     let embeddedDir: string
+    let otherSessionDir: string
     let otherDir: string
 
     beforeEach(() => {
       embeddedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-pptx-video-'))
+      otherSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-pptx-video-'))
       otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cast-other-'))
       fs.writeFileSync(path.join(embeddedDir, 'clip.mp4'), Buffer.alloc(42))
+      fs.writeFileSync(path.join(otherSessionDir, 'clip.mp4'), Buffer.alloc(42))
       fs.writeFileSync(path.join(otherDir, 'clip.mp4'), Buffer.alloc(42))
       fs.mkdirSync(path.join(embeddedDir, 'sub'))
       fs.writeFileSync(path.join(embeddedDir, 'sub', 'f'), Buffer.alloc(1))
@@ -414,49 +417,62 @@ describe('when using the media encoder', () => {
 
     afterEach(() => {
       fs.rmSync(embeddedDir, { recursive: true, force: true })
+      fs.rmSync(otherSessionDir, { recursive: true, force: true })
       fs.rmSync(otherDir, { recursive: true, force: true })
     })
 
-    describe('and the file sits directly in a PPTX media directory', () => {
+    describe('and the file sits directly in the given media directory', () => {
       it('should return its real path and size', () => {
-        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'clip.mp4'))).toEqual({
+        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'clip.mp4'), embeddedDir)).toEqual({
           path: fs.realpathSync(path.join(embeddedDir, 'clip.mp4')),
           bytes: 42
         })
       })
     })
 
+    describe('and the file sits in another renderer media directory', () => {
+      it('should return null', () => {
+        expect(encoder.resolveEmbeddedVideo(path.join(otherSessionDir, 'clip.mp4'), embeddedDir)).toBeNull()
+      })
+    })
+
+    describe('and the renderer has no media directory', () => {
+      it('should return null', () => {
+        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'clip.mp4'), null)).toBeNull()
+      })
+    })
+
     describe('and the url is an https link', () => {
       it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo('https://example.com/v.mp4')).toBeNull()
+        expect(encoder.resolveEmbeddedVideo('https://example.com/v.mp4', embeddedDir)).toBeNull()
       })
     })
 
     describe('and the file is in another tmp directory', () => {
       it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo(path.join(otherDir, 'clip.mp4'))).toBeNull()
+        expect(encoder.resolveEmbeddedVideo(path.join(otherDir, 'clip.mp4'), embeddedDir)).toBeNull()
       })
     })
 
     describe('and the file is outside the tmp directory', () => {
       it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo('/etc/hosts')).toBeNull()
+        expect(encoder.resolveEmbeddedVideo('/etc/hosts', embeddedDir)).toBeNull()
       })
     })
 
-    describe('and the file is nested below the PPTX media directory', () => {
+    describe('and the file is nested below the media directory', () => {
       it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'sub', 'f'))).toBeNull()
+        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'sub', 'f'), embeddedDir)).toBeNull()
       })
     })
 
-    describe('and the path is a symlink in the PPTX media directory pointing outside it', () => {
+    describe('and the path is a symlink in the media directory pointing outside it', () => {
       beforeEach(() => {
         fs.symlinkSync('/etc/hosts', path.join(embeddedDir, 'link.mp4'))
       })
 
       it('should return null', () => {
-        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'link.mp4'))).toBeNull()
+        expect(encoder.resolveEmbeddedVideo(path.join(embeddedDir, 'link.mp4'), embeddedDir)).toBeNull()
       })
     })
   })

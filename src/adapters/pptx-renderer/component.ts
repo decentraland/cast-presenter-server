@@ -752,6 +752,10 @@ function createRenderer(): IRenderer {
       return videos
     },
 
+    getEmbeddedMediaDir(): string | null {
+      return embeddedVideoDir
+    },
+
     getSlideCount(): number {
       if (!parser) throw new Error('PPTX not initialized')
       return parser.getSlideCount()

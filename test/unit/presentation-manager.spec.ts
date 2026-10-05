@@ -46,6 +46,7 @@ function createMockRenderer(): jest.Mocked<IRenderer> {
     initialize: jest.fn().mockResolvedValue(undefined),
     renderSlide: jest.fn().mockResolvedValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080 }),
     getSlideVideos: jest.fn().mockResolvedValue([]),
+    getEmbeddedMediaDir: jest.fn().mockReturnValue(null),
     getSlideCount: jest.fn().mockReturnValue(3),
     destroy: jest.fn()
   }

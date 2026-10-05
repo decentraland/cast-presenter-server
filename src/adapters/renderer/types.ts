@@ -20,6 +20,8 @@ export interface IRenderer {
   initialize(fileBuffer: Buffer): Promise<void>
   renderSlide(index: number): Promise<RenderResult>
   getSlideVideos(index: number): Promise<SlideVideoInfo[]>
+  /** @returns the directory this renderer extracted embedded media into, or null when it extracts none. */
+  getEmbeddedMediaDir(): string | null
   getSlideCount(): number
   destroy(): void
 }

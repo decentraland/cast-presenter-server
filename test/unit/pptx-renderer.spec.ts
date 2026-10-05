@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as path from 'path'
 import { createPptxRendererComponent } from '../../src/adapters/pptx-renderer/component'
 import type { IRenderer } from '../../src/adapters/renderer/types'
 
@@ -47,6 +48,10 @@ describe('when a PPTX slide carries an embedded video', () => {
 
   afterEach(() => {
     renderer.destroy()
+  })
+
+  it('should report the directory it extracted into as its embedded media directory', () => {
+    expect(renderer.getEmbeddedMediaDir()).toBe(path.dirname(extractedPath))
   })
 
   describe('and the slide is requested again while the extracted file is being consumed', () => {
