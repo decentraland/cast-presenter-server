@@ -319,7 +319,7 @@ export async function createPresentationManager(
     const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
     const sidecar = clientComposition ? sidecarPublisher.createPublisher(id, publisherLogger) : null
     const publisher: ILiveKitPublisher = sidecar ?? liveKitPublisher.createPublisher(id, publisherLogger)
-    if (sidecar) registerSidecarEvents(id, sidecar)
+    const unhandledSidecarFatal = sidecar ? registerSidecarEvents(id, sidecar) : null
 
     let renderer: IRenderer | null = null
     let tempDir: string | null = null
@@ -443,6 +443,9 @@ export async function createPresentationManager(
         sidecar,
         bakeJobs: new Map()
       }
+
+      const fatalReason = unhandledSidecarFatal?.()
+      if (fatalReason) throw new Error(`Sidecar failed before the session started: ${fatalReason}`)
 
       sessions.set(id, session)
       if (firstSlideImage) rememberSlideImage(session, firstSlideImage)
@@ -576,7 +579,9 @@ export async function createPresentationManager(
     }
   }
 
-  function registerSidecarEvents(id: string, sidecar: ISidecarPublisher): void {
+  /** @returns the reason of a fatal that fired before the session was registered, or null. */
+  function registerSidecarEvents(id: string, sidecar: ISidecarPublisher): () => string | null {
+    let unhandledFatal: string | null = null
     const onFailure = (err: unknown): void => {
       logger.warn(`Sidecar event handling failed for ${id}: ${errorMessage(err)}`)
     }
@@ -592,7 +597,9 @@ export async function createPresentationManager(
       logger.error(`Sidecar failed for presentation ${id}: ${reason}`)
       const session = sessions.get(id)
       if (session) stopSession(session).catch(onFailure)
+      else unhandledFatal = reason
     })
+    return () => unhandledFatal
   }
 
   async function endSidecarPlayback(session: InternalSession): Promise<void> {

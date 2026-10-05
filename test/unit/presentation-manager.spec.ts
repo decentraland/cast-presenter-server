@@ -1842,6 +1842,23 @@ describe('when client composition is enabled and the sidecar publishes', () => {
     })
   })
 
+  describe('and the sidecar dies before the session is registered', () => {
+    beforeEach(() => {
+      sidecar.connect.mockImplementation(async () => {
+        sidecar.onFatal.mock.calls[0][0]('sidecar exited with status 1')
+      })
+    })
+
+    it('should reject the creation with the fatal reason', async () => {
+      await expect(createSession()).rejects.toThrow('sidecar exited with status 1')
+    })
+
+    it('should disconnect the sidecar instead of leaving it running', async () => {
+      await createSession().catch(() => undefined)
+      expect(sidecar.disconnect).toHaveBeenCalled()
+    })
+  })
+
   describe('and the presenter plays video 0', () => {
     beforeEach(async () => {
       await createSession()
