@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { errorMessage } from '../error-message'
 import { FILE_TYPES } from '../file-validator'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
 import { removeQuietly } from '../remove-quietly'
@@ -226,7 +227,7 @@ export async function createPresentationManager(
           await stopSession(session)
           metrics.increment('idle_session_cleanups_total')
         } catch (err) {
-          logger.warn(`Failed to stop idle session ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to stop idle session ${id}: ${errorMessage(err)}`)
         }
       }
     }
@@ -240,7 +241,7 @@ export async function createPresentationManager(
     try {
       await publisher.connect(livekitUrl, livekitToken)
     } catch (err) {
-      throw new InvalidLivekitCredentialsError(err instanceof Error ? err.message : String(err))
+      throw new InvalidLivekitCredentialsError(errorMessage(err))
     } finally {
       await publisher.disconnect().catch(() => {
         /* best-effort cleanup */
@@ -265,12 +266,12 @@ export async function createPresentationManager(
         ...state
       })
     } catch (err) {
-      logger.warn(`Failed to broadcast state: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`Failed to broadcast state: ${errorMessage(err)}`)
     }
     try {
       await session.publisher.updateMetadataState(state)
     } catch (err) {
-      logger.warn(`Failed to update metadata: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`Failed to update metadata: ${errorMessage(err)}`)
     }
   }
 
@@ -295,7 +296,7 @@ export async function createPresentationManager(
         ...(context?.videoUrl !== undefined ? { videoUrl: context.videoUrl } : {})
       })
     } catch (err) {
-      logger.warn(`Failed to broadcast error: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`Failed to broadcast error: ${errorMessage(err)}`)
     }
   }
 
@@ -384,7 +385,7 @@ export async function createPresentationManager(
               break
           }
         } catch (err) {
-          logger.warn(`Data channel command failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Data channel command failed: ${errorMessage(err)}`)
         }
       })
 
@@ -457,15 +458,13 @@ export async function createPresentationManager(
 
       if (sidecar) {
         prefetchBakes(session).catch((err) => {
-          logger.warn(`Prefetch bakes failed for ${id}: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Prefetch bakes failed for ${id}: ${errorMessage(err)}`)
         })
       } else {
         session.preDownloadTimer = setTimeout(() => {
           session.preDownloadTimer = null
           preDownloadVideos(session).catch((err) => {
-            logger.warn(
-              `Background video pre-download failed for ${id}: ${err instanceof Error ? err.message : String(err)}`
-            )
+            logger.warn(`Background video pre-download failed for ${id}: ${errorMessage(err)}`)
           })
         }, 3000)
       }
@@ -552,7 +551,7 @@ export async function createPresentationManager(
             logger.info('Pre-download aborted')
             break
           }
-          logger.warn(`Failed to pre-download video: ${url} — ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to pre-download video: ${url} — ${errorMessage(err)}`)
         }
       }
       logger.info(`Pre-download queue complete. Cached: ${session.cachedVideoPaths.size} videos`)
@@ -579,7 +578,7 @@ export async function createPresentationManager(
 
   function registerSidecarEvents(id: string, sidecar: ISidecarPublisher): void {
     const onFailure = (err: unknown): void => {
-      logger.warn(`Sidecar event handling failed for ${id}: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`Sidecar event handling failed for ${id}: ${errorMessage(err)}`)
     }
     sidecar.onPlaybackEnded(() => {
       const session = sessions.get(id)
@@ -706,7 +705,7 @@ export async function createPresentationManager(
     for (const url of [...urls].slice(0, MAX_PRE_DOWNLOADS)) {
       if (signal.aborted || !sessions.has(session.id)) return
       await ensureBakeJob(session, url, 'prefetch').promise.catch((err) => {
-        logger.warn(`Prefetch bake failed: ${url} — ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Prefetch bake failed: ${url} — ${errorMessage(err)}`)
       })
     }
   }
@@ -766,7 +765,7 @@ export async function createPresentationManager(
       }
       if (!stillWanted()) {
         await sidecar.stopVideo().catch((err) => {
-          logger.warn(`Sidecar stop after resume failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Sidecar stop after resume failed: ${errorMessage(err)}`)
         })
         if (session.videoState === 'loading') session.videoState = 'idle'
         await broadcastState(session)
@@ -798,7 +797,7 @@ export async function createPresentationManager(
       session.videoErrorReason = info.message
       await broadcastError(session, info.code, info.message, { videoIndex })
       await broadcastState(session)
-      logger.warn(`Video bake failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`Video bake failed for ${session.id}: ${errorMessage(err)}`)
       return
     }
 
@@ -815,7 +814,7 @@ export async function createPresentationManager(
     }
     if (!stillWanted()) {
       await sidecar.stopVideo().catch((err) => {
-        logger.warn(`Sidecar stop after play failed: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Sidecar stop after play failed: ${errorMessage(err)}`)
       })
       return
     }
@@ -864,7 +863,7 @@ export async function createPresentationManager(
         cancelPendingBake(session)
         if (session.videoState === 'loading' || session.videoState === 'playing' || session.videoState === 'paused') {
           await session.sidecar.stopVideo().catch((err) => {
-            logger.warn(`Sidecar stop on navigate failed: ${err instanceof Error ? err.message : String(err)}`)
+            logger.warn(`Sidecar stop on navigate failed: ${errorMessage(err)}`)
           })
         }
       }
@@ -980,7 +979,7 @@ export async function createPresentationManager(
         session.videoErrorReason = info.message
         await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
         await broadcastState(session)
-        logger.warn(`Video download failed for ${session.id}: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Video download failed for ${session.id}: ${errorMessage(err)}`)
         return
       }
     } else {
@@ -1010,9 +1009,7 @@ export async function createPresentationManager(
       try {
         await session.publisher.startAudioPublishing(48000, 2)
       } catch (err) {
-        logger.warn(
-          `Failed to start audio publishing for ${session.id}: ${err instanceof Error ? err.message : String(err)}`
-        )
+        logger.warn(`Failed to start audio publishing for ${session.id}: ${errorMessage(err)}`)
       }
     }
 
@@ -1272,23 +1269,23 @@ export async function createPresentationManager(
       try {
         await session.publisher.publishData({ type: 'presentation:stopped', id: session.id })
       } catch (err) {
-        logger.warn(`Failed to broadcast stop event: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Failed to broadcast stop event: ${errorMessage(err)}`)
       }
 
       try {
         await session.publisher.disconnect()
       } catch (err) {
-        logger.warn(`Failed to disconnect publisher: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Failed to disconnect publisher: ${errorMessage(err)}`)
       }
       try {
         session.renderer.destroy()
       } catch (err) {
-        logger.warn(`Failed to destroy renderer: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Failed to destroy renderer: ${errorMessage(err)}`)
       }
       try {
         videoCompositor.destroyTempDir(session.tempDir)
       } catch (err) {
-        logger.warn(`Failed to remove temp dir: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`Failed to remove temp dir: ${errorMessage(err)}`)
       }
 
       logger.info(`Presentation ${session.id} stopped and cleaned up`)
@@ -1390,7 +1387,7 @@ export async function createPresentationManager(
     async [START_COMPONENT](): Promise<void> {
       idleCheckInterval = setInterval(() => {
         cleanupIdleSessions().catch((err) => {
-          logger.warn(`Idle cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Idle cleanup failed: ${errorMessage(err)}`)
         })
       }, IDLE_CHECK_INTERVAL_MS)
       logger.info('Presentation manager started', { maxConcurrent })
@@ -1405,7 +1402,7 @@ export async function createPresentationManager(
         try {
           await stopSession(session)
         } catch (err) {
-          logger.warn(`Failed to stop session during shutdown: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to stop session during shutdown: ${errorMessage(err)}`)
         }
       }
       logger.info('Presentation manager stopped')

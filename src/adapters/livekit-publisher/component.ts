@@ -14,8 +14,8 @@ import {
 } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { decodePresentationPacket, encodePresentationPacket, parsePresentersFromRoomMetadata } from './comms'
+import { errorMessage } from '../../logic/error-message'
 import type { ILiveKitPublisher, ILiveKitPublisherComponent } from './types'
-import type { RemoteTrack } from '@livekit/rtc-node'
 
 function createPublisher(presentationId: string, logger: ILoggerComponent.ILogger): ILiveKitPublisher {
   let room: Room | null = null
@@ -187,13 +187,13 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
         try {
           await track.close(true)
         } catch (err) {
-          logger.warn(`Failed to close audio track: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to close audio track: ${errorMessage(err)}`)
         }
       } else if (source) {
         try {
           await source.close()
         } catch (err) {
-          logger.warn(`Failed to close audio source: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to close audio source: ${errorMessage(err)}`)
         }
       }
     },
@@ -240,7 +240,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
         try {
           await videoTrack.close(true)
         } catch (err) {
-          logger.warn(`Failed to close video track: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to close video track: ${errorMessage(err)}`)
         }
         videoTrack = null
         videoSource = null
@@ -248,7 +248,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
         try {
           await videoSource.close()
         } catch (err) {
-          logger.warn(`Failed to close video source: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(`Failed to close video source: ${errorMessage(err)}`)
         }
         videoSource = null
       }

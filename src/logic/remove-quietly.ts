@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { errorMessage } from './error-message'
 
 /**
  * Deletes a file if it exists, logging instead of throwing when the delete fails.
@@ -11,6 +12,6 @@ export function removeQuietly(filePath: string, logger: ILoggerComponent.ILogger
   try {
     fs.rmSync(filePath, { force: true })
   } catch (err) {
-    logger.warn('Failed to remove file', { filePath, error: err instanceof Error ? err.message : String(err) })
+    logger.warn('Failed to remove file', { filePath, error: errorMessage(err) })
   }
 }

@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { errorMessage } from '../../logic/error-message'
 import { removeQuietly } from '../../logic/remove-quietly'
 import type { BakePriority, BakeResult, IMediaEncoder } from './types'
 import type { AppComponents } from '../../types'
@@ -254,7 +255,7 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
             } catch (err) {
               logger.info('Bake did not finish', {
                 durationMs: Date.now() - startedAt,
-                error: err instanceof Error ? err.message : String(err),
+                error: errorMessage(err),
                 ...queueLengths()
               })
               reject(err)

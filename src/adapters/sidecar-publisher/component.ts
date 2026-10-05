@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { errorMessage } from '../../logic/error-message'
 import {
   decodePresentationPacket,
   encodePresentationPacket,
@@ -46,10 +47,6 @@ interface Settler {
 
 function redact(text: string): string {
   return text.replace(/access_token=[^&\s]+/g, 'access_token=REDACTED')
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function parseEvent(line: string): SidecarEvent | null {
