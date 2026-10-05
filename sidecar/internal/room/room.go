@@ -99,35 +99,19 @@ func Connect(url, token, presentationID string, ev Events) (*Room, error) {
 		return nil, wrap(ErrConnect, err)
 	}
 
-	metadata, err := json.Marshal(botMetadata{Role: "presentation", PresentationID: presentationID})
-	if err != nil {
-		r.lk.Disconnect()
-		return nil, wrap(ErrPublish, err)
-	}
+	metadata, _ := json.Marshal(botMetadata{Role: "presentation", PresentationID: presentationID})
 	if err := r.SetMetadata(string(metadata)); err != nil {
 		r.lk.Disconnect()
 		return nil, err
 	}
-	if err := r.publishPlaybackTracks(ctx); err != nil {
-		r.lk.Disconnect()
-		return nil, wrap(ErrPublish, err)
-	}
-	return r, nil
-}
 
-func (r *Room) serialized(notify func()) {
-	r.notify.Lock()
-	defer r.notify.Unlock()
-	notify()
-}
-
-func (r *Room) publishPlaybackTracks(ctx context.Context) error {
 	video, err := r.publish(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeH264,
 		ClockRate: 90000,
 	}, videoTrackName, livekit.TrackSource_SCREEN_SHARE)
 	if err != nil {
-		return err
+		r.lk.Disconnect()
+		return nil, wrap(ErrPublish, err)
 	}
 	audio, err := r.publish(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
@@ -135,13 +119,21 @@ func (r *Room) publishPlaybackTracks(ctx context.Context) error {
 		Channels:  2,
 	}, audioTrackName, livekit.TrackSource_SCREEN_SHARE_AUDIO)
 	if err != nil {
-		return err
+		r.lk.Disconnect()
+		return nil, wrap(ErrPublish, err)
 	}
 	if err := writeBlackKeyframe(ctx, video, func() bool { return video.IsBound() && r.publisherSRTPReady() }); err != nil {
-		return fmt.Errorf("%s keyframe: %w", videoTrackName, err)
+		r.lk.Disconnect()
+		return nil, wrap(ErrPublish, fmt.Errorf("%s keyframe: %w", videoTrackName, err))
 	}
 	r.video, r.audio = video, audio
-	return nil
+	return r, nil
+}
+
+func (r *Room) serialized(notify func()) {
+	r.notify.Lock()
+	defer r.notify.Unlock()
+	notify()
 }
 
 func (r *Room) publisherSRTPReady() bool {

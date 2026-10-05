@@ -106,38 +106,67 @@ func runLines(t *testing.T, f *fakeRoom, lines ...string) (int, []map[string]any
 	return code, decodeLines(t, out.String()), out.String()
 }
 
-func TestRunReturnsZeroWithoutOutputOnEmptyStdin(t *testing.T) {
-	var out bytes.Buffer
-	var calls []connectCall
+func TestRunStartupOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stdin       string
+		connectErr  error
+		wantCode    int
+		wantErrCode string
+		wantConnect int
+	}{
+		{name: "empty stdin", stdin: "", wantCode: 0},
+		{
+			name:        "first line is not init",
+			stdin:       `{"type":"publishData","id":1}` + "\n" + initLine,
+			wantCode:    1,
+			wantErrCode: "bad-command",
+		},
+		{
+			name:        "connect fails",
+			stdin:       initLine,
+			connectErr:  fmt.Errorf("%w: dial wss://lk.example/rtc?access_token=secret&auto_subscribe=0", room.ErrConnect),
+			wantCode:    1,
+			wantErrCode: "connect-failed",
+			wantConnect: 1,
+		},
+		{
+			name:        "publishing on init fails",
+			stdin:       initLine,
+			connectErr:  fmt.Errorf("%w: permission denied", room.ErrPublish),
+			wantCode:    1,
+			wantErrCode: "publish-failed",
+			wantConnect: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			var calls []connectCall
 
-	code := run(strings.NewReader(""), &out, fakeConnect(&fakeRoom{}, nil, &calls))
+			code := run(strings.NewReader(tc.stdin), &out, fakeConnect(&fakeRoom{}, tc.connectErr, &calls))
 
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d", code)
-	}
-	if out.Len() != 0 {
-		t.Fatalf("expected empty stdout, got %q", out.String())
-	}
-	if len(calls) != 0 {
-		t.Fatalf("expected no connect, got %d", len(calls))
-	}
-}
-
-func TestRunRejectsAFirstLineThatIsNotInit(t *testing.T) {
-	var out bytes.Buffer
-	var calls []connectCall
-
-	code := run(strings.NewReader(`{"type":"publishData","id":1}`+"\n"+initLine), &out, fakeConnect(&fakeRoom{}, nil, &calls))
-
-	if code != 1 {
-		t.Fatalf("expected exit 1, got %d", code)
-	}
-	events := decodeLines(t, out.String())
-	if len(events) != 1 || events[0]["type"] != "error" || events[0]["code"] != "bad-command" {
-		t.Fatalf("expected one bad-command error, got %v", events)
-	}
-	if len(calls) != 0 {
-		t.Fatalf("expected no connect, got %d", len(calls))
+			if code != tc.wantCode {
+				t.Fatalf("expected exit %d, got %d", tc.wantCode, code)
+			}
+			events := decodeLines(t, out.String())
+			if tc.wantErrCode == "" {
+				if len(events) != 0 {
+					t.Fatalf("expected no stdout, got %q", out.String())
+				}
+			} else if len(events) != 1 || events[0]["type"] != "error" || events[0]["code"] != tc.wantErrCode {
+				t.Fatalf("expected one %s error, got %v", tc.wantErrCode, events)
+			}
+			if len(calls) != tc.wantConnect {
+				t.Fatalf("expected %d connects, got %d", tc.wantConnect, len(calls))
+			}
+			if strings.Contains(out.String(), "secret") {
+				t.Fatalf("stdout leaked the token: %s", out.String())
+			}
+			if tc.connectErr != nil && errors.Is(tc.connectErr, room.ErrConnect) &&
+				!strings.Contains(out.String(), "access_token=REDACTED") {
+				t.Fatalf("expected a redacted token in the message, got %s", out.String())
+			}
+		})
 	}
 }
 
@@ -150,41 +179,6 @@ func TestRunPassesInitFieldsToConnect(t *testing.T) {
 	want := connectCall{"wss://lk.example", "tok-example123", "p1"}
 	if len(calls) != 1 || calls[0] != want {
 		t.Fatalf("expected connect %+v, got %+v", want, calls)
-	}
-}
-
-func TestRunReportsConnectFailureWithoutLeakingTheToken(t *testing.T) {
-	var out bytes.Buffer
-	connectErr := fmt.Errorf("%w: dial wss://lk.example/rtc?access_token=secret&auto_subscribe=0", room.ErrConnect)
-
-	code := run(strings.NewReader(initLine), &out, fakeConnect(nil, connectErr, nil))
-
-	if code != 1 {
-		t.Fatalf("expected exit 1, got %d", code)
-	}
-	events := decodeLines(t, out.String())
-	if len(events) != 1 || events[0]["type"] != "error" || events[0]["code"] != "connect-failed" {
-		t.Fatalf("expected one connect-failed error, got %v", events)
-	}
-	if strings.Contains(out.String(), "secret") {
-		t.Fatalf("stdout leaked the token: %s", out.String())
-	}
-	if !strings.Contains(out.String(), "access_token=REDACTED") {
-		t.Fatalf("expected a redacted token in the message, got %s", out.String())
-	}
-}
-
-func TestRunReportsPublishFailureOnInit(t *testing.T) {
-	var out bytes.Buffer
-
-	code := run(strings.NewReader(initLine), &out, fakeConnect(nil, fmt.Errorf("%w: permission denied", room.ErrPublish), nil))
-
-	if code != 1 {
-		t.Fatalf("expected exit 1, got %d", code)
-	}
-	events := decodeLines(t, out.String())
-	if len(events) != 1 || events[0]["code"] != "publish-failed" {
-		t.Fatalf("expected one publish-failed error, got %v", events)
 	}
 }
 
@@ -235,14 +229,6 @@ func TestRunDropsRoomEventsBeforeReady(t *testing.T) {
 
 	if len(events) != 1 || events[0]["type"] != "ready" || events[0]["participantCount"] != float64(5) {
 		t.Fatalf("expected only ready, got %s", raw)
-	}
-}
-
-func TestRunReadySerialisesZeroParticipants(t *testing.T) {
-	_, _, raw := runLines(t, &fakeRoom{}, initLine)
-
-	if !strings.Contains(raw, `"participantCount":0`) {
-		t.Fatalf("expected participantCount 0 in ready, got %s", raw)
 	}
 }
 
@@ -327,13 +313,16 @@ func TestRunRejectsUnknownCommands(t *testing.T) {
 func TestRunDisconnectsOnStdinEOFAfterInit(t *testing.T) {
 	f := &fakeRoom{}
 
-	code, _, _ := runLines(t, f, initLine)
+	code, _, raw := runLines(t, f, initLine)
 
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 	if f.disconnectCount() != 1 {
 		t.Fatalf("expected one disconnect, got %d", f.disconnectCount())
+	}
+	if !strings.Contains(raw, `"participantCount":0`) {
+		t.Fatalf("expected participantCount 0 in ready, got %s", raw)
 	}
 }
 

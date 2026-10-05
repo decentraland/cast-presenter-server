@@ -67,24 +67,19 @@ func (w *Writer) Error(id int64, code, msg string) error {
 	return w.Send(Event{Type: "error", ID: id, Code: code, Message: msg})
 }
 
-// ReadLoop calls handle for every well-formed line of r until EOF, a read error,
-// or handle returning false. Empty and malformed lines are skipped.
-func ReadLoop(r io.Reader, handle func(Command) bool) error {
+// ReadLoop calls handle for every well-formed line of r until EOF or a read error.
+// Malformed lines are logged and skipped.
+func ReadLoop(r io.Reader, handle func(Command)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
 	for sc.Scan() {
 		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
 		var cmd Command
 		if err := json.Unmarshal(line, &cmd); err != nil {
 			log.Printf("skipping malformed line (%d bytes): %v", len(line), err)
 			continue
 		}
-		if !handle(cmd) {
-			return nil
-		}
+		handle(cmd)
 	}
 	return sc.Err()
 }

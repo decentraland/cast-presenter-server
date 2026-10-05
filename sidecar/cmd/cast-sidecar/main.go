@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sync"
-	"sync/atomic"
 
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/ipc"
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/room"
@@ -31,38 +30,23 @@ func main() {
 }
 
 func connectRoom(url, token, presentationID string, ev room.Events) (Room, error) {
-	r, err := room.Connect(url, token, presentationID, ev)
-	if err != nil {
-		return nil, err
-	}
-	return r, nil
+	return room.Connect(url, token, presentationID, ev)
 }
 
 type session struct {
-	out          *ipc.Writer
-	lost         chan string
-	shuttingDown atomic.Bool
-	gate         sync.Mutex
-	ready        bool
+	out   *ipc.Writer
+	lost  chan string
+	gate  sync.Mutex
+	ready bool
 }
 
 func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
-	log.SetOutput(os.Stderr)
 	out := ipc.NewWriter(stdout)
 
 	cmds := make(chan ipc.Command)
 	readDone := make(chan error, 1)
-	stop := make(chan struct{})
-	defer close(stop)
 	go func() {
-		readDone <- ipc.ReadLoop(stdin, func(cmd ipc.Command) bool {
-			select {
-			case cmds <- cmd:
-				return true
-			case <-stop:
-				return false
-			}
-		})
+		readDone <- ipc.ReadLoop(stdin, func(cmd ipc.Command) { cmds <- cmd })
 	}()
 
 	var initCmd ipc.Command
@@ -80,8 +64,12 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 	rm, err := connect(initCmd.URL, initCmd.Token, initCmd.PresentationID, s.events())
 	if err != nil {
 		msg := room.Redact(err.Error())
+		code := "connect-failed"
+		if errors.Is(err, room.ErrPublish) {
+			code = "publish-failed"
+		}
 		log.Printf("connect: %s", msg)
-		_ = out.Error(0, connectErrorCode(err), msg)
+		_ = out.Error(0, code, msg)
 		return 1
 	}
 	s.open(rm)
@@ -93,7 +81,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 				return 0
 			}
 		case err := <-readDone:
-			s.shutdown(rm)
+			rm.Disconnect()
 			return exitCode(err)
 		case reason := <-s.lost:
 			log.Printf("room lost: %s", reason)
@@ -111,13 +99,6 @@ func exitCode(readErr error) int {
 	return 0
 }
 
-func connectErrorCode(err error) string {
-	if errors.Is(err, room.ErrPublish) {
-		return "publish-failed"
-	}
-	return "connect-failed"
-}
-
 func (s *session) events() room.Events {
 	return room.Events{
 		OnData: func(identity string, payload []byte) {
@@ -130,9 +111,6 @@ func (s *session) events() room.Events {
 			s.emit(ipc.Event{Type: "participantCount", Count: &count})
 		},
 		OnDisconnected: func(reason string) {
-			if s.shuttingDown.Load() {
-				return
-			}
 			select {
 			case s.lost <- reason:
 			default:
@@ -157,11 +135,6 @@ func (s *session) open(rm Room) {
 	s.ready = true
 }
 
-func (s *session) shutdown(rm Room) {
-	s.shuttingDown.Store(true)
-	rm.Disconnect()
-}
-
 func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 	switch cmd.Type {
 	case "publishData":
@@ -176,7 +149,7 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 		_ = s.out.Error(cmd.ID, "play-failed", "playback not implemented")
 	case "shutdown":
 		_ = s.out.Ack(cmd.ID)
-		s.shutdown(rm)
+		rm.Disconnect()
 		return true
 	default:
 		_ = s.out.Error(cmd.ID, "bad-command", fmt.Sprintf("unknown command %q", cmd.Type))

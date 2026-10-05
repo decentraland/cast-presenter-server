@@ -9,9 +9,8 @@ import (
 func readAll(t *testing.T, input string) []Command {
 	t.Helper()
 	var got []Command
-	if err := ReadLoop(strings.NewReader(input), func(c Command) bool {
+	if err := ReadLoop(strings.NewReader(input), func(c Command) {
 		got = append(got, c)
-		return true
 	}); err != nil {
 		t.Fatalf("ReadLoop returned error: %v", err)
 	}
@@ -24,10 +23,11 @@ func TestReadLoopParsesCommandsAndSkipsMalformedAndEmptyLines(t *testing.T) {
 		`not json at all`,
 		``,
 		`{"type":"play","id":2,"videoPath":"/tmp/v.h264","audioPath":null}`,
+		`{"type":"play","id":3,"videoPath":"/v","audioPath":"/a.ogg"}`,
 	}, "\n"))
 
-	if len(got) != 2 {
-		t.Fatalf("expected 2 commands, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 commands, got %d: %+v", len(got), got)
 	}
 	if got[0].Type != "init" || got[0].URL != "wss://x" || got[0].Token != "t" || got[0].PresentationID != "p1" {
 		t.Fatalf("init not parsed: %+v", got[0])
@@ -38,13 +38,8 @@ func TestReadLoopParsesCommandsAndSkipsMalformedAndEmptyLines(t *testing.T) {
 	if got[1].AudioPath != nil {
 		t.Fatalf("expected nil audioPath for null, got %q", *got[1].AudioPath)
 	}
-}
-
-func TestReadLoopParsesAudioPathString(t *testing.T) {
-	got := readAll(t, `{"type":"play","id":3,"videoPath":"/v","audioPath":"/a.ogg"}`)
-
-	if len(got) != 1 || got[0].AudioPath == nil || *got[0].AudioPath != "/a.ogg" {
-		t.Fatalf("audioPath not parsed: %+v", got)
+	if got[2].AudioPath == nil || *got[2].AudioPath != "/a.ogg" {
+		t.Fatalf("audioPath string not parsed: %+v", got[2])
 	}
 }
 
@@ -57,69 +52,31 @@ func TestReadLoopParsesLongPayload(t *testing.T) {
 	}
 }
 
-func TestReadLoopStopsWhenHandleReturnsFalse(t *testing.T) {
-	var got []Command
-	err := ReadLoop(strings.NewReader("{\"type\":\"a\"}\n{\"type\":\"b\"}\n"), func(c Command) bool {
-		got = append(got, c)
-		return false
-	})
-	if err != nil {
-		t.Fatalf("ReadLoop returned error: %v", err)
-	}
-	if len(got) != 1 || got[0].Type != "a" {
-		t.Fatalf("expected to stop after first command, got %+v", got)
-	}
-}
-
 func TestWriterEmitsOneJSONLinePerEvent(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
+	zero := 0
 
-	if err := w.Send(Event{Type: "ready", RoomMetadata: `{"a":1}`}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Ack(7); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Error(8, "bad-command", "nope"); err != nil {
-		t.Fatal(err)
+	for i, err := range []error{
+		w.Send(Event{Type: "ready", RoomMetadata: `{"a":1}`}),
+		w.Ack(7),
+		w.Error(8, "bad-command", "nope"),
+		w.Error(0, "playback-failed", "boom"),
+		w.Send(Event{Type: "participantCount", Count: &zero}),
+	} {
+		if err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
 	}
 
-	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
-	want := []string{
+	want := strings.Join([]string{
 		`{"type":"ready","roomMetadata":"{\"a\":1}"}`,
 		`{"type":"ack","id":7}`,
 		`{"type":"error","id":8,"code":"bad-command","message":"nope"}`,
-	}
-	if len(lines) != len(want) {
-		t.Fatalf("expected %d lines, got %d: %q", len(want), len(lines), buf.String())
-	}
-	for i := range want {
-		if lines[i] != want[i] {
-			t.Fatalf("line %d: want %s, got %s", i, want[i], lines[i])
-		}
-	}
-}
-
-func TestWriterErrorWithZeroIDIsUnsolicited(t *testing.T) {
-	var buf bytes.Buffer
-	if err := NewWriter(&buf).Error(0, "playback-failed", "boom"); err != nil {
-		t.Fatal(err)
-	}
-
-	if strings.Contains(buf.String(), `"id"`) {
-		t.Fatalf("unsolicited error must not carry an id: %s", buf.String())
-	}
-}
-
-func TestEventSerialisesZeroCount(t *testing.T) {
-	var buf bytes.Buffer
-	zero := 0
-	if err := NewWriter(&buf).Send(Event{Type: "participantCount", Count: &zero}); err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(buf.String(), `"count":0`) {
-		t.Fatalf("expected count 0 to be serialised, got %s", buf.String())
+		`{"type":"error","code":"playback-failed","message":"boom"}`,
+		`{"type":"participantCount","count":0}`,
+	}, "\n") + "\n"
+	if buf.String() != want {
+		t.Fatalf("want %q, got %q", want, buf.String())
 	}
 }
