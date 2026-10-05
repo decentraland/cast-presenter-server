@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
+import { setTimeout as delay } from 'timers/promises'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { errorMessage } from '../../logic/error-message'
 import {
@@ -12,6 +13,7 @@ import type { AppComponents } from '../../types'
 import type { ChildProcessByStdio } from 'child_process'
 import type { Readable, Writable } from 'stream'
 
+const INIT_ID = 0
 const DEFAULT_BINARY_PATH = '/usr/local/bin/cast-sidecar'
 const CONNECT_TIMEOUT_MS = 25_000
 const RPC_TIMEOUT_MS = 10_000
@@ -40,11 +42,6 @@ interface PendingCommand {
   timer: ReturnType<typeof setTimeout>
 }
 
-interface Settler {
-  resolve(): void
-  reject(err: Error): void
-}
-
 function redact(text: string): string {
   return text.replace(/access_token=[^&\s]+/g, 'access_token=REDACTED')
 }
@@ -70,10 +67,8 @@ function createPublisher(
   let child: SidecarProcess | null = null
   let running = false
   let ready = false
-  let disconnecting = false
-  let shutdownDone: Promise<void> = Promise.resolve()
+  let shutdownDone: Promise<void> | null = null
   let exited: Promise<void> = Promise.resolve()
-  let connecting: Settler | null = null
   let nextId = 1
   const pending = new Map<number, PendingCommand>()
   let presenters: Set<string> = new Set()
@@ -89,17 +84,22 @@ function createPublisher(
     child?.stdin.write(`${JSON.stringify(command)}\n`)
   }
 
-  function rpc(command: { type: string } & Record<string, unknown>, timeoutMs = RPC_TIMEOUT_MS): Promise<void> {
-    if (!running) return Promise.reject(new Error('Sidecar not running'))
-    const id = nextId++
+  function track(id: number, timeoutMs: number, onTimeout: (fail: (err: Error) => void) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id)
-        reject(new Error(`Sidecar ${command.type} timed out`))
+        onTimeout(reject)
       }, timeoutMs)
       pending.set(id, { resolve, reject, timer })
-      write({ ...command, id })
     })
+  }
+
+  function rpc(command: { type: string } & Record<string, unknown>, timeoutMs = RPC_TIMEOUT_MS): Promise<void> {
+    if (!running) return Promise.reject(new Error('Sidecar not running'))
+    const id = nextId++
+    const acked = track(id, timeoutMs, (fail) => fail(new Error(`Sidecar ${command.type} timed out`)))
+    write({ ...command, id })
+    return acked
   }
 
   function settle(id: number, err: Error | null): void {
@@ -111,13 +111,12 @@ function createPublisher(
     else command.resolve()
   }
 
-  function failConnect(reason: string): void {
-    connecting?.reject(new Error(`LiveKit connect failed: ${redact(reason)}`))
-    connecting = null
+  function connectError(reason: string): Error {
+    return new Error(`LiveKit connect failed: ${redact(reason)}`)
   }
 
   function fireFatal(reason: string): void {
-    if (fatalFired || disconnecting) return
+    if (fatalFired || shutdownDone !== null) return
     fatalFired = true
     fatalCallback?.(reason)
   }
@@ -126,13 +125,12 @@ function createPublisher(
     if (!running) return
     running = false
     participantCount = 0
-    for (const command of pending.values()) {
+    for (const [id, command] of pending) {
       clearTimeout(command.timer)
-      command.reject(new Error(reason))
+      command.reject(id === INIT_ID ? connectError(reason) : new Error(reason))
     }
     pending.clear()
-    failConnect(reason)
-    if (!disconnecting) logger.warn('Sidecar exited', { presentationId, reason })
+    if (shutdownDone === null) logger.warn('Sidecar exited', { presentationId, reason })
     if (ready) fireFatal(reason)
   }
 
@@ -162,12 +160,11 @@ function createPublisher(
         participantCount = event.participantCount ?? 0
         ready = true
         logger.info(`[connect] Initial presenters: ${[...presenters].join(', ') || 'none'}`)
-        connecting?.resolve()
-        connecting = null
+        settle(INIT_ID, null)
         return
       case 'error':
         if (!ready) {
-          failConnect(event.message ?? event.code ?? 'unknown error')
+          settle(INIT_ID, connectError(event.message ?? event.code ?? 'unknown error'))
         } else if (event.code === 'playback-failed') {
           playbackFailedCallback?.(redact(event.message ?? 'playback failed'))
         } else {
@@ -194,16 +191,6 @@ function createPublisher(
     }
   }
 
-  function exitsWithin(timeoutMs: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), timeoutMs)
-      void exited.then(() => {
-        clearTimeout(timer)
-        resolve(true)
-      })
-    })
-  }
-
   async function shutdown(): Promise<void> {
     const proc = child
     if (!proc || !running) return
@@ -212,7 +199,7 @@ function createPublisher(
     } catch (err) {
       logger.warn('Sidecar shutdown failed', { presentationId, error: redact(errorMessage(err)) })
     }
-    if (!(await exitsWithin(EXIT_TIMEOUT_MS))) {
+    if (!(await Promise.race([exited.then(() => true), delay(EXIT_TIMEOUT_MS, false, { ref: false })]))) {
       logger.warn('Sidecar did not exit after shutdown, killing it', { presentationId })
       proc.kill('SIGKILL')
     }
@@ -245,21 +232,9 @@ function createPublisher(
       })
       createInterface({ input: proc.stderr }).on('line', (line) => logger.debug(`[sidecar] ${redact(line)}`))
 
-      const connected = new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          failConnect(`sidecar not ready after ${CONNECT_TIMEOUT_MS / 1000}s`)
-          proc.kill('SIGKILL')
-        }, CONNECT_TIMEOUT_MS)
-        connecting = {
-          resolve: () => {
-            clearTimeout(timer)
-            resolve()
-          },
-          reject: (err) => {
-            clearTimeout(timer)
-            reject(err)
-          }
-        }
+      const connected = track(INIT_ID, CONNECT_TIMEOUT_MS, (fail) => {
+        fail(connectError(`sidecar not ready after ${CONNECT_TIMEOUT_MS / 1000}s`))
+        proc.kill('SIGKILL')
       })
       write({ type: 'init', url, token, presentationId })
       await connected
@@ -322,11 +297,7 @@ function createPublisher(
     },
 
     disconnect(): Promise<void> {
-      if (!disconnecting) {
-        disconnecting = true
-        shutdownDone = shutdown()
-      }
-      return shutdownDone
+      return (shutdownDone ??= shutdown())
     }
   }
 }

@@ -1,15 +1,11 @@
 /** Presentation data-channel codec and presenter parsing shared by the rtc-node and sidecar publishers. */
 import { Packet } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 
-/** `Packet.protocolVersion` stamped on every outgoing packet. */
-export const PROTOCOL_VERSION = 100
-/** CommsData message type byte that leads `Scene.data`. */
-export const MSG_TYPE_COMMS_DATA = 3
-/** CommsData topic of presentation messages. */
-export const PRESENTATION_TOPIC = 'presentation'
+const PROTOCOL_VERSION = 100
+const MSG_TYPE_COMMS_DATA = 3
+const PRESENTATION_TOPIC = 'presentation'
 
-/** Encodes topic + JSON data as CommsData: [MsgType][topicLen 2 bytes LE][topic UTF-8][data UTF-8]. */
-export function encodeCommsPayload(topic: string, jsonData: string): Uint8Array {
+function encodeCommsPayload(topic: string, jsonData: string): Uint8Array {
   const topicBytes = new TextEncoder().encode(topic)
   const dataBytes = new TextEncoder().encode(jsonData)
   const payload = new Uint8Array(1 + 2 + topicBytes.length + dataBytes.length)
@@ -21,12 +17,7 @@ export function encodeCommsPayload(topic: string, jsonData: string): Uint8Array 
   return payload
 }
 
-/**
- * Decodes CommsData wire format from Scene.data.
- * @param sceneData - the full payload, including the leading MsgType byte.
- * @returns `{ topic, data }`, or null if malformed.
- */
-export function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: string } | null {
+function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: string } | null {
   if (sceneData.length < 1 || sceneData[0] !== MSG_TYPE_COMMS_DATA) return null
   const inner = sceneData.subarray(1)
   if (inner.length < 2) return null
@@ -56,14 +47,6 @@ export function parsePresentersFromRoomMetadata(metadata: string | undefined): S
   }
 }
 
-function parseJson(text: string): Record<string, unknown> | undefined {
-  try {
-    return JSON.parse(text)
-  } catch {
-    return undefined
-  }
-}
-
 /**
  * Wraps a presentation message in a protobuf `Packet` scene message on the presentation topic.
  * @returns the encoded packet bytes.
@@ -84,22 +67,20 @@ export function encodePresentationPacket(message: Record<string, unknown>, scene
 export function decodePresentationPacket(
   payload: Uint8Array
 ): { message: Record<string, unknown>; sceneId?: string } | null {
-  let message: Record<string, unknown> | undefined
-  let sceneId: string | undefined
   try {
     const packet = Packet.decode(payload)
-    if (packet.message?.$case === 'scene') {
-      if (packet.message.scene.sceneId) {
-        sceneId = packet.message.scene.sceneId
-      }
-      const decoded = decodeCommsPayload(packet.message.scene.data)
-      if (decoded && decoded.topic === PRESENTATION_TOPIC) {
-        message = JSON.parse(decoded.data)
-      }
-    }
+    if (packet.message?.$case !== 'scene') return null
+    const { sceneId, data } = packet.message.scene
+    const decoded = decodeCommsPayload(data)
+    if (!decoded || decoded.topic !== PRESENTATION_TOPIC) return null
+    const message: Record<string, unknown> = JSON.parse(decoded.data)
+    return message ? { message, sceneId: sceneId || undefined } : null
   } catch {
-    message = parseJson(new TextDecoder().decode(payload))
+    try {
+      const message: Record<string, unknown> = JSON.parse(new TextDecoder().decode(payload))
+      return message ? { message } : null
+    } catch {
+      return null
+    }
   }
-  if (!message) return null
-  return { message, sceneId }
 }
