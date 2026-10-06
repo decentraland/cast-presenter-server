@@ -516,6 +516,22 @@ export async function createPresentationManager(
     }
   }
 
+  async function encodeSlideImage(
+    session: InternalSession,
+    buffer: Buffer,
+    width: number,
+    height: number
+  ): Promise<SlideImage | null> {
+    try {
+      return await encodeSlidePng(buffer, width, height)
+    } catch (err) {
+      logger.warn(`Failed to encode slide image for presentation ${session.id}`, {
+        error: err instanceof Error ? err.message : String(err)
+      })
+      return null
+    }
+  }
+
   async function navigateSession(
     session: InternalSession,
     action: 'next' | 'prev' | 'goto',
@@ -559,13 +575,15 @@ export async function createPresentationManager(
       session.videoElapsedBeforePause = 0
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
-      if (clientComposition) rememberSlideImage(session, await encodeSlidePng(buffer, width, height))
+      const slideImage = clientComposition ? await encodeSlideImage(session, buffer, width, height) : null
 
       session.publisher.pushFrame(buffer, width, height)
       session.publisher.startHeartbeat(buffer, width, height)
 
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
+      if (slideImage) rememberSlideImage(session, slideImage)
+      else session.currentSlideImage = null
       session.currentSlide = targetSlide
       session.lastFrameBuffer = buffer
       session.lastFrameWidth = width

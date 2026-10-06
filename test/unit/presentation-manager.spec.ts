@@ -1430,6 +1430,7 @@ describe('when client composition is enabled', () => {
   let publisher: jest.Mocked<ILiveKitPublisher>
   let configValues: Record<string, string | undefined>
   let encodeCount: number
+  let renderer: jest.Mocked<IRenderer>
 
   function stateBroadcasts(): Array<Record<string, unknown>> {
     return publisher.publishData.mock.calls.map(([message]) => message).filter((m) => m.type === 'presentation:state')
@@ -1450,7 +1451,7 @@ describe('when client composition is enabled', () => {
     publisher = createMockPublisher()
     components = createMockComponents({ publisher })
     components.config.getString.mockImplementation(async (key: string) => configValues[key])
-    const renderer = createMockRenderer()
+    renderer = createMockRenderer()
     renderer.getSlideCount.mockReturnValue(10)
     renderer.getSlideVideos.mockResolvedValue([
       { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
@@ -1549,11 +1550,50 @@ describe('when client composition is enabled', () => {
       describe('and encoding the next slide fails', () => {
         beforeEach(async () => {
           jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+          await manager.navigate(presentationId, 'next')
+        })
+
+        it('should still move to the next slide', () => {
+          expect(manager.getState(presentationId)?.currentSlide).toBe(1)
+        })
+
+        it('should leave the stale slide out of the state', () => {
+          expect(manager.getState(presentationId)?.slide).toBeUndefined()
+        })
+      })
+
+      describe('and loading the next slide videos fails', () => {
+        beforeEach(async () => {
+          renderer.getSlideVideos.mockRejectedValueOnce(new Error('videos failed'))
           await manager.navigate(presentationId, 'next').catch(() => undefined)
         })
 
-        it('should keep the current slide', () => {
-          expect(manager.getState(presentationId)?.currentSlide).toBe(0)
+        it('should keep the previous slide url', () => {
+          expect(manager.getState(presentationId)?.slide?.url).toBe(
+            `${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`
+          )
+        })
+      })
+
+      describe('and the state is read while the next slide videos are loading', () => {
+        let slideUrlDuringNavigation: string | undefined
+
+        beforeEach(async () => {
+          let releaseVideos: (videos: []) => void = () => undefined
+          renderer.getSlideVideos.mockReturnValueOnce(
+            new Promise((resolve) => {
+              releaseVideos = resolve
+            })
+          )
+          const navigation = manager.navigate(presentationId, 'next')
+          await new Promise((resolve) => setImmediate(resolve))
+          slideUrlDuringNavigation = manager.getState(presentationId)?.slide?.url
+          releaseVideos([])
+          await navigation
+        })
+
+        it('should report the previous slide url', () => {
+          expect(slideUrlDuringNavigation).toBe(`${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`)
         })
       })
 
