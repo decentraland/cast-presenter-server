@@ -578,7 +578,7 @@ export async function createPresentationManager(
       return await encodeSlidePng(buffer, width, height)
     } catch (err) {
       logger.warn(`Failed to encode slide image for presentation ${session.id}`, {
-        error: err instanceof Error ? err.message : String(err)
+        error: errorMessage(err)
       })
       return null
     }
