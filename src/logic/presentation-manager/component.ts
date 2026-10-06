@@ -727,12 +727,13 @@ export async function createPresentationManager(
     session: InternalSession,
     videoIndex: number,
     code: VideoErrorCode,
-    message: string
+    message: string,
+    videoUrl?: string
   ): Promise<void> {
     session.videoState = 'error'
     session.videoErrorCode = code
     session.videoErrorReason = message
-    await broadcastError(session, code, message, { videoIndex })
+    await broadcastError(session, code, message, { videoIndex, videoUrl })
     await broadcastState(session)
   }
 
@@ -958,7 +959,7 @@ export async function createPresentationManager(
       if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
         compositor.cleanup()
         const info = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
-        await failVideo(session, videoIndex, info.code, info.message)
+        await failVideo(session, videoIndex, info.code, info.message, videoInfo.url)
         logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
         return
       }
@@ -976,7 +977,7 @@ export async function createPresentationManager(
         compositor.cleanup()
         if (session.abortController.signal.aborted) return
         const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
-        await failVideo(session, videoIndex, info.code, info.message)
+        await failVideo(session, videoIndex, info.code, info.message, videoInfo.url)
         logger.warn(`Video download failed for ${session.id}: ${errorMessage(err)}`)
         return
       }
