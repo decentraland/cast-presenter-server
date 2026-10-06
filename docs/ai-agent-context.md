@@ -69,7 +69,7 @@ remote control through LiveKit data channels.
   the bot publishes slide PNGs, `presenterIdentity` and pre-baked
   video through the per-session Go sidecar `cast-sidecar`
   (`src/adapters/sidecar-publisher/`, JSON-lines IPC), and never
-  composites or stamps a camera; see
+  composites a frame; see
   [architecture.md](architecture.md#client-composition-v2).
 
 **Video playback lifecycle:**
