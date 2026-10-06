@@ -70,10 +70,7 @@ function createRenderer(): IRenderer {
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d')
 
-      // pdfjs-dist types `canvasContext` as the DOM `CanvasRenderingContext2D`, but
-      // @napi-rs/canvas exports its own structurally-compatible context type. Cast
-      // through `unknown` to bridge the nominal mismatch.
-      await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise
+      await page.render({ canvas: canvas as unknown as HTMLCanvasElement, viewport }).promise
 
       const annotations = await getCachedAnnotations(index, page)
       for (const a of annotations) {
@@ -136,9 +133,7 @@ function createRenderer(): IRenderer {
     destroy(): void {
       annotationsCache.clear()
       if (doc) {
-        // Fire-and-forget: pdfjs destroy() is async but our lifecycle is sync;
-        // callers are already in stop/error cleanup paths that ignore the outcome.
-        void doc.destroy()
+        void doc.loadingTask.destroy()
         doc = null
       }
     }
