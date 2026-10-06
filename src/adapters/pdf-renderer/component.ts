@@ -1,4 +1,5 @@
 import { createCanvas } from '@napi-rs/canvas'
+import { fitRenderSize } from '../../logic/render-size'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
@@ -12,8 +13,6 @@ interface PDFLinkAnnotation {
   url?: string
   rect?: number[]
 }
-
-const TARGET_WIDTH = 960
 
 const VIDEO_URL_PATTERN = /youtube\.com|youtu\.be|drive\.google\.com|docs\.google\.com\/file|vimeo\.com/
 const MEDIA_URL_PATTERN = /\.gif($|\?)|\.mp4($|\?)|\.webm($|\?)/i
@@ -61,12 +60,8 @@ function createRenderer(): IRenderer {
 
       const page = await doc.getPage(index + 1)
       const baseViewport = page.getViewport({ scale: 1 })
-      const scale = TARGET_WIDTH / baseViewport.width
+      const { scale, width, height } = fitRenderSize(baseViewport.width, baseViewport.height)
       const viewport = page.getViewport({ scale })
-
-      // Force even dimensions — yuv420p chroma planes require it
-      const width = Math.round(viewport.width) & ~1
-      const height = Math.round(viewport.height) & ~1
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d')
 
@@ -110,7 +105,7 @@ function createRenderer(): IRenderer {
       const page = await doc.getPage(index + 1)
       const annotations = await getCachedAnnotations(index, page)
       const baseViewport = page.getViewport({ scale: 1 })
-      const scale = TARGET_WIDTH / baseViewport.width
+      const { scale } = fitRenderSize(baseViewport.width, baseViewport.height)
       const viewport = page.getViewport({ scale })
 
       return annotations
