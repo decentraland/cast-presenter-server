@@ -191,7 +191,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       videoTrack = LocalVideoTrack.createVideoTrack('presentation', videoSource)
       const publishOptions = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE,
-        videoCodec: VideoCodec.H264,
+        videoCodec: VideoCodec.VP8,
         videoEncoding: {
           maxBitrate: BigInt(6_000_000),
           maxFramerate: 30
