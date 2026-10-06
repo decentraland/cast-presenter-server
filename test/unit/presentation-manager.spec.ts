@@ -2017,6 +2017,90 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe('and the presenter plays the same video twice while it bakes', () => {
+    beforeEach(async () => {
+      const bake = createDeferred<{ videoPath: string; audioPath: string; bytes: number }>()
+      components.mediaEncoder.bake.mockReturnValueOnce(bake.promise)
+      await createSession()
+      const first = manager.playVideo(presentationId, 0)
+      const second = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      bake.resolve({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg', bytes: 10 })
+      await Promise.all([first, second])
+    })
+
+    it('should send a single play command', () => {
+      expect(sidecar.play).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('and the presenter stops while the settled bake is still resuming the play', () => {
+    beforeEach(async () => {
+      const bake = createDeferred<{ videoPath: string; audioPath: string; bytes: number }>()
+      const stop = createDeferred<void>()
+      components.mediaEncoder.bake.mockReturnValueOnce(bake.promise)
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      sidecar.stopVideo.mockReturnValueOnce(stop.promise)
+      const stopping = manager.stopVideo(presentationId)
+      bake.resolve({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg', bytes: 10 })
+      await flushMicrotasks()
+      stop.resolve()
+      await stopping
+      await playing
+    })
+
+    it('should not play the stopped video', () => {
+      expect(sidecar.play).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and another video starts while the stopped one is still sending its play command', () => {
+    const SECOND_VIDEO_URL = 'https://example.com/second.mp4'
+    let firstPlay: ReturnType<typeof createDeferred<void>>
+    let firstPlaying: Promise<void>
+
+    beforeEach(async () => {
+      firstPlay = createDeferred<void>()
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } },
+        { url: SECOND_VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } }
+      ])
+      await createSession()
+      sidecar.play.mockReturnValueOnce(firstPlay.promise)
+      firstPlaying = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      await manager.stopVideo(presentationId)
+      await manager.playVideo(presentationId, 1)
+    })
+
+    describe('and the stopped video play command then succeeds', () => {
+      beforeEach(async () => {
+        firstPlay.resolve()
+        await firstPlaying
+      })
+
+      it('should not stop the newer video', () => {
+        const [, secondPlayOrder] = sidecar.play.mock.invocationCallOrder
+        expect(sidecar.stopVideo.mock.invocationCallOrder.filter((order) => order > secondPlayOrder)).toEqual([])
+      })
+    })
+
+    describe('and the stopped video play command then fails', () => {
+      beforeEach(async () => {
+        firstPlay.reject(new Error('play failed'))
+        await firstPlaying
+      })
+
+      it('should keep the newer video playing', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'playing', playingVideoIndex: 1 })
+        )
+      })
+    })
+  })
+
   describe('and the presenter navigates while the loading broadcast is still in flight', () => {
     beforeEach(async () => {
       bakeUntilAborted()

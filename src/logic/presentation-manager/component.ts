@@ -72,6 +72,7 @@ interface InternalSession extends PresentationSession {
   slideImages: Map<string, SlideImage>
   currentSlideImage: SlideImage | null
   activeVideoIndex: number
+  playGeneration: number
   presenterIdentity: string | null
   sidecar: ISidecarPublisher | null
   bakeJobs: Map<string, BakeJob>
@@ -446,6 +447,7 @@ export async function createPresentationManager(
         slideImages: new Map(),
         currentSlideImage: null,
         activeVideoIndex: -1,
+        playGeneration: 0,
         presenterIdentity: presenterIdentity ?? null,
         sidecar,
         bakeJobs: new Map()
@@ -740,14 +742,15 @@ export async function createPresentationManager(
   async function runSidecarCommand(
     session: InternalSession,
     videoIndex: number,
-    command: () => Promise<void>
+    command: () => Promise<void>,
+    isCurrent: () => boolean = () => true
   ): Promise<boolean> {
     try {
       await command()
       return true
     } catch (err) {
-      await failVideo(session, videoIndex, 'video-playback-failed', PLAYBACK_FAILED_MESSAGE)
       logger.warn(`Sidecar playback failed for ${session.id}: ${errorMessage(err)}`)
+      if (isCurrent()) await failVideo(session, videoIndex, 'video-playback-failed', PLAYBACK_FAILED_MESSAGE)
       return false
     }
   }
@@ -768,26 +771,32 @@ export async function createPresentationManager(
     const resuming = session.videoState === 'paused' && session.activeVideoIndex === videoIndex
     const stopPaused = session.videoState === 'paused' && !resuming
     const requestedSlide = session.currentSlide
+    const generation = ++session.playGeneration
+    const isCurrent = (): boolean => session.playGeneration === generation
     session.videoState = 'loading'
     session.activeVideoIndex = videoIndex
     session.videoErrorReason = null
     session.videoErrorCode = null
     const stillWanted = (): boolean =>
+      isCurrent() &&
       !session.navigating &&
       session.currentSlide === requestedSlide &&
       session.videoState === 'loading' &&
       session.activeVideoIndex === videoIndex
     const abandon = async (): Promise<void> => {
+      if (!isCurrent()) return
       if (session.videoState === 'loading') session.videoState = 'idle'
       await broadcastState(session)
     }
 
     if (resuming) {
-      if (!(await runSidecarCommand(session, videoIndex, () => sidecar.resume()))) return
+      if (!(await runSidecarCommand(session, videoIndex, () => sidecar.resume(), isCurrent))) return
       if (!stillWanted()) {
-        await sidecar.stopVideo().catch((err) => {
-          logger.warn(`Sidecar stop after resume failed: ${errorMessage(err)}`)
-        })
+        if (isCurrent()) {
+          await sidecar.stopVideo().catch((err) => {
+            logger.warn(`Sidecar stop after resume failed: ${errorMessage(err)}`)
+          })
+        }
         await abandon()
         return
       }
@@ -796,7 +805,7 @@ export async function createPresentationManager(
     }
 
     await broadcastState(session)
-    if (stopPaused && !(await runSidecarCommand(session, videoIndex, () => sidecar.stopVideo()))) return
+    if (stopPaused && !(await runSidecarCommand(session, videoIndex, () => sidecar.stopVideo(), isCurrent))) return
 
     if (!stillWanted()) {
       await abandon()
@@ -808,7 +817,7 @@ export async function createPresentationManager(
     try {
       files = await job.promise
     } catch (err) {
-      if (session.abortController.signal.aborted || job.abort.signal.aborted) return
+      if (!isCurrent() || session.abortController.signal.aborted || job.abort.signal.aborted) return
       const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
       await failVideo(session, videoIndex, info.code, info.message)
       logger.warn(`Video bake failed for ${session.id}: ${errorMessage(err)}`)
@@ -819,14 +828,19 @@ export async function createPresentationManager(
       await abandon()
       return
     }
-    const played = await runSidecarCommand(session, videoIndex, () =>
-      sidecar.play({ videoPath: files.videoPath, audioPath: files.audioPath })
+    const played = await runSidecarCommand(
+      session,
+      videoIndex,
+      () => sidecar.play({ videoPath: files.videoPath, audioPath: files.audioPath }),
+      isCurrent
     )
     if (!played) return
     if (!stillWanted()) {
-      await sidecar.stopVideo().catch((err) => {
-        logger.warn(`Sidecar stop after play failed: ${errorMessage(err)}`)
-      })
+      if (isCurrent()) {
+        await sidecar.stopVideo().catch((err) => {
+          logger.warn(`Sidecar stop after play failed: ${errorMessage(err)}`)
+        })
+      }
       return
     }
     await markV2Playing(session, videoIndex)
@@ -871,6 +885,7 @@ export async function createPresentationManager(
         session.compositor = null
       }
       if (session.sidecar) {
+        session.playGeneration++
         cancelPendingBake(session)
         if (isVideoActive(session)) {
           await session.sidecar.stopVideo().catch((err) => {
@@ -1156,6 +1171,7 @@ export async function createPresentationManager(
 
     const { sidecar } = session
     if (sidecar) {
+      session.playGeneration++
       cancelPendingBake(session)
       if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.stopVideo()))) return
     } else {
