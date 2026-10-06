@@ -271,6 +271,34 @@ components:
             sharing permissions", "Video download timed out — file
             may be too large", or "Presentation has exceeded its
             video disk budget").
+        overlay:
+          $ref: "#/components/schemas/OverlayLayout"
+
+    OverlayLayout:
+      type: object
+      description: >
+        Where a presenter's camera bubble belongs on the slide.
+        Presenters change it with
+        `{ "type": "presentation:overlay:update", ... }` on the data
+        channel; partial updates merge into the stored layout and an
+        invalid field drops the whole command. The server only stores
+        and broadcasts this layout — clients draw the bubble.
+      required: [x, y, size]
+      properties:
+        x:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Bubble centre as a fraction of the slide width.
+        y:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Bubble centre as a fraction of the slide height.
+        size:
+          type: string
+          enum: [small, large]
+          description: Bubble diameter preset.
 
     SlideVideoInfo:
       type: object

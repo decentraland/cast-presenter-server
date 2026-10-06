@@ -152,7 +152,26 @@ strings sent with reliable delivery.
 { "type": "presentation:video:stop" }
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
+{ "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
 ```
+
+`presentation:overlay:update` changes only the fields it carries, and
+the bot drops the whole command if any field is invalid. Bursts are
+coalesced into at most one state broadcast every 250 ms.
+
+### Camera bubble layout
+
+The session carries an `overlay` layout that describes where a
+presenter's camera bubble belongs on the slide. The server stores and
+broadcasts it; it never composites the camera itself. Clients read the
+layout from `presentation:state` (or from the bot metadata) and draw
+the bubble on their side.
+
+The layout is the bubble centre `x`, `y` as fractions of the slide
+width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
+`(1, 0)`, `(0, 1)` and `(1, 1)` are the four corner presets. Values of
+`x` and `y` are clamped to `[0, 1]`. A new session starts at
+`{ "x": 0, "y": 1, "size": "small" }`, bottom-left.
 
 ### State broadcast (bot to all participants)
 
@@ -173,7 +192,8 @@ broadcasts:
       "geometry": { "x": 100, "y": 200, "width": 640, "height": 360 }
     }
   ],
-  "videoState": "idle"
+  "videoState": "idle",
+  "overlay": { "x": 0, "y": 1, "size": "small" }
 }
 ```
 
