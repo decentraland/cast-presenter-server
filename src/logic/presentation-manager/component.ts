@@ -5,16 +5,19 @@ import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import { FILE_TYPES } from '../file-validator'
+import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/renderer/types'
 import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
 import type { FileType } from '../file-validator'
+import type { OverlayLayout } from '../overlay-layout'
 
-const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
+const OVERLAY_BROADCAST_INTERVAL_MS = 250
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -42,8 +45,8 @@ interface InternalSession extends PresentationSession {
   videoErrorReason: string | null
   videoErrorCode: VideoErrorCode | null
   preDownloadTimer: ReturnType<typeof setTimeout> | null
-  // Signalled when the session stops; cancels in-flight downloads so we don't
-  // race with tempDir cleanup or write to a deleted directory.
+  overlay: OverlayLayout
+  overlayBroadcastTimer: ReturnType<typeof setTimeout> | null
   abortController: AbortController
   // Cumulative bytes written to tempDir across all downloads; enforced against
   // SESSION_DISK_QUOTA_BYTES to bound disk usage per session.
@@ -190,6 +193,15 @@ export async function createPresentationManager(
     }
   }
 
+  /** Coalesces bursts of overlay updates into at most one state broadcast per interval. */
+  function scheduleOverlayBroadcast(session: InternalSession): void {
+    if (session.overlayBroadcastTimer) return
+    session.overlayBroadcastTimer = setTimeout(() => {
+      session.overlayBroadcastTimer = null
+      broadcastState(session).catch(() => undefined)
+    }, OVERLAY_BROADCAST_INTERVAL_MS)
+  }
+
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
     try {
@@ -298,6 +310,13 @@ export async function createPresentationManager(
             case 'presentation:stop':
               await stopSession(session)
               break
+            case 'presentation:overlay:update': {
+              const patch = parseOverlayUpdate(message)
+              if (!patch || Object.keys(patch).length === 0) break
+              session.overlay = { ...session.overlay, ...patch }
+              scheduleOverlayBroadcast(session)
+              break
+            }
             case 'presentation:get-state':
               await broadcastState(session)
               break
@@ -351,6 +370,8 @@ export async function createPresentationManager(
         videoErrorReason: null,
         videoErrorCode: null,
         preDownloadTimer: null,
+        overlay: { ...DEFAULT_OVERLAY_LAYOUT },
+        overlayBroadcastTimer: null,
         abortController: new AbortController(),
         bytesDownloaded: 0
       }
@@ -855,8 +876,11 @@ export async function createPresentationManager(
       clearTimeout(session.preDownloadTimer)
       session.preDownloadTimer = null
     }
+    if (session.overlayBroadcastTimer) {
+      clearTimeout(session.overlayBroadcastTimer)
+      session.overlayBroadcastTimer = null
+    }
 
-    // Abort any in-flight downloads so they don't race with tempDir cleanup below
     session.abortController.abort()
 
     session.stoppingPromise = (async () => {
@@ -904,6 +928,7 @@ export async function createPresentationManager(
       fileType: session.fileType,
       slideVideos: session.slideVideos,
       videoState: session.videoState,
+      overlay: session.overlay,
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
         : {}),

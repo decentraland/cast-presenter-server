@@ -1,4 +1,4 @@
-import { AudioSource, LocalAudioTrack, Room } from '@livekit/rtc-node'
+import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
@@ -16,7 +16,7 @@ jest.mock('@livekit/rtc-node', () => ({
   TrackPublishOptions: jest.fn(),
   TrackSource: { SOURCE_SCREENSHARE: 'SOURCE_SCREENSHARE', SOURCE_SCREENSHARE_AUDIO: 'SOURCE_SCREENSHARE_AUDIO' },
   VideoBufferType: { RGBA: 0, I420: 5 },
-  VideoCodec: { H264: 'H264' },
+  VideoCodec: { H264: 'H264', VP8: 'VP8' },
   VideoFrame: jest.fn(),
   AudioFrame: jest.fn()
 }))
@@ -182,5 +182,25 @@ describe('when audio start races with a pending stop', () => {
     expect(sources[1].captureFrame).toHaveBeenCalled()
     expect(tracks[0].close).toHaveBeenCalledTimes(1)
     expect(tracks[1].close).not.toHaveBeenCalled()
+  })
+})
+
+describe('when the presentation video track is published', () => {
+  let publisher: ILiveKitPublisher
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    installFakeRoom()
+    publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+    await publisher.connect('wss://lk.example.com', 'tok')
+    await publisher.startPublishing(960, 1242)
+  })
+
+  afterEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should publish it with the VP8 codec so tall slides are not dropped by the H.264 level limit', () => {
+    expect(TrackPublishOptions).toHaveBeenCalledWith(expect.objectContaining({ videoCodec: 'VP8' }))
   })
 })
