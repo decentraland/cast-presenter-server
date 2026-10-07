@@ -2034,6 +2034,24 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe('and the presentation stops while the bake is still settling', () => {
+    beforeEach(async () => {
+      const bake = createDeferred<{ videoPath: string; audioPath: string; bytes: number }>()
+      components.mediaEncoder.bake.mockReturnValueOnce(bake.promise)
+      await createSession()
+      const playing = manager.playVideo(presentationId, 0)
+      await flushMicrotasks()
+      const stopping = manager.stopPresentation(presentationId)
+      bake.resolve({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg', bytes: 10 })
+      await stopping
+      await playing
+    })
+
+    it('should not play the video on the ended session', () => {
+      expect(sidecar.play).not.toHaveBeenCalled()
+    })
+  })
+
   describe('and the presenter stops while the settled bake is still resuming the play', () => {
     beforeEach(async () => {
       const bake = createDeferred<{ videoPath: string; audioPath: string; bytes: number }>()

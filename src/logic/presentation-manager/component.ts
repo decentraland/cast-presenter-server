@@ -779,6 +779,7 @@ export async function createPresentationManager(
     session.videoErrorCode = null
     const stillWanted = (): boolean =>
       isCurrent() &&
+      !session.abortController.signal.aborted &&
       !session.navigating &&
       session.currentSlide === requestedSlide &&
       session.videoState === 'loading' &&
@@ -1240,11 +1241,9 @@ export async function createPresentationManager(
   async function stopSession(session: InternalSession): Promise<void> {
     if (session.stoppingPromise) return session.stoppingPromise
 
-    // Remove from map immediately to prevent re-entry from other lookup paths
     sessions.delete(session.id)
     metrics.decrement('active_sessions')
 
-    // Cancel pending pre-download timer to prevent downloads against a destroyed temp dir
     if (session.preDownloadTimer) {
       clearTimeout(session.preDownloadTimer)
       session.preDownloadTimer = null
@@ -1254,6 +1253,7 @@ export async function createPresentationManager(
       session.overlayBroadcastTimer = null
     }
 
+    session.playGeneration++
     session.abortController.abort()
 
     session.stoppingPromise = (async () => {
