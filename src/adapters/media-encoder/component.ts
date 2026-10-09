@@ -63,7 +63,7 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    'ultrafast',
     '-profile:v',
     'baseline',
     '-level:v',
