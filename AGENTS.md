@@ -24,6 +24,13 @@ Pre-commit and pre-push hooks are enforced via `simple-git-hooks` + `nano-staged
 
 Fix lint issues before committing: `yarn lint:fix`
 
+## Gotchas
+
+- **Yarn v1 only.** A global `yarn` may be Yarn 4, which rewrites `yarn.lock` into Berry format. Run scripts as `npx --yes yarn@1.22.22 <script>`. The pre-push hook calls bare `yarn`, so push with a v1 `yarn` shim first on `PATH`.
+- **Sidecar checks.** Verify Go changes under `sidecar/` with `(cd sidecar && GOTOOLCHAIN=local go vet ./... && GOTOOLCHAIN=local go test -race ./...)`.
+- **Local v2 runs.** With `CLIENT_COMPOSITION_ENABLED=true`, set `SIDECAR_BINARY_PATH` to a binary built with `(cd sidecar && CGO_ENABLED=0 go build -o cast-sidecar ./cmd/cast-sidecar)`. The default `/usr/local/bin/cast-sidecar` exists only in the Docker image.
+- **Worktrees and Jest.** Jest scans the whole repo root, so plan-plus worktrees under `.worktrees/` get their tests run too (57 suites instead of 21). Remove finished worktrees before running the suite from the main checkout.
+
 ## Testing
 
 - **Unit tests** (`test/unit/`): Required for all business logic components

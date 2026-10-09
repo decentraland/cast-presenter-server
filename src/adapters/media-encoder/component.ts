@@ -1,15 +1,15 @@
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
+import { errorMessage } from '../../logic/error-message'
+import { removeQuietly } from '../../logic/remove-quietly'
 import type { BakePriority, BakeResult, IMediaEncoder } from './types'
 import type { AppComponents } from '../../types'
 
 const PROBE_TIMEOUT_MS = 30_000
 const BAKE_TIMEOUT_MS = 20 * 60 * 1000
 const STDERR_TAIL_CHARS = 300
-const EMBEDDED_DIR_PREFIX = 'cast-pptx-video-'
 const HTTP_URL = /^https?:\/\//i
 const SCALE_FILTER =
   "scale='if(gte(iw,ih),min(1920,iw),min(1080,iw))':'if(gte(iw,ih),min(1080,ih),min(1920,ih))'" +
@@ -63,7 +63,7 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    'ultrafast',
     '-profile:v',
     'baseline',
     '-level:v',
@@ -130,14 +130,6 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
     return {
       playQueue: queue.filter((entry) => entry.priority === 'play').length,
       prefetchQueue: queue.filter((entry) => entry.priority === 'prefetch').length
-    }
-  }
-
-  function removeQuietly(filePath: string): void {
-    try {
-      fs.rmSync(filePath, { force: true })
-    } catch (err) {
-      logger.warn('Failed to remove bake output', { filePath, error: err instanceof Error ? err.message : String(err) })
     }
   }
 
@@ -214,8 +206,8 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
       const bytes = fs.statSync(videoPath).size + (audioPath ? fs.statSync(audioPath).size : 0)
       return { videoPath, audioPath, bytes }
     } catch (err) {
-      removeQuietly(videoPath)
-      removeQuietly(audioOutput)
+      removeQuietly(videoPath, logger)
+      removeQuietly(audioOutput, logger)
       throw err
     }
   }
@@ -261,7 +253,7 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
             } catch (err) {
               logger.info('Bake did not finish', {
                 durationMs: Date.now() - startedAt,
-                error: err instanceof Error ? err.message : String(err),
+                error: errorMessage(err),
                 ...queueLengths()
               })
               reject(err)
@@ -282,12 +274,11 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
       queue.unshift(entry)
     },
 
-    resolveEmbeddedVideo(url) {
-      if (HTTP_URL.test(url)) return null
+    resolveEmbeddedVideo(url, embeddedDir) {
+      if (!embeddedDir || HTTP_URL.test(url)) return null
       try {
         const real = fs.realpathSync(url)
-        const segments = path.relative(fs.realpathSync(os.tmpdir()), real).split(path.sep)
-        if (segments.length !== 2 || !segments[0].startsWith(EMBEDDED_DIR_PREFIX)) return null
+        if (path.dirname(real) !== fs.realpathSync(embeddedDir)) return null
         const stat = fs.statSync(real)
         return stat.isFile() ? { path: real, bytes: stat.size } : null
       } catch {

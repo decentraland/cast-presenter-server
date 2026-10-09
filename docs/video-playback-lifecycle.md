@@ -211,3 +211,54 @@ needed on our side.
                        │   pushAudioFrame() → LiveKit audio track
                        ▼
 ```
+
+## v2 (client composition)
+
+With `CLIENT_COMPOSITION_ENABLED=true` none of the above runs: there
+is no compositor, no ffmpeg during playback, and no audio-track
+churn. Each video is baked once, and the session's `cast-sidecar`
+plays the baked files onto `presentation-video` and
+`presentation-audio`, which stay published for the whole session.
+`playingVideoIndex` names the video while the state is `loading`,
+`playing` or `paused`.
+
+```
+idle ──play──► loading ──bake ready + sidecar play──► playing ──pause──► paused
+                  │                                     ▲                  │
+                  │                                     └─ play same index ┘
+                  └─ stop / navigate ─► idle               (sidecar resume)
+
+playing / paused ── natural end, stop, navigate ──► idle
+any failure ──► error (the next play starts over)
+```
+
+- **Loading while baking:** a play waits in `loading` for the video's
+  bake job. Each session prefetches its videos one at a time right
+  after creation; a play reuses a prefetch job for the same URL and
+  raises it to play priority (a queued bake moves to the front of the
+  process-wide queue; a running bake is never preempted). A finished
+  bake is reused by every later play of that URL.
+- **Bake cancellation:** stop or navigate during `loading` aborts the
+  pending job: an in-flight download stops, a queued bake is dropped,
+  or a running bake is killed. Ending the session aborts every job.
+  Navigating during a prefetch-only bake lets it finish.
+- **Pause / resume:** pause stops the sidecar writing samples, so
+  viewers hold the last frame. Playing the same index resumes from the
+  paused sample; playing another index stops the paused one first and
+  starts the new one from the beginning. Late joiners during a pause
+  see an empty video rect until resume.
+- **Navigate:** the sidecar playback is stopped together with the
+  rest of the video teardown, before the next slide is rendered.
+- **Natural end:** the sidecar sends `playbackEnded` and the state
+  goes to `idle`.
+- **Mid-stream failure:** a sidecar `playback-failed` puts the video
+  in `error` with `video-playback-interrupted`.
+- **Bake or download failure:** the video goes to `error`, classified
+  like a v1 download failure (`video-quota-exceeded`,
+  `video-not-found`, …); a failed or timed-out bake usually lands on
+  `video-playback-failed`. The next play starts a new job.
+- **RPC failure:** a rejected or timed-out sidecar `play`, `pause`,
+  `resume` or `stop` puts the video in `error` with
+  `video-playback-failed`, so the next play is never blocked by
+  `loading`.
+- **Sidecar crash:** a sidecar exit or a lost room stops the session.

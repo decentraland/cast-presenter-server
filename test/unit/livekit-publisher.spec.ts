@@ -1,6 +1,7 @@
 import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
-import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
+import { createLoggerMock } from '../mocks/context'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
 
 // Hoisted by ts-jest above the imports. Required because the real
@@ -22,16 +23,6 @@ jest.mock('@livekit/rtc-node', () => ({
 }))
 
 const RoomMock = Room as unknown as jest.Mock
-
-function createLogger(): ILoggerComponent.ILogger {
-  return {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    log: jest.fn()
-  }
-}
 
 interface FakeRoom {
   connect: jest.Mock
@@ -80,7 +71,7 @@ describe('when the LiveKit publisher connects', () => {
 
     beforeEach(async () => {
       room = installFakeRoom()
-      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
       await publisher.connect('wss://lk.example.com', 'tok')
     })
 
@@ -100,7 +91,7 @@ describe('when the LiveKit publisher connects', () => {
     beforeEach(() => {
       // Pending promise that never resolves — simulates a hung LiveKit server.
       room = installFakeRoom({ connect: jest.fn().mockReturnValue(new Promise<void>(noop)) })
-      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
       connectPromise = publisher.connect('wss://lk.example.com', 'tok')
       // Swallow the eventual rejection so Node doesn't treat it as unhandled
       // while fake timers are still advancing.
@@ -125,7 +116,7 @@ describe('when the LiveKit publisher connects', () => {
 
     beforeEach(() => {
       room = installFakeRoom({ connect: jest.fn().mockRejectedValue(new Error('token rejected')) })
-      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+      publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
       connectPromise = publisher.connect('wss://lk.example.com', 'bad-tok')
       connectPromise.catch(noop)
     })
@@ -167,7 +158,7 @@ describe('when audio start races with a pending stop', () => {
       return track
     })
 
-    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
     await publisher.connect('wss://lk.example.com', 'tok')
 
     await publisher.startAudioPublishing(48000, 2)
@@ -191,7 +182,7 @@ describe('when the presentation video track is published', () => {
   beforeEach(async () => {
     RoomMock.mockReset()
     installFakeRoom()
-    publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+    publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
     await publisher.connect('wss://lk.example.com', 'tok')
     await publisher.startPublishing(960, 1242)
   })
@@ -202,5 +193,42 @@ describe('when the presentation video track is published', () => {
 
   it('should publish it with the VP8 codec so tall slides are not dropped by the H.264 level limit', () => {
     expect(TrackPublishOptions).toHaveBeenCalledWith(expect.objectContaining({ videoCodec: 'VP8' }))
+  })
+})
+
+describe('when the LiveKit publisher receives a presentation data packet', () => {
+  let dataHandler: jest.Mock
+  let onData: (payload: Uint8Array, participant?: { identity?: string }) => void
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    const room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['Presenter-Id'] }) })
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLoggerMock())
+    dataHandler = jest.fn()
+    publisher.setDataHandler(dataHandler)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+  })
+
+  describe('and it comes from a presenter', () => {
+    beforeEach(() => {
+      onData(encodePresentationPacket({ type: 'presentation:navigate', action: 'next' }, 'scene-1'), {
+        identity: 'Presenter-Id'
+      })
+    })
+
+    it('should call the data handler with the message and the sender identity', () => {
+      expect(dataHandler).toHaveBeenCalledWith({ type: 'presentation:navigate', action: 'next' }, 'Presenter-Id')
+    })
+  })
+
+  describe('and a non-presenter sends presentation:presenter:claim', () => {
+    beforeEach(() => {
+      onData(encodePresentationPacket({ type: 'presentation:presenter:claim' }, 'scene-1'), { identity: 'Stranger' })
+    })
+
+    it('should not call the data handler', () => {
+      expect(dataHandler).not.toHaveBeenCalled()
+    })
   })
 })
