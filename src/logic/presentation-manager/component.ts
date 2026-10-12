@@ -762,7 +762,7 @@ export async function createPresentationManager(
   ): Promise<void> {
     const { url } = session.slideVideos[videoIndex]
     const resuming = session.videoState === 'paused' && session.activeVideoIndex === videoIndex
-    const stopPaused = session.videoState === 'paused' && !resuming
+    const stopPaused = session.videoState === 'paused' && !resuming && activeClientVideo(session) === null
     const requestedSlide = session.currentSlide
     const generation = ++session.playGeneration
     const isCurrent = (): boolean => session.playGeneration === generation
@@ -988,10 +988,6 @@ export async function createPresentationManager(
 
   async function playVideoSession(session: InternalSession, videoIndex: number): Promise<void> {
     if (session.navigating) return
-    // The check below and the `videoState = 'loading'` write a few lines down
-    // form an atomic guard against concurrent play commands. Keep them synchronous —
-    // do not introduce any `await` between them, or two rapid calls can both pass
-    // the check and allocate duplicate compositors.
     if (session.videoState === 'playing' || session.videoState === 'loading') return
 
     if (videoIndex < 0 || videoIndex >= session.slideVideos.length) {
