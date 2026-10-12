@@ -93,6 +93,9 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       promote: jest.fn(),
       resolveEmbeddedVideo: jest.fn().mockReturnValue(null)
     },
+    videoDuration: {
+      getDurationMs: jest.fn().mockResolvedValue(null)
+    },
     pdfRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
     },
@@ -1513,8 +1516,10 @@ describe('when client composition is enabled', () => {
   const PUBLIC_BASE_URL = 'https://cast.example.com'
   const PRESENTER_IDENTITY = 'stream:p:1'
   const VIDEO_URL = 'https://example.com/video.mp4'
-  const DOWNLOADED_PATH = '/tmp/video.mp4'
   const EMBEDDED_PATH = '/tmp/cast-pptx-video-a/v.mp4'
+  const YOUTUBE_URL = 'https://youtu.be/dQw4w9WgXcQ'
+  const GEOMETRY = { x: 100, y: 100, width: 640, height: 480 }
+  const NOW = 1760270400000
   let components: ReturnType<typeof createMockComponents>
   let sidecar: jest.Mocked<ISidecarPublisher>
   let compositor: jest.Mocked<IVideoCompositor>
@@ -1553,6 +1558,17 @@ describe('when client composition is enabled', () => {
     await flushMicrotasks()
   }
 
+  function embedOnly(urls: string[]): void {
+    components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((url: string) =>
+      urls.includes(url) ? { path: EMBEDDED_PATH, bytes: 0 } : null
+    )
+  }
+
+  function lastState(): Record<string, unknown> {
+    const states = stateBroadcasts()
+    return states[states.length - 1]
+  }
+
   beforeEach(async () => {
     rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(() => undefined)
     encodeCount = 0
@@ -1572,6 +1588,7 @@ describe('when client composition is enabled', () => {
       { url: VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } }
     ])
     components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    embedOnly([VIDEO_URL])
     manager = await createManager(components)
   })
 
@@ -1614,7 +1631,7 @@ describe('when client composition is enabled', () => {
     })
 
     it('should start the prefetch bake right away, without the legacy timer', () => {
-      expect(components.mediaEncoder.bake).toHaveBeenCalledWith(DOWNLOADED_PATH, expect.any(String), {
+      expect(components.mediaEncoder.bake).toHaveBeenCalledWith(EMBEDDED_PATH, expect.any(String), {
         priority: 'prefetch',
         signal: expect.any(AbortSignal)
       })
@@ -1748,14 +1765,8 @@ describe('when client composition is enabled', () => {
           await manager.playVideo(presentationId, 0)
         })
 
-        it('should delete the downloaded source after the bake', () => {
-          expect(rmSync).toHaveBeenCalledWith(DOWNLOADED_PATH, { force: true })
-        })
-
-        it('should reuse the first download and bake instead of repeating them', () => {
-          expect([compositor.downloadVideo.mock.calls.length, components.mediaEncoder.bake.mock.calls.length]).toEqual([
-            1, 1
-          ])
+        it('should reuse the first bake instead of repeating it', () => {
+          expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(1)
         })
       })
 
@@ -1895,22 +1906,6 @@ describe('when client composition is enabled', () => {
     })
   })
 
-  describe('and the bake output alone fits the quota but source plus output would not', () => {
-    beforeEach(async () => {
-      components.mediaEncoder.bake.mockResolvedValue({
-        videoPath: '/tmp/v.h264',
-        audioPath: '/tmp/a.ogg',
-        bytes: SESSION_DISK_QUOTA_BYTES - 1000
-      })
-      await createSession()
-      await manager.playVideo(presentationId, 0)
-    })
-
-    it('should release the source bytes and play', () => {
-      expect(manager.getState(presentationId)?.videoState).toBe('playing')
-    })
-  })
-
   describe('and a cancelled job rejects late after the same video was played again', () => {
     let lateBake: ReturnType<typeof createDeferred<never>>
 
@@ -1954,47 +1949,6 @@ describe('when client composition is enabled', () => {
 
     it('should not start a second bake', () => {
       expect(components.mediaEncoder.bake).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  describe('and video 0 is played while its prefetch download is still running', () => {
-    beforeEach(async () => {
-      const download = createDeferred<{ path: string; bytes: number }>()
-      compositor.downloadVideo.mockReturnValueOnce(download.promise)
-      await createSession()
-      const playing = manager.playVideo(presentationId, 0)
-      await flushMicrotasks()
-      download.resolve({ path: DOWNLOADED_PATH, bytes: 1024 })
-      await playing
-    })
-
-    it('should bake it with play priority', () => {
-      expect(components.mediaEncoder.bake).toHaveBeenCalledWith(
-        DOWNLOADED_PATH,
-        expect.any(String),
-        expect.objectContaining({ priority: 'play' })
-      )
-    })
-  })
-
-  describe('and the presenter stops while the download is pending', () => {
-    beforeEach(async () => {
-      compositor.downloadVideo.mockImplementationOnce((_url: string, signal?: AbortSignal) =>
-        pendingUntilAborted(signal ?? new AbortController().signal)
-      )
-      await createSession()
-      const playing = manager.playVideo(presentationId, 0)
-      await flushMicrotasks()
-      await manager.stopVideo(presentationId)
-      await playing
-    })
-
-    it('should abort the download', () => {
-      expect(compositor.downloadVideo.mock.calls[0][1]?.aborted).toBe(true)
-    })
-
-    it('should not bake', () => {
-      expect(components.mediaEncoder.bake).not.toHaveBeenCalled()
     })
   })
 
@@ -2085,6 +2039,7 @@ describe('when client composition is enabled', () => {
         { url: VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } },
         { url: SECOND_VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } }
       ])
+      embedOnly([VIDEO_URL, SECOND_VIDEO_URL])
       await createSession()
       sidecar.play.mockReturnValueOnce(firstPlay.promise)
       firstPlaying = manager.playVideo(presentationId, 0)
@@ -2319,6 +2274,367 @@ describe('when client composition is enabled', () => {
       expect(bakeSignal(0).aborted).toBe(true)
     })
   })
+
+  describe('and the slide video is a YouTube short link', () => {
+    beforeEach(async () => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+      jest.setSystemTime(NOW)
+      renderer.getSlideVideos.mockResolvedValue([{ url: YOUTUBE_URL, geometry: GEOMETRY }])
+      await createSession()
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it('should broadcast the canonical url with the client source', () => {
+      expect(lastState().slideVideos).toEqual([
+        { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', geometry: GEOMETRY, source: 'client' }
+      ])
+    })
+
+    it('should broadcast null position fields', () => {
+      expect([lastState().videoPositionMs, lastState().videoPositionAt]).toEqual([null, null])
+    })
+
+    describe('and play is requested', () => {
+      let duration: ReturnType<typeof createDeferred<number | null>>
+
+      beforeEach(async () => {
+        duration = createDeferred<number | null>()
+        components.videoDuration.getDurationMs.mockReturnValue(duration.promise)
+        await manager.playVideo(presentationId, 0)
+      })
+
+      it('should broadcast playing at position 0 anchored at the play time', () => {
+        expect(lastState()).toEqual(
+          expect.objectContaining({
+            videoState: 'playing',
+            playingVideoIndex: 0,
+            videoPositionMs: 0,
+            videoPositionAt: NOW
+          })
+        )
+      })
+
+      it('should look up the duration of the canonical video', () => {
+        expect(components.videoDuration.getDurationMs).toHaveBeenCalledWith({
+          provider: 'youtube',
+          id: 'dQw4w9WgXcQ',
+          url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+        })
+      })
+
+      it('should not bake, download or play anything on the sidecar', () => {
+        expect([
+          components.mediaEncoder.bake.mock.calls.length,
+          compositor.downloadVideo.mock.calls.length,
+          sidecar.play.mock.calls.length
+        ]).toEqual([0, 0, 0])
+      })
+
+      describe('and the duration is 10 s', () => {
+        beforeEach(async () => {
+          duration.resolve(10_000)
+          await flushMicrotasks()
+        })
+
+        describe('and 11.9 s pass', () => {
+          beforeEach(async () => {
+            await jest.advanceTimersByTimeAsync(11_900)
+          })
+
+          it('should still be playing', () => {
+            expect(lastState().videoState).toBe('playing')
+          })
+        })
+
+        describe('and 12 s pass', () => {
+          beforeEach(async () => {
+            await jest.advanceTimersByTimeAsync(12_000)
+          })
+
+          it('should broadcast idle with no playing video and null position fields', () => {
+            expect(lastState()).toEqual(
+              expect.objectContaining({
+                videoState: 'idle',
+                playingVideoIndex: null,
+                videoPositionMs: null,
+                videoPositionAt: null
+              })
+            )
+          })
+
+          it('should count the natural end', () => {
+            expect(components.metrics.increment).toHaveBeenCalledWith('video_playback_total', { action: 'end' })
+          })
+        })
+
+        describe('and it is paused at 4 s', () => {
+          beforeEach(async () => {
+            await jest.advanceTimersByTimeAsync(4_000)
+            await manager.pauseVideo(presentationId)
+          })
+
+          it('should broadcast paused at position 4000', () => {
+            expect(lastState()).toEqual(expect.objectContaining({ videoState: 'paused', videoPositionMs: 4_000 }))
+          })
+
+          it('should not pause the sidecar', () => {
+            expect(sidecar.pause).not.toHaveBeenCalled()
+          })
+
+          describe('and 60 s pass', () => {
+            beforeEach(async () => {
+              await jest.advanceTimersByTimeAsync(60_000)
+            })
+
+            it('should stay paused', () => {
+              expect(lastState().videoState).toBe('paused')
+            })
+
+            describe('and it is resumed', () => {
+              beforeEach(async () => {
+                await manager.playVideo(presentationId, 0)
+                await flushMicrotasks()
+              })
+
+              it('should broadcast playing at position 4000 anchored at the resume time', () => {
+                expect(lastState()).toEqual(
+                  expect.objectContaining({
+                    videoState: 'playing',
+                    videoPositionMs: 4_000,
+                    videoPositionAt: NOW + 64_000
+                  })
+                )
+              })
+
+              describe('and 7.9 s pass', () => {
+                beforeEach(async () => {
+                  await jest.advanceTimersByTimeAsync(7_900)
+                })
+
+                it('should still be playing', () => {
+                  expect(lastState().videoState).toBe('playing')
+                })
+              })
+
+              describe('and 8 s pass', () => {
+                beforeEach(async () => {
+                  await jest.advanceTimersByTimeAsync(8_000)
+                })
+
+                it('should broadcast idle', () => {
+                  expect(lastState().videoState).toBe('idle')
+                })
+              })
+            })
+          })
+        })
+
+        describe('and it is stopped before the end', () => {
+          let statesBefore: number
+
+          beforeEach(async () => {
+            await manager.stopVideo(presentationId)
+            statesBefore = stateBroadcasts().length
+            await jest.advanceTimersByTimeAsync(12_000)
+          })
+
+          it('should not broadcast any state afterwards', () => {
+            expect(stateBroadcasts().slice(statesBefore)).toEqual([])
+          })
+
+          it('should not stop the sidecar', () => {
+            expect(sidecar.stopVideo).not.toHaveBeenCalled()
+          })
+        })
+
+        describe('and the slide changes before the end', () => {
+          let statesBefore: number
+
+          beforeEach(async () => {
+            await manager.navigate(presentationId, 'next')
+            statesBefore = stateBroadcasts().length
+            await jest.advanceTimersByTimeAsync(12_000)
+          })
+
+          it('should not broadcast any state afterwards', () => {
+            expect(stateBroadcasts().slice(statesBefore)).toEqual([])
+          })
+
+          it('should not stop the sidecar', () => {
+            expect(sidecar.stopVideo).not.toHaveBeenCalled()
+          })
+        })
+
+        describe('and the sidecar reports playbackEnded while it plays', () => {
+          beforeEach(async () => {
+            sidecar.onPlaybackEnded.mock.calls[0][0]()
+            await flushMicrotasks()
+          })
+
+          it('should still be playing', () => {
+            expect(manager.getState(presentationId)?.videoState).toBe('playing')
+          })
+        })
+
+        describe('and the presentation stops before the end', () => {
+          let messagesAfterStop: unknown[]
+
+          beforeEach(async () => {
+            await manager.stopPresentation(presentationId)
+            await jest.advanceTimersByTimeAsync(12_000)
+            const types = sidecar.publishData.mock.calls.map(([message]) => message.type)
+            messagesAfterStop = types.slice(types.indexOf('presentation:stopped') + 1)
+          })
+
+          it('should not publish anything after presentation:stopped', () => {
+            expect(messagesAfterStop).toEqual([])
+          })
+        })
+      })
+
+      describe('and the duration is unknown', () => {
+        beforeEach(async () => {
+          duration.resolve(null)
+          await flushMicrotasks()
+          await jest.advanceTimersByTimeAsync(10 * 60_000)
+        })
+
+        it('should keep playing', () => {
+          expect(lastState().videoState).toBe('playing')
+        })
+      })
+
+      describe('and the duration resolves after a pause', () => {
+        beforeEach(async () => {
+          await manager.pauseVideo(presentationId)
+          duration.resolve(10_000)
+          await flushMicrotasks()
+          await jest.advanceTimersByTimeAsync(10 * 60_000)
+        })
+
+        it('should stay paused', () => {
+          expect(lastState().videoState).toBe('paused')
+        })
+      })
+    })
+  })
+
+  describe('and an embedded video is paused on a slide that also has a YouTube video', () => {
+    beforeEach(async () => {
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: VIDEO_URL, geometry: GEOMETRY },
+        { url: YOUTUBE_URL, geometry: GEOMETRY }
+      ])
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      await manager.pauseVideo(presentationId)
+    })
+
+    describe('and the YouTube video is played', () => {
+      beforeEach(async () => {
+        await manager.playVideo(presentationId, 1)
+      })
+
+      it('should stop the sidecar once and play the YouTube video', () => {
+        expect([sidecar.stopVideo.mock.calls.length, lastState().videoState, lastState().playingVideoIndex]).toEqual([
+          1,
+          'playing',
+          1
+        ])
+      })
+    })
+
+    describe('and a pause arrives before the sidecar stop resolves', () => {
+      beforeEach(async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+        components.videoDuration.getDurationMs.mockResolvedValue(10_000)
+        const stop = createDeferred<void>()
+        sidecar.stopVideo.mockReturnValueOnce(stop.promise)
+        const playing = manager.playVideo(presentationId, 1)
+        await flushMicrotasks()
+        await manager.pauseVideo(presentationId)
+        stop.resolve()
+        await playing
+        await flushMicrotasks()
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+      })
+
+      afterEach(() => {
+        jest.useRealTimers()
+      })
+
+      it('should stay paused on the YouTube video', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'paused', playingVideoIndex: 1 })
+        )
+      })
+
+      it('should never broadcast playing after the pause', () => {
+        const states = stateBroadcasts().map((state) => state.videoState)
+        expect(states.slice(states.lastIndexOf('paused'))).toEqual(['paused'])
+      })
+    })
+
+    describe('and the sidecar stop fails while switching to the YouTube video', () => {
+      beforeEach(async () => {
+        sidecar.stopVideo.mockRejectedValueOnce(new Error('stop failed'))
+        await manager.playVideo(presentationId, 1)
+      })
+
+      it('should end with the error event and the error state, without broadcasting playing', () => {
+        expect(sidecar.publishData.mock.calls.slice(-2).map(([message]) => [message.type, message.videoState])).toEqual(
+          [
+            ['presentation:error', undefined],
+            ['presentation:state', 'error']
+          ]
+        )
+      })
+    })
+  })
+
+  describe('and the deck mixes a YouTube video and an embedded video across slides', () => {
+    beforeEach(async () => {
+      renderer.getSlideVideos.mockImplementation(async (slide: number) =>
+        slide === 0
+          ? [{ url: YOUTUBE_URL, geometry: GEOMETRY }]
+          : slide === 1
+            ? [{ url: VIDEO_URL, geometry: GEOMETRY }]
+            : []
+      )
+      await createSession()
+    })
+
+    it('should prefetch only the embedded video', () => {
+      expect(components.mediaEncoder.bake.mock.calls).toEqual([
+        [EMBEDDED_PATH, expect.any(String), { priority: 'prefetch', signal: expect.any(AbortSignal) }]
+      ])
+    })
+  })
+
+  describe('and the slide video is a vimeo.com page link', () => {
+    beforeEach(async () => {
+      renderer.getSlideVideos.mockResolvedValue([{ url: 'https://vimeo.com/123', geometry: GEOMETRY }])
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+    })
+
+    it('should publish an invalid-format error with the supported-links message', () => {
+      expect(sidecar.publishData).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'presentation:error',
+          code: 'video-invalid-format',
+          message: 'Unsupported video link — use YouTube, Google Drive or a Vimeo .m3u8 link'
+        })
+      )
+    })
+
+    it('should not bake', () => {
+      expect(components.mediaEncoder.bake).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('when client composition is disabled', () => {
@@ -2345,7 +2661,11 @@ describe('when client composition is disabled', () => {
     })
 
     it('should not include any client-composition field in the state', () => {
-      expect(['slide', 'presenterIdentity', 'playingVideoIndex'].filter((key) => key in state)).toEqual([])
+      expect(
+        ['slide', 'presenterIdentity', 'playingVideoIndex', 'videoPositionMs', 'videoPositionAt'].filter(
+          (key) => key in state
+        )
+      ).toEqual([])
     })
 
     it('should not encode a slide image', () => {
