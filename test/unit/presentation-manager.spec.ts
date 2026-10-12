@@ -2479,6 +2479,17 @@ describe('when client composition is enabled', () => {
           })
         })
 
+        describe('and the sidecar reports a playback failure while it plays', () => {
+          beforeEach(async () => {
+            sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error')
+            await flushMicrotasks()
+          })
+
+          it('should still be playing', () => {
+            expect(manager.getState(presentationId)?.videoState).toBe('playing')
+          })
+        })
+
         describe('and the presentation stops before the end', () => {
           beforeEach(async () => {
             await manager.stopPresentation(presentationId)
@@ -2613,15 +2624,68 @@ describe('when client composition is enabled', () => {
     })
   })
 
-  describe('and the deck mixes a YouTube video and an embedded video across slides', () => {
+  describe('and a YouTube video is paused on a slide that also has another YouTube video and an embedded video', () => {
     beforeEach(async () => {
-      renderer.getSlideVideos.mockImplementation(async (slide: number) =>
-        slide === 0
-          ? [{ url: YOUTUBE_URL, geometry: GEOMETRY }]
-          : slide === 1
-            ? [{ url: VIDEO_URL, geometry: GEOMETRY }]
-            : []
-      )
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
+      jest.setSystemTime(NOW)
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: YOUTUBE_URL, geometry: GEOMETRY },
+        { url: 'https://youtu.be/9bZkp7q19f0', geometry: GEOMETRY },
+        { url: VIDEO_URL, geometry: GEOMETRY }
+      ])
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      await jest.advanceTimersByTimeAsync(4_000)
+      await manager.pauseVideo(presentationId)
+      await jest.advanceTimersByTimeAsync(1_000)
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    describe('and the other YouTube video is played', () => {
+      beforeEach(async () => {
+        await manager.playVideo(presentationId, 1)
+      })
+
+      it('should broadcast it playing from position 0 anchored at the play time', () => {
+        expect(lastState()).toEqual(
+          expect.objectContaining({
+            videoState: 'playing',
+            playingVideoIndex: 1,
+            videoPositionMs: 0,
+            videoPositionAt: NOW + 5_000
+          })
+        )
+      })
+
+      it('should not stop the sidecar', () => {
+        expect(sidecar.stopVideo).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('and the embedded video is played', () => {
+      beforeEach(async () => {
+        await manager.playVideo(presentationId, 2)
+      })
+
+      it('should not stop the sidecar', () => {
+        expect(sidecar.stopVideo).not.toHaveBeenCalled()
+      })
+
+      it('should play the embedded video on the sidecar once', () => {
+        expect(sidecar.play).toHaveBeenCalledTimes(1)
+      })
+    })
+  })
+
+  describe('and the deck has more YouTube videos than the prefetch limit before an embedded video', () => {
+    beforeEach(async () => {
+      renderer.getSlideCount.mockReturnValue(11)
+      renderer.getSlideVideos.mockImplementation(async (slide: number) => [
+        { url: slide < 10 ? `https://youtu.be/dQw4w9WgXc${slide}` : VIDEO_URL, geometry: GEOMETRY }
+      ])
       await createSession()
     })
 

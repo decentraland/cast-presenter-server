@@ -208,6 +208,62 @@ describe('when resolving a client video duration', () => {
       it('should resolve null', () => {
         expect(result).toBeNull()
       })
+
+      it('should log that the duration is unknown with the network reason', () => {
+        expect(logger.info).toHaveBeenCalledWith('Video duration unknown', { provider: 'youtube', reason: 'network' })
+      })
+    })
+
+    describe('and the request never settles', () => {
+      beforeEach(async () => {
+        jest.useFakeTimers()
+        fetcher.fetch.mockImplementation(
+          (_url, options) =>
+            new Promise((_resolve, reject) => {
+              options?.abortController?.signal.addEventListener('abort', () => reject(new Error('aborted')))
+            })
+        )
+        const pending = videoDuration.getDurationMs(YOUTUBE_VIDEO)
+        await jest.advanceTimersByTimeAsync(5000)
+        result = await pending
+      })
+
+      afterEach(() => {
+        jest.useRealTimers()
+      })
+
+      it('should resolve null after 5 s', () => {
+        expect(result).toBeNull()
+      })
+
+      it('should log that the duration is unknown with the timeout reason', () => {
+        expect(logger.info).toHaveBeenCalledWith('Video duration unknown', { provider: 'youtube', reason: 'timeout' })
+      })
+
+      describe('and the duration is looked up again', () => {
+        beforeEach(() => {
+          videoDuration.getDurationMs(YOUTUBE_VIDEO).catch(() => undefined)
+        })
+
+        it('should send a new request', () => {
+          expect(fetcher.fetch).toHaveBeenCalledTimes(2)
+        })
+      })
+    })
+
+    describe('and the length is longer than 24 hours', () => {
+      beforeEach(async () => {
+        fetcher.fetch.mockResolvedValueOnce(playerResponse(okPlayerBody('2200000')))
+        result = await videoDuration.getDurationMs(YOUTUBE_VIDEO)
+      })
+
+      it('should resolve null', () => {
+        expect(result).toBeNull()
+      })
+
+      it('should log that the duration is unknown with the parse reason', () => {
+        expect(logger.info).toHaveBeenCalledWith('Video duration unknown', { provider: 'youtube', reason: 'parse' })
+      })
     })
 
     describe('and the duration was already resolved', () => {
@@ -311,6 +367,17 @@ describe('when resolving a client video duration', () => {
           provider: 'drive',
           reason: 'ffprobe-exit'
         })
+      })
+    })
+
+    describe('and ffprobe prints a duration longer than 24 hours', () => {
+      beforeEach(async () => {
+        mockFfprobe(null, '2200000\n')
+        result = await videoDuration.getDurationMs(DRIVE_VIDEO)
+      })
+
+      it('should resolve null', () => {
+        expect(result).toBeNull()
       })
     })
 
