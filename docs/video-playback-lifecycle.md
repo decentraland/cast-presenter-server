@@ -253,8 +253,12 @@ any failure ──► error (the next play starts over)
   process-wide queue; a running bake is never preempted). A finished
   bake is reused by every later play of that URL.
 - **Bake cancellation:** stop or navigate during `loading` aborts the
-  pending job: a queued bake is dropped, or a running bake is killed. Ending the session aborts every job.
-  Navigating during a prefetch-only bake lets it finish.
+  pending job: a queued bake is dropped, or a running bake is killed.
+  Ending the session aborts every job. Navigating during a
+  prefetch-only bake lets it finish.
+- **Concurrent plays:** a play is ignored while the state is
+  `playing` or `loading`. The check and the state write run with no
+  `await` between them, so two rapid plays can never both start.
 - **Pause / resume:** pause stops the sidecar writing samples, so
   viewers hold the last frame. Playing the same index resumes from the
   paused sample; playing another index stops the paused one first and
@@ -303,11 +307,13 @@ playing / paused ── stop, navigate, end timer (playing only) ──► idle
   `player` request for YouTube, ffprobe for Drive and Vimeo). When it
   is known, the server arms an end timer for the remaining time plus
   2 s; when it fires, the state goes to `idle` with
-  `playingVideoIndex: null`. An unknown duration arms no timer, so the
-  video plays until it is stopped or the slide changes. A lookup never
-  fails playback.
-- **Stale work:** every play, stop, navigate and session stop clears
-  the end timer and bumps the play generation, and pause clears it.
+  `playingVideoIndex: null`. A duration over 24 hours counts as
+  unknown. An unknown duration arms no timer, so the video plays
+  until it is stopped or the slide changes. A lookup never fails
+  playback.
+- **Stale work:** every client play, stop, navigate and session stop
+  clears the end timer, pause clears it too, and every play bumps the
+  play generation.
   A lookup that resolves after any of these, or while paused, is
   dropped. Late sidecar `playbackEnded` or `playback-failed` events
   never end or fail a client video.
