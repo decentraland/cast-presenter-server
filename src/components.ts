@@ -91,7 +91,8 @@ export async function initComponents(): Promise<AppComponents> {
     pptxRenderer,
     videoCompositor,
     sidecarPublisher,
-    mediaEncoder
+    mediaEncoder,
+    videoDuration
   })
 
   return {

@@ -28,6 +28,9 @@ export interface PresentationInfo {
   fileType: FileType
 }
 
+/** How clients play a slide video: from its URL (`client`) or from the sidecar's tracks (`stream`). */
+export type VideoSource = 'client' | 'stream'
+
 /** Full presentation state including slide videos and playback status. */
 export interface PresentationState {
   id: string
@@ -35,7 +38,8 @@ export interface PresentationState {
   slideCount: number
   currentSlide: number
   fileType: FileType
-  slideVideos: SlideVideoInfo[]
+  /** Slide videos; `source` is present only with client composition enabled. */
+  slideVideos: Array<SlideVideoInfo & { source?: VideoSource }>
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
   /** Human-readable error message; present only when videoState === 'error'. */
   videoErrorReason?: string
@@ -53,6 +57,10 @@ export interface PresentationState {
   presenterIdentity?: string | null
   /** Index into `slideVideos` while a video is loading, playing or paused; present only with client composition enabled. */
   playingVideoIndex?: number | null
+  /** Client-played video position in ms at `videoPositionAt`; present only with client composition enabled. */
+  videoPositionMs?: number | null
+  /** Server epoch ms at which the client-played video was at `videoPositionMs`; present only with client composition enabled. */
+  videoPositionAt?: number | null
 }
 
 /**

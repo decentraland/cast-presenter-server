@@ -2480,17 +2480,26 @@ describe('when client composition is enabled', () => {
         })
 
         describe('and the presentation stops before the end', () => {
-          let messagesAfterStop: unknown[]
-
           beforeEach(async () => {
             await manager.stopPresentation(presentationId)
-            await jest.advanceTimersByTimeAsync(12_000)
-            const types = sidecar.publishData.mock.calls.map(([message]) => message.type)
-            messagesAfterStop = types.slice(types.indexOf('presentation:stopped') + 1)
           })
 
-          it('should not publish anything after presentation:stopped', () => {
-            expect(messagesAfterStop).toEqual([])
+          it('should clear the end timer', () => {
+            expect(jest.getTimerCount()).toBe(0)
+          })
+
+          describe('and 12 s pass', () => {
+            let messagesAfterStop: unknown[]
+
+            beforeEach(async () => {
+              await jest.advanceTimersByTimeAsync(12_000)
+              const types = sidecar.publishData.mock.calls.map(([message]) => message.type)
+              messagesAfterStop = types.slice(types.indexOf('presentation:stopped') + 1)
+            })
+
+            it('should not publish anything after presentation:stopped', () => {
+              expect(messagesAfterStop).toEqual([])
+            })
           })
         })
       })
@@ -2512,11 +2521,20 @@ describe('when client composition is enabled', () => {
           await manager.pauseVideo(presentationId)
           duration.resolve(10_000)
           await flushMicrotasks()
-          await jest.advanceTimersByTimeAsync(10 * 60_000)
         })
 
-        it('should stay paused', () => {
-          expect(lastState().videoState).toBe('paused')
+        it('should not arm an end timer', () => {
+          expect(jest.getTimerCount()).toBe(0)
+        })
+
+        describe('and 10 minutes pass', () => {
+          beforeEach(async () => {
+            await jest.advanceTimersByTimeAsync(10 * 60_000)
+          })
+
+          it('should stay paused', () => {
+            expect(lastState().videoState).toBe('paused')
+          })
         })
       })
     })

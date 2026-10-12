@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { classifyClientVideo } from '../client-video'
 import { errorMessage } from '../error-message'
 import { FILE_TYPES } from '../file-validator'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
@@ -14,12 +15,9 @@ import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { BakePriority, BakeResult } from '../../adapters/media-encoder/types'
 import type { IRenderer } from '../../adapters/renderer/types'
 import type { ISidecarPublisher } from '../../adapters/sidecar-publisher/types'
-import type {
-  CompositorErrorReason,
-  IVideoCompositor,
-  VideoDownloadResult
-} from '../../adapters/video-compositor/types'
+import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
 import type { AppComponents } from '../../types'
+import type { ClientVideo } from '../client-video'
 import type { FileType } from '../file-validator'
 import type { OverlayLayout } from '../overlay-layout'
 import type { SlideImage } from '../slide-image'
@@ -65,6 +63,7 @@ interface InternalSession extends PresentationSession {
   preDownloadTimer: ReturnType<typeof setTimeout> | null
   overlay: OverlayLayout
   overlayBroadcastTimer: ReturnType<typeof setTimeout> | null
+  videoEndTimer: ReturnType<typeof setTimeout> | null
   abortController: AbortController
   // Cumulative bytes written to tempDir across all downloads; enforced against
   // SESSION_DISK_QUOTA_BYTES to bound disk usage per session.
@@ -110,6 +109,8 @@ const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
 }
 
 const PLAYBACK_FAILED_MESSAGE = 'Video unavailable'
+const UNSUPPORTED_VIDEO_MESSAGE = 'Unsupported video link — use YouTube, Google Drive or a Vimeo .m3u8 link'
+const END_GRACE_MS = 2000
 
 /** Maps download/playback errors to a stable code + user-friendly reason. */
 function classifyVideoError(err: Error): VideoErrorInfo {
@@ -151,6 +152,21 @@ function isVideoActive(session: InternalSession): boolean {
   return session.videoState === 'loading' || session.videoState === 'playing' || session.videoState === 'paused'
 }
 
+function activeClientVideo(session: InternalSession): ClientVideo | null {
+  const video = session.slideVideos[session.activeVideoIndex]
+  return isVideoActive(session) && video ? classifyClientVideo(video.url) : null
+}
+
+function clientPositionMs(session: InternalSession): number {
+  const sinceAnchor = session.videoState === 'playing' ? Date.now() - session.videoPlaybackStartedAt : 0
+  return session.videoElapsedBeforePause + sinceAnchor
+}
+
+function clearVideoEndTimer(session: InternalSession): void {
+  if (session.videoEndTimer) clearTimeout(session.videoEndTimer)
+  session.videoEndTimer = null
+}
+
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
   session.slideImages.delete(image.hash)
   session.slideImages.set(image.hash, image)
@@ -173,7 +189,7 @@ function rememberSlideImage(session: InternalSession, image: SlideImage): void {
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
  * @param components - Required: config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor,
- *   sidecarPublisher, mediaEncoder
+ *   sidecarPublisher, mediaEncoder, videoDuration
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
@@ -188,6 +204,7 @@ export async function createPresentationManager(
     | 'videoCompositor'
     | 'sidecarPublisher'
     | 'mediaEncoder'
+    | 'videoDuration'
   >
 ): Promise<IPresentationManager> {
   const {
@@ -199,7 +216,8 @@ export async function createPresentationManager(
     pptxRenderer,
     videoCompositor,
     sidecarPublisher,
-    mediaEncoder
+    mediaEncoder,
+    videoDuration
   } = components
   const logger = logs.getLogger('presentation-manager')
 
@@ -442,6 +460,7 @@ export async function createPresentationManager(
         preDownloadTimer: null,
         overlay: { ...DEFAULT_OVERLAY_LAYOUT },
         overlayBroadcastTimer: null,
+        videoEndTimer: null,
         abortController: new AbortController(),
         bytesDownloaded: 0,
         slideImages: new Map(),
@@ -609,6 +628,7 @@ export async function createPresentationManager(
   }
 
   async function endSidecarPlayback(session: InternalSession): Promise<void> {
+    if (activeClientVideo(session)) return
     if (session.videoState !== 'playing' && session.videoState !== 'paused') return
     session.videoState = 'idle'
     metrics.increment('video_playback_total', { action: 'end' })
@@ -617,35 +637,11 @@ export async function createPresentationManager(
   }
 
   async function interruptSidecarPlayback(session: InternalSession, message: string): Promise<void> {
+    if (activeClientVideo(session)) return
     if (session.videoState !== 'playing' && session.videoState !== 'paused') return
     const reason = 'video-playback-interrupted'
     await failVideo(session, session.activeVideoIndex, reason, COMPOSITOR_ERROR_MESSAGES[reason])
     logger.warn(`Video playback interrupted for presentation ${session.id}: ${message}`)
-  }
-
-  async function downloadForBake(
-    session: InternalSession,
-    url: string,
-    signal: AbortSignal
-  ): Promise<VideoDownloadResult> {
-    if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
-      throw new SessionDiskQuotaExceededError(session.bytesDownloaded, 0)
-    }
-    const downloader = videoCompositor.createCompositor(
-      logs.getLogger(`video-compositor:${session.id}`),
-      session.tempDir
-    )
-    try {
-      const result = await downloader.downloadVideo(url, signal)
-      if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
-        removeQuietly(result.path, logger)
-        throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
-      }
-      session.bytesDownloaded += result.bytes
-      return result
-    } finally {
-      downloader.cleanup()
-    }
   }
 
   async function runBakeJob(
@@ -653,18 +649,12 @@ export async function createPresentationManager(
     url: string,
     job: Pick<BakeJob, 'abort' | 'priority'>
   ): Promise<BakeResult> {
-    const { signal } = job.abort
     const embedded = mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir())
-    const source = embedded ?? (await downloadForBake(session, url, signal))
-    let result: BakeResult
-    try {
-      result = await mediaEncoder.bake(source.path, session.tempDir, { priority: job.priority, signal })
-    } finally {
-      if (!embedded) {
-        removeQuietly(source.path, logger)
-        session.bytesDownloaded -= source.bytes
-      }
-    }
+    if (!embedded) throw new Error('Only embedded videos are baked')
+    const result = await mediaEncoder.bake(embedded.path, session.tempDir, {
+      priority: job.priority,
+      signal: job.abort.signal
+    })
     if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
       removeQuietly(result.videoPath, logger)
       if (result.audioPath) removeQuietly(result.audioPath, logger)
@@ -705,10 +695,13 @@ export async function createPresentationManager(
 
   async function prefetchBakes(session: InternalSession): Promise<void> {
     const { signal } = session.abortController
-    const urls = await deckVideoUrls(session)
+    const embeddedDir = session.renderer.getEmbeddedMediaDir()
+    const urls = [...(await deckVideoUrls(session))].filter(
+      (url) => mediaEncoder.resolveEmbeddedVideo(url, embeddedDir) !== null
+    )
     if (signal.aborted) return
-    logger.info(`Prefetch bake queue: ${urls.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
-    for (const url of [...urls].slice(0, MAX_PRE_DOWNLOADS)) {
+    logger.info(`Prefetch bake queue: ${urls.length} embedded videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
+    for (const url of urls.slice(0, MAX_PRE_DOWNLOADS)) {
       if (signal.aborted || !sessions.has(session.id)) return
       await ensureBakeJob(session, url, 'prefetch').promise.catch((err) => {
         logger.warn(`Prefetch bake failed: ${url} — ${errorMessage(err)}`)
@@ -847,6 +840,66 @@ export async function createPresentationManager(
     await markV2Playing(session, videoIndex)
   }
 
+  async function playClientVideo(
+    session: InternalSession,
+    sidecar: ISidecarPublisher,
+    videoIndex: number,
+    clientVideo: ClientVideo
+  ): Promise<void> {
+    const resuming = session.videoState === 'paused' && session.activeVideoIndex === videoIndex
+    const previousIndex = session.activeVideoIndex
+    const stopPaused = session.videoState === 'paused' && !resuming
+    const pausedStream = stopPaused && activeClientVideo(session) === null
+    const generation = ++session.playGeneration
+    clearVideoEndTimer(session)
+    session.videoState = 'playing'
+    session.activeVideoIndex = videoIndex
+    session.videoErrorReason = null
+    session.videoErrorCode = null
+    if (!resuming) session.videoElapsedBeforePause = 0
+    session.videoPlaybackStartedAt = Date.now()
+
+    if (pausedStream) {
+      const isCurrent = (): boolean => session.playGeneration === generation
+      if (!(await runSidecarCommand(session, previousIndex, () => sidecar.stopVideo(), isCurrent))) return
+      if (!isCurrent() || session.videoState !== 'playing' || session.activeVideoIndex !== videoIndex) return
+    }
+
+    await markV2Playing(session, videoIndex)
+    scheduleClientEnd(session, generation, clientVideo).catch((err) => {
+      logger.warn('Video end scheduling failed', { presentationId: session.id, error: errorMessage(err) })
+    })
+  }
+
+  async function scheduleClientEnd(
+    session: InternalSession,
+    generation: number,
+    clientVideo: ClientVideo
+  ): Promise<void> {
+    const ms = await videoDuration.getDurationMs(clientVideo)
+    if (session.playGeneration !== generation || session.videoState !== 'playing' || !sessions.has(session.id)) return
+    if (ms === null) return
+    session.videoEndTimer = setTimeout(
+      () => {
+        endClientVideo(session, generation).catch((err) => {
+          logger.warn('Video end failed', { presentationId: session.id, error: errorMessage(err) })
+        })
+      },
+      Math.max(0, ms - clientPositionMs(session)) + END_GRACE_MS
+    )
+  }
+
+  async function endClientVideo(session: InternalSession, generation: number): Promise<void> {
+    if (session.playGeneration !== generation || session.videoState !== 'playing') return
+    session.videoEndTimer = null
+    session.videoState = 'idle'
+    session.activeVideoIndex = -1
+    session.videoElapsedBeforePause = 0
+    metrics.increment('video_playback_total', { action: 'end' })
+    await broadcastState(session)
+    logger.info(`Video ended naturally for presentation ${session.id}`)
+  }
+
   async function navigateSession(
     session: InternalSession,
     action: 'next' | 'prev' | 'goto',
@@ -887,8 +940,9 @@ export async function createPresentationManager(
       }
       if (session.sidecar) {
         session.playGeneration++
+        clearVideoEndTimer(session)
         cancelPendingBake(session)
-        if (isVideoActive(session)) {
+        if (isVideoActive(session) && !activeClientVideo(session)) {
           await session.sidecar.stopVideo().catch((err) => {
             logger.warn(`Sidecar stop on navigate failed: ${errorMessage(err)}`)
           })
@@ -944,7 +998,16 @@ export async function createPresentationManager(
       throw new Error(`Invalid video index: ${videoIndex}`)
     }
 
-    if (session.sidecar) return playSidecarVideo(session, session.sidecar, videoIndex)
+    if (session.sidecar) {
+      const { url } = session.slideVideos[videoIndex]
+      const clientVideo = classifyClientVideo(url)
+      if (clientVideo) return playClientVideo(session, session.sidecar, videoIndex, clientVideo)
+      if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir()) === null) {
+        await failVideo(session, videoIndex, 'video-invalid-format', UNSUPPORTED_VIDEO_MESSAGE)
+        return
+      }
+      return playSidecarVideo(session, session.sidecar, videoIndex)
+    }
 
     const videoInfo = session.slideVideos[videoIndex]
 
@@ -1172,9 +1235,13 @@ export async function createPresentationManager(
 
     const { sidecar } = session
     if (sidecar) {
+      const clientPlayback = activeClientVideo(session) !== null
       session.playGeneration++
-      cancelPendingBake(session)
-      if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.stopVideo()))) return
+      clearVideoEndTimer(session)
+      if (!clientPlayback) {
+        cancelPendingBake(session)
+        if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.stopVideo()))) return
+      }
     } else {
       await session.publisher.stopAudioPublishing()
       if (session.compositor) {
@@ -1202,8 +1269,14 @@ export async function createPresentationManager(
     const { sidecar } = session
     if (sidecar) {
       if (session.videoState !== 'playing') return
-      if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.pause()))) return
-      if (session.videoState !== 'playing') return
+      if (activeClientVideo(session)) {
+        clearVideoEndTimer(session)
+        session.videoElapsedBeforePause = clientPositionMs(session)
+        session.videoPlaybackStartedAt = Date.now()
+      } else {
+        if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.pause()))) return
+        if (session.videoState !== 'playing') return
+      }
       session.videoState = 'paused'
       metrics.increment('video_playback_total', { action: 'pause' })
       await broadcastState(session)
@@ -1252,6 +1325,7 @@ export async function createPresentationManager(
       clearTimeout(session.overlayBroadcastTimer)
       session.overlayBroadcastTimer = null
     }
+    clearVideoEndTimer(session)
 
     session.playGeneration++
     session.abortController.abort()
@@ -1312,8 +1386,13 @@ export async function createPresentationManager(
 
   function v2Fields(
     session: InternalSession
-  ): Pick<PresentationState, 'slide' | 'presenterIdentity' | 'playingVideoIndex'> {
+  ): Pick<
+    PresentationState,
+    'slide' | 'presenterIdentity' | 'playingVideoIndex' | 'slideVideos' | 'videoPositionMs' | 'videoPositionAt'
+  > {
     const image = session.currentSlideImage
+    const positioned =
+      activeClientVideo(session) !== null && (session.videoState === 'playing' || session.videoState === 'paused')
     return {
       slide: image
         ? {
@@ -1323,7 +1402,13 @@ export async function createPresentationManager(
           }
         : undefined,
       presenterIdentity: session.presenterIdentity,
-      playingVideoIndex: isVideoActive(session) ? session.activeVideoIndex : null
+      playingVideoIndex: isVideoActive(session) ? session.activeVideoIndex : null,
+      slideVideos: session.slideVideos.map((video) => {
+        const client = classifyClientVideo(video.url)
+        return client ? { ...video, url: client.url, source: 'client' } : { ...video, source: 'stream' }
+      }),
+      videoPositionMs: positioned ? session.videoElapsedBeforePause : null,
+      videoPositionAt: positioned ? session.videoPlaybackStartedAt : null
     }
   }
 

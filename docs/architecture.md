@@ -159,6 +159,18 @@ composites a frame:
   (SCREENSHARE_AUDIO, Opus) once at connect, keeps them for the whole
   session, and writes samples only while a video plays. There is no
   `presentation` composite track.
+- **Client-played video:** YouTube, Google Drive and Vimeo `.m3u8`
+  links are played by each client from the canonical URL in
+  `slideVideos[i].url`. The server never downloads, bakes or streams
+  them, and sends no sidecar command for them. It stays the source of
+  truth for playback: play, pause, resume, stop and navigate update the
+  state, which anchors the position in `videoPositionMs` and
+  `videoPositionAt`. The server looks up the duration once per play or
+  resume through the `video-duration` component (no API keys), and when
+  it is known, ends the video itself about 2 s after its end. An unknown
+  duration means the video plays until a presenter stops it or changes
+  the slide. Any other non-embedded link fails on play with
+  `video-invalid-format`.
 
 ### Sidecar IPC
 
@@ -186,14 +198,14 @@ events on stdout, logs on stderr (redacted, logged at debug).
 
 ### Bake queue
 
-Every video is baked before it plays: native size capped to 1920×1080
-(1080×1920 portrait), 30 fps H.264 constrained baseline in Annex-B,
-and Opus in Ogg, by the process-wide `media-encoder`. It runs one bake
-at a time; play requests go ahead of prefetches, and a play for a
-queued prefetch promotes it. Each v2 session prefetches its videos one
-at a time right after creation. A downloaded source counts against the
-2 GB session quota until its bake finishes, and is then replaced by
-the bake output. See `docs/video-playback-lifecycle.md` for the
+Only videos embedded in a PPTX are baked, from the file the renderer
+already extracted: native size capped to 1920×1080 (1080×1920
+portrait), 30 fps H.264 constrained baseline in Annex-B, and Opus in
+Ogg, by the process-wide `media-encoder`. It runs one bake at a time;
+play requests go ahead of prefetches, and a play for a queued prefetch
+promotes it. Each v2 session prefetches its embedded videos one at a
+time right after creation. The bake output counts against the 2 GB
+session quota. See `docs/video-playback-lifecycle.md` for the
 playback state machine.
 
 ## Data channel protocol
@@ -267,7 +279,7 @@ so late joiners can read it immediately without waiting for a
 broadcast.
 
 With `CLIENT_COMPOSITION_ENABLED=true` (which requires
-`PUBLIC_BASE_URL`), both channels also carry three fields for clients
+`PUBLIC_BASE_URL`), both channels also carry these fields for clients
 that composite the presentation themselves:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
@@ -284,6 +296,50 @@ that composite the presentation themselves:
   an invalid one is logged; it never causes a 400.
 - `playingVideoIndex`: the index into `slideVideos` while
   `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
+- `slideVideos[i].source`: `client` or `stream`, on every entry. A
+  `client` entry is a YouTube, Google Drive or Vimeo `.m3u8` link, and
+  its `url` is replaced by the canonical form:
+  `https://www.youtube.com/watch?v=<id>`,
+  `https://drive.google.com/file/d/<id>/view`, or the
+  `https://player.vimeo.com/external/<digits>.m3u8?<query>` URL without
+  its fragment. Clients branch on `source` and run no allowlist of their
+  own. A `stream` entry is an embedded video that the sidecar publishes
+  on `presentation-video` and `presentation-audio`, or an unsupported
+  link that fails on play.
+- `videoPositionMs` and `videoPositionAt`: while a `client` video is
+  `playing` or `paused`, its position in milliseconds and the server
+  epoch milliseconds (`Date.now()`) at which it was there; otherwise
+  `null`. Clients target `videoPositionMs + (now - videoPositionAt)`
+  while playing and `videoPositionMs` while paused, clamped at 0, and
+  re-seek only when their player is more than 2000 ms off. The server
+  moves the anchor only on play, resume and pause, so repeated
+  broadcasts carry the same values.
+
+When a client video's duration is known, the server arms an end timer
+for the remaining time plus 2 s. Pause clears it, and resume arms it
+again for what is left. When it fires, the state goes to
+`videoState: 'idle'` with `playingVideoIndex: null`, the same natural
+end clients see for an embedded video. There is no seek command and no
+client-sent "ended".
+
+Example while a client video plays:
+
+```json
+{
+  "type": "presentation:state",
+  "videoState": "playing",
+  "playingVideoIndex": 0,
+  "videoPositionMs": 12500,
+  "videoPositionAt": 1760270400123,
+  "slideVideos": [
+    {
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "geometry": { "x": 100, "y": 100, "width": 640, "height": 480 },
+      "source": "client"
+    }
+  ]
+}
+```
 
 With the flag off, none of these fields are emitted.
 
