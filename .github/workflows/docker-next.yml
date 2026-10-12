@@ -6,7 +6,7 @@ on:
       - 'main'
       # TEMPORARY: deploys the client-composition stack's top branch to .zone for testing.
       # Remove this entry once the stack is merged, so only merges to main deploy again.
-      - 'feat/enhance-cast'
+      - 'feat/client-played-videos'
 
 jobs:
   cd:
