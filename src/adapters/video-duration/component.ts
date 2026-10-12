@@ -13,6 +13,7 @@ class DurationUnknownError extends Error {
 }
 
 const CACHE_SIZE = 256
+const MAX_DURATION_MS = 24 * 60 * 60 * 1000
 const INNERTUBE_PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false'
 const INNERTUBE_TIMEOUT_MS = 5000
 const INNERTUBE_CLIENT_VERSION = '1.65.10'
@@ -96,7 +97,8 @@ function probeDurationMs(url: string, protocols: string, extraArgs: string[]): P
  * 1. Return a cached duration (successful results only, keyed by canonical URL, capped at 256 entries),
  *    or join the in-flight lookup for the same URL.
  * 2. Ask the provider: one InnerTube `player` request for YouTube, ffprobe for Drive and Vimeo HLS.
- * 3. Resolve `null` and log the reason on any failure, so a transient failure retries on the next call.
+ * 3. Resolve `null` and log the reason on any failure or a duration over 24 hours, so a transient failure
+ *    retries on the next call.
  *
  * @param components - Required: fetcher (InnerTube request), logs
  * @returns The video duration component
@@ -166,6 +168,7 @@ export async function createVideoDurationComponent(
   async function lookup(video: ClientVideo): Promise<number | null> {
     try {
       const durationMs = await providerDurationMs(video)
+      if (durationMs > MAX_DURATION_MS) throw new DurationUnknownError('parse')
       remember(video.url, durationMs)
       return durationMs
     } catch (error) {
