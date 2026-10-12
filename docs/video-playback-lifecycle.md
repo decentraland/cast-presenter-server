@@ -312,8 +312,8 @@ playing / paused ── stop, navigate, end timer (playing only) ──► idle
   until it is stopped or the slide changes. A lookup never fails
   playback.
 - **Stale work:** every client play, stop, navigate and session stop
-  clears the end timer, pause clears it too, and every play bumps the
-  play generation.
+  clears the end timer, pause clears it too, and every play, stop,
+  navigate and session stop bumps the play generation.
   A lookup that resolves after any of these, or while paused, is
   dropped. Late sidecar `playbackEnded` or `playback-failed` events
   never end or fail a client video.
