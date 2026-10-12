@@ -1,0 +1,189 @@
+import { execFile } from 'child_process'
+import { drainResponse } from '../../logic/fetch-utils'
+import type { IVideoDurationComponent } from './types'
+import type { ClientVideo } from '../../logic/client-video'
+import type { AppComponents } from '../../types'
+
+type UnknownReason = 'status' | 'live' | 'timeout' | 'network' | 'parse' | 'ffprobe-exit' | 'unexpected'
+
+class DurationUnknownError extends Error {
+  constructor(readonly reason: UnknownReason) {
+    super(`Video duration unknown: ${reason}`)
+  }
+}
+
+const CACHE_SIZE = 256
+const INNERTUBE_PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false'
+const INNERTUBE_TIMEOUT_MS = 5000
+const INNERTUBE_CLIENT_VERSION = '1.65.10'
+const INNERTUBE_HEADERS = {
+  'Content-Type': 'application/json',
+  'User-Agent': `com.google.android.apps.youtube.vr.oculus/${INNERTUBE_CLIENT_VERSION} (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip`,
+  'X-YouTube-Client-Name': '28',
+  'X-YouTube-Client-Version': INNERTUBE_CLIENT_VERSION,
+  Origin: 'https://www.youtube.com',
+  Referer: 'https://www.youtube.com/',
+  'Accept-Language': 'en-US,en;q=0.9'
+}
+const INNERTUBE_CLIENT = {
+  clientName: 'ANDROID_VR',
+  clientVersion: INNERTUBE_CLIENT_VERSION,
+  deviceMake: 'Oculus',
+  deviceModel: 'Quest 3',
+  osName: 'Android',
+  osVersion: '12L',
+  platform: 'MOBILE',
+  hl: 'en',
+  gl: 'US',
+  utcOffsetMinutes: 0
+}
+const LENGTH_SECONDS = /^\d+$/
+const DRIVE_DOWNLOAD_URL = 'https://drive.usercontent.google.com/download'
+const DRIVE_PROTOCOLS = 'https,tls,tcp'
+const DRIVE_FORMATS = 'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm'
+const VIMEO_HLS_PROTOCOLS = 'hls,https,tls,tcp,crypto'
+const FFPROBE_OPTIONS = { timeout: 15000, maxBuffer: 65536 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function lengthMsFromPlayer(body: unknown): number {
+  if (!isRecord(body)) throw new DurationUnknownError('parse')
+  const { playabilityStatus, videoDetails } = body
+  if (!isRecord(playabilityStatus) || playabilityStatus.status !== 'OK') throw new DurationUnknownError('status')
+  if (!isRecord(videoDetails)) throw new DurationUnknownError('parse')
+  if (videoDetails.isLive === true || videoDetails.isLiveContent === true) throw new DurationUnknownError('live')
+  const { lengthSeconds } = videoDetails
+  if (typeof lengthSeconds !== 'string' || !LENGTH_SECONDS.test(lengthSeconds) || Number(lengthSeconds) <= 0) {
+    throw new DurationUnknownError('parse')
+  }
+  return Number(lengthSeconds) * 1000
+}
+
+function probeDurationMs(url: string, protocols: string, extraArgs: string[]): Promise<number> {
+  const args = [
+    '-v',
+    'error',
+    '-rw_timeout',
+    '10000000',
+    '-protocol_whitelist',
+    protocols,
+    '-show_entries',
+    'format=duration',
+    '-of',
+    'csv=p=0',
+    ...extraArgs,
+    url
+  ]
+  return new Promise((resolve, reject) => {
+    execFile('ffprobe', args, FFPROBE_OPTIONS, (error, stdout) => {
+      if (error) {
+        reject(new DurationUnknownError(error.killed ? 'timeout' : 'ffprobe-exit'))
+        return
+      }
+      const seconds = Number(stdout.trim())
+      if (Number.isFinite(seconds) && seconds > 0) resolve(Math.round(seconds * 1000))
+      else reject(new DurationUnknownError('parse'))
+    })
+  })
+}
+
+/**
+ * Creates the video duration component.
+ *
+ * Flow per lookup:
+ * 1. Return a cached duration (successful results only, keyed by canonical URL, capped at 256 entries),
+ *    or join the in-flight lookup for the same URL.
+ * 2. Ask the provider: one InnerTube `player` request for YouTube, ffprobe for Drive and Vimeo HLS.
+ * 3. Resolve `null` and log the reason on any failure, so a transient failure retries on the next call.
+ *
+ * @param components - Required: fetcher (InnerTube request), logs
+ * @returns The video duration component
+ */
+export async function createVideoDurationComponent(
+  components: Pick<AppComponents, 'fetcher' | 'logs'>
+): Promise<IVideoDurationComponent> {
+  const { fetcher, logs } = components
+  const logger = logs.getLogger('video-duration')
+  const durations = new Map<string, number>()
+  const inFlight = new Map<string, Promise<number | null>>()
+
+  async function fetchPlayer(videoId: string, abortController: AbortController): Promise<unknown> {
+    let response: Response
+    try {
+      response = await fetcher.fetch(INNERTUBE_PLAYER_URL, {
+        method: 'POST',
+        headers: INNERTUBE_HEADERS,
+        body: JSON.stringify({ videoId, contentCheckOk: true, context: { client: INNERTUBE_CLIENT } }),
+        abortController
+      })
+    } catch {
+      throw new DurationUnknownError(abortController.signal.aborted ? 'timeout' : 'network')
+    }
+    if (!response.ok) {
+      await drainResponse(response)
+      throw new DurationUnknownError('status')
+    }
+    try {
+      return await response.json()
+    } catch {
+      throw new DurationUnknownError(abortController.signal.aborted ? 'timeout' : 'parse')
+    }
+  }
+
+  async function youtubeDurationMs(videoId: string): Promise<number> {
+    const abortController = new AbortController()
+    const timer = setTimeout(() => abortController.abort(), INNERTUBE_TIMEOUT_MS)
+    try {
+      return lengthMsFromPlayer(await fetchPlayer(videoId, abortController))
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  function providerDurationMs(video: ClientVideo): Promise<number> {
+    switch (video.provider) {
+      case 'youtube':
+        return youtubeDurationMs(video.id)
+      case 'drive': {
+        const query = new URLSearchParams({ id: video.id, export: 'download', confirm: 't' })
+        return probeDurationMs(`${DRIVE_DOWNLOAD_URL}?${query}`, DRIVE_PROTOCOLS, ['-format_whitelist', DRIVE_FORMATS])
+      }
+      case 'vimeo-hls':
+        return probeDurationMs(video.url, VIMEO_HLS_PROTOCOLS, [])
+    }
+  }
+
+  function remember(url: string, durationMs: number): void {
+    durations.set(url, durationMs)
+    if (durations.size > CACHE_SIZE) {
+      const [oldest] = durations.keys()
+      durations.delete(oldest)
+    }
+  }
+
+  async function lookup(video: ClientVideo): Promise<number | null> {
+    try {
+      const durationMs = await providerDurationMs(video)
+      remember(video.url, durationMs)
+      return durationMs
+    } catch (error) {
+      const reason = error instanceof DurationUnknownError ? error.reason : 'unexpected'
+      logger.info('Video duration unknown', { provider: video.provider, reason })
+      return null
+    }
+  }
+
+  return {
+    async getDurationMs(video: ClientVideo): Promise<number | null> {
+      const cached = durations.get(video.url)
+      if (cached !== undefined) return cached
+      const pending = inFlight.get(video.url)
+      if (pending) return pending
+      const next = lookup(video).finally(() => inFlight.delete(video.url))
+      inFlight.set(video.url, next)
+      return next
+    }
+  }
+}

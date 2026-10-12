@@ -18,6 +18,7 @@ import { createPdfRendererComponent } from './adapters/pdf-renderer'
 import { createPptxRendererComponent } from './adapters/pptx-renderer'
 import { createSidecarPublisherComponent } from './adapters/sidecar-publisher'
 import { createVideoCompositorComponent } from './adapters/video-compositor'
+import { createVideoDurationComponent } from './adapters/video-duration'
 import { createNetworkValidatorComponent } from './logic/network-validator'
 import { createPresentationManager } from './logic/presentation-manager'
 import { metricDeclarations } from './metrics'
@@ -79,6 +80,7 @@ export async function initComponents(): Promise<AppComponents> {
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
   const sidecarPublisher = await createSidecarPublisherComponent({ config })
   const mediaEncoder = await createMediaEncoderComponent({ logs })
+  const videoDuration = await createVideoDurationComponent({ fetcher, logs })
 
   const presentationManager = await createPresentationManager({
     config,
@@ -108,6 +110,7 @@ export async function initComponents(): Promise<AppComponents> {
     videoCompositor,
     sidecarPublisher,
     mediaEncoder,
+    videoDuration,
     networkValidator
   }
 }

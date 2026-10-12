@@ -12,6 +12,7 @@ import type { IMediaEncoder } from './adapters/media-encoder'
 import type { IRendererComponent } from './adapters/pdf-renderer'
 import type { ISidecarPublisherComponent } from './adapters/sidecar-publisher'
 import type { IVideoCompositorComponent } from './adapters/video-compositor'
+import type { IVideoDurationComponent } from './adapters/video-duration'
 import type { INetworkValidatorComponent } from './logic/network-validator'
 import type { IPresentationManager } from './logic/presentation-manager'
 import type { metricDeclarations } from './metrics'
@@ -36,6 +37,7 @@ export interface BaseComponents {
   videoCompositor: IVideoCompositorComponent
   sidecarPublisher: ISidecarPublisherComponent
   mediaEncoder: IMediaEncoder
+  videoDuration: IVideoDurationComponent
   networkValidator: INetworkValidatorComponent
 }
 

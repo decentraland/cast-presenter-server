@@ -2,7 +2,7 @@ import * as dns from 'dns/promises'
 import type { INetworkValidatorComponent, ResolvedUrl } from './types'
 
 /** Allowed domains for video downloads extracted from PDF annotations. */
-const ALLOWED_VIDEO_DOMAINS = new Set([
+export const ALLOWED_VIDEO_DOMAINS = new Set([
   'drive.google.com',
   'drive.usercontent.google.com',
   'docs.google.com',
