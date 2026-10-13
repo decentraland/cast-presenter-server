@@ -116,6 +116,22 @@ presentation manager.
   transcodes them with ffmpeg, and composites video frames onto
   slide backgrounds for real-time overlay playback.
 
+### Slide fonts
+
+@napi-rs/canvas only knows the font families that are actually
+installed, and it ignores fontconfig substitutions. The Docker image
+ships Liberation and Noto fonts, not Arial, so a family that is not
+installed renders every glyph as a box, generic `sans-serif` included.
+The PPTX renderer therefore picks an installed family per text run
+(`resolveFontFamily`): the requested family, then its
+metric-compatible Liberation substitute (Arial and Helvetica to
+Liberation Sans, Times New Roman to Liberation Serif, Courier and
+Courier New to Liberation Mono), then Arial, then Liberation Sans.
+Weight keywords in the family name (`Inter Black`) are read before
+this fallback, so a substituted family keeps its weight. Arial is
+preferred over generic `sans-serif` because Skia's generic fallback
+draws some symbols such as ❏ as ⊠.
+
 ## Session lifecycle
 
 Each presentation runs as an in-memory session identified by a UUID.

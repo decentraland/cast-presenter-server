@@ -3,6 +3,7 @@ import * as fsp from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { GlobalFonts, type SKRSContext2D, createCanvas, loadImage } from '@napi-rs/canvas'
+import { resolveFontFamily } from './font-family'
 import { MAX_EMBEDDED_MEDIA_BYTES, PPTXParser } from './parser/core/PPTXParser'
 import { fitRenderSize } from '../../logic/render-size'
 import type { Geometry } from './parser/models/Geometry'
@@ -122,10 +123,6 @@ function buildFont(run: { bold?: boolean; italic?: boolean; fontSize?: number; f
   let family = run.fontFamily ?? 'Arial'
   let inferredWeight = 400
 
-  // Extract weight keyword from the ORIGINAL family name before any fallback.
-  // PPTX often specifies weight via family (e.g. "Inter Black", "Roboto Medium")
-  // rather than a separate <b val="1"/>. Running this after a fallback to
-  // Arial would discard the weight and render the text regular-weight.
   for (const [keyword, weight] of FONT_WEIGHT_KEYWORDS) {
     const re = new RegExp(`\\b${keyword}\\b`, 'i')
     if (re.test(family)) {
@@ -140,11 +137,7 @@ function buildFont(run: { bold?: boolean; italic?: boolean; fontSize?: number; f
       .replace(/\s+/g, ' ')
       .trim() || 'Arial'
 
-  // Fallback to Arial for unregistered fonts AFTER weight extraction.
-  // Skia's generic sans-serif fallback renders some Unicode symbols (e.g. ❏) as ⊠.
-  if (family !== 'Arial' && !GlobalFonts.has(family)) {
-    family = 'Arial'
-  }
+  family = resolveFontFamily(family, (candidate) => GlobalFonts.has(candidate))
 
   const weight = run.bold ? Math.max(700, inferredWeight) : inferredWeight
   const styleStr = run.italic ? 'italic ' : ''
