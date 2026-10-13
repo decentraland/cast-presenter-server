@@ -1,4 +1,5 @@
 import { createCanvas } from '@napi-rs/canvas'
+import { SlideRenderError } from '../renderer/errors'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
@@ -59,52 +60,59 @@ function createRenderer(): IRenderer {
     async renderSlide(index: number): Promise<RenderResult> {
       if (!doc) throw new Error('PDF not initialized')
 
-      const page = await doc.getPage(index + 1)
-      const baseViewport = page.getViewport({ scale: 1 })
-      const scale = TARGET_WIDTH / baseViewport.width
-      const viewport = page.getViewport({ scale })
+      // The try/catch must wrap the throw site itself: with --abort-on-uncaught-exception
+      // a native throw (e.g. "Create skia surface failed") that V8 does not see as
+      // handled aborts the whole process instead of rejecting this promise.
+      try {
+        const page = await doc.getPage(index + 1)
+        const baseViewport = page.getViewport({ scale: 1 })
+        const scale = TARGET_WIDTH / baseViewport.width
+        const viewport = page.getViewport({ scale })
 
-      // Force even dimensions — yuv420p chroma planes require it
-      const width = Math.round(viewport.width) & ~1
-      const height = Math.round(viewport.height) & ~1
-      const canvas = createCanvas(width, height)
-      const ctx = canvas.getContext('2d')
+        // Force even dimensions — yuv420p chroma planes require it
+        const width = Math.round(viewport.width) & ~1
+        const height = Math.round(viewport.height) & ~1
+        const canvas = createCanvas(width, height)
+        const ctx = canvas.getContext('2d')
 
-      // pdfjs-dist types `canvasContext` as the DOM `CanvasRenderingContext2D`, but
-      // @napi-rs/canvas exports its own structurally-compatible context type. Cast
-      // through `unknown` to bridge the nominal mismatch.
-      await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise
+        // pdfjs-dist types `canvasContext` as the DOM `CanvasRenderingContext2D`, but
+        // @napi-rs/canvas exports its own structurally-compatible context type. Cast
+        // through `unknown` to bridge the nominal mismatch.
+        await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise
 
-      const annotations = await getCachedAnnotations(index, page)
-      for (const a of annotations) {
-        if (a.subtype !== 'Link' || !a.url || !isMediaUrl(a.url) || !a.rect) continue
-        const geo = pdfRectToCanvas(a.rect, viewport, baseViewport.width)
+        const annotations = await getCachedAnnotations(index, page)
+        for (const a of annotations) {
+          if (a.subtype !== 'Link' || !a.url || !isMediaUrl(a.url) || !a.rect) continue
+          const geo = pdfRectToCanvas(a.rect, viewport, baseViewport.width)
 
-        ctx.fillStyle = '#000000'
-        ctx.fillRect(geo.x, geo.y, geo.width, geo.height)
+          ctx.fillStyle = '#000000'
+          ctx.fillRect(geo.x, geo.y, geo.width, geo.height)
 
-        const cx = geo.x + geo.width / 2
-        const cy = geo.y + geo.height / 2
-        const radius = Math.min(geo.width, geo.height) * 0.12
+          const cx = geo.x + geo.width / 2
+          const cy = geo.y + geo.height / 2
+          const radius = Math.min(geo.width, geo.height) * 0.12
 
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
-        ctx.lineWidth = 2.5
-        ctx.beginPath()
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2)
-        ctx.stroke()
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
+          ctx.lineWidth = 2.5
+          ctx.beginPath()
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+          ctx.stroke()
 
-        const triSize = radius * 0.55
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
-        ctx.beginPath()
-        ctx.moveTo(cx - triSize * 0.35, cy - triSize)
-        ctx.lineTo(cx - triSize * 0.35, cy + triSize)
-        ctx.lineTo(cx + triSize * 0.8, cy)
-        ctx.closePath()
-        ctx.fill()
+          const triSize = radius * 0.55
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+          ctx.beginPath()
+          ctx.moveTo(cx - triSize * 0.35, cy - triSize)
+          ctx.lineTo(cx - triSize * 0.35, cy + triSize)
+          ctx.lineTo(cx + triSize * 0.8, cy)
+          ctx.closePath()
+          ctx.fill()
+        }
+
+        const imageData = ctx.getImageData(0, 0, width, height)
+        return { buffer: Buffer.from(imageData.data.buffer), width, height }
+      } catch (err) {
+        throw new SlideRenderError(index, err)
       }
-
-      const imageData = ctx.getImageData(0, 0, width, height)
-      return { buffer: Buffer.from(imageData.data.buffer), width, height }
     },
 
     async getSlideVideos(index: number): Promise<SlideVideoInfo[]> {

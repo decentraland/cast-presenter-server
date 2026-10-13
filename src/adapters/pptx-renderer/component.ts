@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { GlobalFonts, type SKRSContext2D, createCanvas, loadImage } from '@napi-rs/canvas'
 import { MAX_EMBEDDED_MEDIA_BYTES, PPTXParser } from './parser/core/PPTXParser'
+import { SlideRenderError } from '../renderer/errors'
 import type { Geometry } from './parser/models/Geometry'
 import type { Shape } from './parser/models/Shape'
 import type { Slide } from './parser/models/Slide'
@@ -678,37 +679,42 @@ function createRenderer(): IRenderer {
     async renderSlide(index: number): Promise<RenderResult> {
       if (!parser) throw new Error('PPTX not initialized')
 
-      const slide = await parser.getSlide(index)
-      const scale = TARGET_WIDTH / slide.width
-      const width = Math.round(slide.width * scale)
-      const height = Math.round(slide.height * scale)
+      // See pdf-renderer: the catch must live in the frame that can throw.
+      try {
+        const slide = await parser.getSlide(index)
+        const scale = TARGET_WIDTH / slide.width
+        const width = Math.round(slide.width * scale)
+        const height = Math.round(slide.height * scale)
 
-      const canvas = createCanvas(width, height)
-      const ctx = canvas.getContext('2d')
+        const canvas = createCanvas(width, height)
+        const ctx = canvas.getContext('2d')
 
-      // Scale context so all rendering uses slide-space coordinates
-      ctx.scale(scale, scale)
+        // Scale context so all rendering uses slide-space coordinates
+        ctx.scale(scale, scale)
 
-      // 1. Background
-      await renderBackground(ctx, slide, parser)
+        // 1. Background
+        await renderBackground(ctx, slide, parser)
 
-      // 2. Shapes
-      for (const shape of slide.shapes) {
-        if (shape.isVideo()) {
-          renderVideoPlaceholder(ctx, shape.geometry)
-          continue
+        // 2. Shapes
+        for (const shape of slide.shapes) {
+          if (shape.isVideo()) {
+            renderVideoPlaceholder(ctx, shape.geometry)
+            continue
+          }
+          if (shape.isImage() && shape.mediaRef) {
+            await renderImageShape(ctx, shape, parser)
+            continue
+          }
+          renderShape(ctx, shape)
         }
-        if (shape.isImage() && shape.mediaRef) {
-          await renderImageShape(ctx, shape, parser)
-          continue
-        }
-        renderShape(ctx, shape)
+
+        // 3. Extract RGBA buffer
+        ctx.resetTransform()
+        const imageData = ctx.getImageData(0, 0, width, height)
+        return { buffer: Buffer.from(imageData.data.buffer), width, height }
+      } catch (err) {
+        throw new SlideRenderError(index, err)
       }
-
-      // 3. Extract RGBA buffer
-      ctx.resetTransform()
-      const imageData = ctx.getImageData(0, 0, width, height)
-      return { buffer: Buffer.from(imageData.data.buffer), width, height }
     },
 
     async getSlideVideos(index: number): Promise<SlideVideoInfo[]> {
