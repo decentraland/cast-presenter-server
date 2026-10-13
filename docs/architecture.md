@@ -421,9 +421,12 @@ download:
 
 ### Drive proxy allowlist
 
-The `DRIVE_VIDEO_ALLOWED_FILE_IDS` configuration uses a default-deny
-posture. If the variable is empty or unset, all requests to
-`/api/drive-video` are denied.
+`/api/drive-video` is default-deny. It serves a file ID listed in
+`DRIVE_VIDEO_ALLOWED_FILE_IDS`, or one that a running presentation is
+playing or has paused as its client-played Drive video
+(`presentationManager.isDriveFilePlaying`). Sites plays Drive slide
+videos through this endpoint because Drive rejects browsers' cross-site
+requests; Unity fetches Drive directly.
 
 ### Security headers
 

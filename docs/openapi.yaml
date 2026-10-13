@@ -210,8 +210,9 @@ paths:
       description: |
         Proxies a public Google Drive file as a binary stream.
         Supports HTTP Range requests for seek. The file ID must
-        appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist;
-        an empty or unset allowlist denies all requests.
+        appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist or be
+        the client-played Drive video a running presentation is
+        playing or has paused; any other ID is denied.
       parameters:
         - name: fileId
           in: query
@@ -252,7 +253,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: File ID not in allowlist
+          description: File ID neither allowlisted nor playing in a presentation
           content:
             application/json:
               schema:

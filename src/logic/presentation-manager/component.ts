@@ -1408,6 +1408,14 @@ export async function createPresentationManager(
     }
   }
 
+  function isDriveFilePlaying(fileId: string): boolean {
+    for (const session of sessions.values()) {
+      const video = activeClientVideo(session)
+      if (video?.provider === 'drive' && video.id === fileId) return true
+    }
+    return false
+  }
+
   function getSlideImage(id: string, hash: string): Buffer | null {
     return sessions.get(id)?.slideImages.get(hash)?.png ?? null
   }
@@ -1455,6 +1463,7 @@ export async function createPresentationManager(
     navigate,
     getState,
     getSlideImage,
+    isDriveFilePlaying,
     playVideo,
     pauseVideo,
     stopVideo,

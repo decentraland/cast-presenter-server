@@ -134,6 +134,14 @@ export interface IPresentationManager extends IBaseComponent {
   getSlideImage(id: string, hash: string): Buffer | null
 
   /**
+   * Whether any session is playing or has paused a client-played Google Drive video with this file ID.
+   *
+   * @param fileId - Google Drive file ID
+   * @returns True while a session's active video is that Drive file
+   */
+  isDriveFilePlaying(fileId: string): boolean
+
+  /**
    * Starts or resumes video playback on the current slide.
    *
    * @param id - Presentation session ID

@@ -79,5 +79,9 @@ describe('when using the google drive component', () => {
       expect(url).toContain('id=abc-123')
       expect(url).toContain('export=download')
     })
+
+    it('should skip the large-file virus-scan page', () => {
+      expect(getPublicDriveDownloadUrl('abc-123')).toContain('confirm=t')
+    })
   })
 })

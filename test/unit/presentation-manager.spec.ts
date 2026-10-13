@@ -2696,6 +2696,61 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe('and the slide video is a Google Drive link', () => {
+    const DRIVE_FILE_ID = 'fakeDriveFile_01'
+
+    beforeEach(async () => {
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: `https://drive.google.com/file/d/${DRIVE_FILE_ID}/view?usp=sharing`, geometry: GEOMETRY }
+      ])
+      await createSession()
+    })
+
+    describe('and it is not played', () => {
+      it('should not report the file as playing', () => {
+        expect(manager.isDriveFilePlaying(DRIVE_FILE_ID)).toBe(false)
+      })
+    })
+
+    describe('and play is requested', () => {
+      beforeEach(async () => {
+        await manager.playVideo(presentationId, 0)
+      })
+
+      afterEach(async () => {
+        await manager.stopPresentation(presentationId)
+      })
+
+      it('should report the file as playing', () => {
+        expect(manager.isDriveFilePlaying(DRIVE_FILE_ID)).toBe(true)
+      })
+
+      it('should not report another file as playing', () => {
+        expect(manager.isDriveFilePlaying('otherDriveFile_02')).toBe(false)
+      })
+
+      describe('and it is paused', () => {
+        beforeEach(async () => {
+          await manager.pauseVideo(presentationId)
+        })
+
+        it('should still report the file as playing', () => {
+          expect(manager.isDriveFilePlaying(DRIVE_FILE_ID)).toBe(true)
+        })
+      })
+
+      describe('and it is stopped', () => {
+        beforeEach(async () => {
+          await manager.stopVideo(presentationId)
+        })
+
+        it('should not report the file as playing', () => {
+          expect(manager.isDriveFilePlaying(DRIVE_FILE_ID)).toBe(false)
+        })
+      })
+    })
+  })
+
   describe('and the slide video is a vimeo.com page link', () => {
     beforeEach(async () => {
       renderer.getSlideVideos.mockResolvedValue([{ url: 'https://vimeo.com/123', geometry: GEOMETRY }])

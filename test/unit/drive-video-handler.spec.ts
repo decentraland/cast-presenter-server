@@ -37,6 +37,7 @@ function createMockContext(overrides?: {
   rangeHeader?: string | null
   streamError?: Error
   contentType?: string
+  playingDriveFileIds?: string[]
 }) {
   const {
     fileId = 'valid-id',
@@ -44,7 +45,8 @@ function createMockContext(overrides?: {
     corsOrigin = '',
     rangeHeader = null,
     streamError,
-    contentType
+    contentType,
+    playingDriveFileIds = []
   } = overrides ?? {}
 
   const url = new URL('http://localhost/api/drive-video')
@@ -71,7 +73,8 @@ function createMockContext(overrides?: {
         requireNumber: async (key: string) => parseInt(key, 10)
       },
       googleDrive: createMockGoogleDrive({ allowedIds, streamError, contentType }),
-      logs: createMockLogger()
+      logs: createMockLogger(),
+      presentationManager: { isDriveFilePlaying: (id: string) => playingDriveFileIds.includes(id) }
     }
   } as unknown as Parameters<typeof driveVideoHandler>[0]
 }
@@ -118,6 +121,18 @@ describe('when handling a drive video proxy request', () => {
 
     it('should return status 403', () => {
       expect(result.status).toBe(403)
+    })
+  })
+
+  describe('and the file is not in the allowlist but a presentation is playing it', () => {
+    beforeEach(async () => {
+      result = await driveVideoHandler(
+        createMockContext({ fileId: 'playing-id', allowedIds: '', playingDriveFileIds: ['playing-id'] })
+      )
+    })
+
+    it('should stream the file with status 200', () => {
+      expect(result.status).toBe(200)
     })
   })
 

@@ -25,7 +25,7 @@ function getCorsHeaders(corsOrigin: string | undefined): Record<string, string> 
 
 export async function driveVideoHandler(
   context: Pick<
-    HandlerContextWithPath<'config' | 'googleDrive' | 'logs', '/api/drive-video'>,
+    HandlerContextWithPath<'config' | 'googleDrive' | 'logs' | 'presentationManager', '/api/drive-video'>,
     'url' | 'components' | 'request'
   >
 ): Promise<
@@ -34,7 +34,7 @@ export async function driveVideoHandler(
 > {
   const {
     url,
-    components: { config, googleDrive, logs },
+    components: { config, googleDrive, logs, presentationManager },
     request
   } = context
 
@@ -48,7 +48,7 @@ export async function driveVideoHandler(
       throw new ValidationError('Missing or invalid fileId')
     }
 
-    if (!googleDrive.isFileAllowed(fileId)) {
+    if (!googleDrive.isFileAllowed(fileId) && !presentationManager.isDriveFilePlaying(fileId)) {
       throw new FileNotAllowedError()
     }
 
