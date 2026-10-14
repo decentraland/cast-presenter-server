@@ -1,4 +1,5 @@
 import { createCanvas } from '@napi-rs/canvas'
+import { assertRenderableDimensions, toEvenDimension } from '../renderer/dimensions'
 import { SlideRenderError } from '../renderer/errors'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
@@ -60,18 +61,15 @@ function createRenderer(): IRenderer {
     async renderSlide(index: number): Promise<RenderResult> {
       if (!doc) throw new Error('PDF not initialized')
 
-      // The try/catch must wrap the throw site itself: with --abort-on-uncaught-exception
-      // a native throw (e.g. "Create skia surface failed") that V8 does not see as
-      // handled aborts the whole process instead of rejecting this promise.
       try {
         const page = await doc.getPage(index + 1)
         const baseViewport = page.getViewport({ scale: 1 })
         const scale = TARGET_WIDTH / baseViewport.width
         const viewport = page.getViewport({ scale })
 
-        // Force even dimensions — yuv420p chroma planes require it
-        const width = Math.round(viewport.width) & ~1
-        const height = Math.round(viewport.height) & ~1
+        const width = toEvenDimension(viewport.width)
+        const height = toEvenDimension(viewport.height)
+        assertRenderableDimensions(width, height)
         const canvas = createCanvas(width, height)
         const ctx = canvas.getContext('2d')
 

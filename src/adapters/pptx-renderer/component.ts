@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { GlobalFonts, type SKRSContext2D, createCanvas, loadImage } from '@napi-rs/canvas'
 import { MAX_EMBEDDED_MEDIA_BYTES, PPTXParser } from './parser/core/PPTXParser'
+import { assertRenderableDimensions } from '../renderer/dimensions'
 import { SlideRenderError } from '../renderer/errors'
 import type { Geometry } from './parser/models/Geometry'
 import type { Shape } from './parser/models/Shape'
@@ -679,12 +680,12 @@ function createRenderer(): IRenderer {
     async renderSlide(index: number): Promise<RenderResult> {
       if (!parser) throw new Error('PPTX not initialized')
 
-      // See pdf-renderer: the catch must live in the frame that can throw.
       try {
         const slide = await parser.getSlide(index)
         const scale = TARGET_WIDTH / slide.width
         const width = Math.round(slide.width * scale)
         const height = Math.round(slide.height * scale)
+        assertRenderableDimensions(width, height)
 
         const canvas = createCanvas(width, height)
         const ctx = canvas.getContext('2d')
