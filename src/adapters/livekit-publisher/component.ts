@@ -54,6 +54,8 @@ function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: strin
   return { topic, data }
 }
 
+const HIGH_FREQUENCY_COMMANDS = new Set(['presentation:overlay:update'])
+
 function parsePresentersFromRoomMetadata(metadata: string | undefined): Set<string> {
   try {
     if (!metadata) return new Set()
@@ -162,7 +164,10 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           if (!dataHandler) return
           if (!msgType.startsWith('presentation:')) return
 
-          logger.info(
+          const logCommand = (line: string): void =>
+            HIGH_FREQUENCY_COMMANDS.has(msgType) ? logger.debug(line) : logger.info(line)
+
+          logCommand(
             `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} type=${msgType}`
           )
 
@@ -173,12 +178,11 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
             return
           }
 
-          // Only update sceneId from authorized presenter messages
           if (incomingSceneId) {
             lastSceneId = incomingSceneId
           }
 
-          logger.info(`[DataReceived] Processing command: ${msgType}`)
+          logCommand(`[DataReceived] Processing command: ${msgType}`)
           dataHandler(message)
         }
       )
