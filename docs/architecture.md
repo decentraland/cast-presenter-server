@@ -108,7 +108,13 @@ presentation manager.
 
 - **PDFRenderer:** Parses PDF/PPTX files using pdfjs-dist, renders
   slides to RGBA buffers using @napi-rs/canvas, and extracts video
-  annotations with geometry information.
+  annotations with geometry information. pdfjs 6 decodes CCITT fax,
+  JBIG2 and JPEG2000 images with WebAssembly, so `getDocument` gets
+  `wasmUrl` (the package's `wasm/` directory) and
+  `standardFontDataUrl`; without `wasmUrl` those images are skipped
+  and scanned pages render blank. `destroy()` does not await the
+  loading task's async teardown, because callers are already in stop
+  or error cleanup and ignore the outcome.
 - **LiveKitPublisher:** Connects to a LiveKit room, publishes a
   video track from raw RGBA frames, handles data channel message
   routing, and manages bot metadata.
@@ -130,7 +136,9 @@ Each presentation runs as an in-memory session identified by a UUID.
 4. **Play video:** Loads or streams the video, composites it onto
    the slide canvas using ffmpeg, and pushes frames to LiveKit.
 5. **Pause/Resume:** Sends SIGSTOP/SIGCONT to the ffmpeg process.
-6. **Stop:** Disconnects from LiveKit, destroys the PDF renderer,
+6. **Stop:** Aborts in-flight downloads first, so none of them races
+   the temporary-directory cleanup or writes into a deleted directory.
+   Then it disconnects from LiveKit, destroys the PDF renderer,
    cleans up the temporary directory, and removes the session.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
