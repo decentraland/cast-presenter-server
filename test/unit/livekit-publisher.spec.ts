@@ -204,3 +204,49 @@ describe('when the presentation video track is published', () => {
     expect(TrackPublishOptions).toHaveBeenCalledWith(expect.objectContaining({ videoCodec: 'VP8' }))
   })
 })
+
+describe('when a presenter sends a presentation command', () => {
+  let logger: ILoggerComponent.ILogger
+  let room: FakeRoom
+  let dataHandler: jest.Mock
+
+  function emitData(message: Record<string, unknown>): void {
+    const onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+    onData(new TextEncoder().encode(JSON.stringify(message)), { identity: '0xPresenter' })
+  }
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['0xpresenter'] }) })
+    logger = createLogger()
+    dataHandler = jest.fn()
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', logger)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    publisher.setDataHandler(dataHandler)
+    jest.mocked(logger.info).mockClear()
+  })
+
+  describe('and the command is an overlay update', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should hand the command to the data handler', () => {
+      expect(dataHandler).toHaveBeenCalledWith({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should not log it at info level', () => {
+      expect(logger.info).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the command is a slide navigation', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:navigate', action: 'next' })
+    })
+
+    it('should log that it is processing the command at info level', () => {
+      expect(logger.info).toHaveBeenCalledWith('[DataReceived] Processing command: presentation:navigate')
+    })
+  })
+})

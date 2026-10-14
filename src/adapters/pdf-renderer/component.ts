@@ -1,3 +1,4 @@
+import path from 'path'
 import { createCanvas } from '@napi-rs/canvas'
 import { fitRenderSize } from '../../logic/render-size'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
@@ -13,6 +14,10 @@ interface PDFLinkAnnotation {
   url?: string
   rect?: number[]
 }
+
+const PDFJS_ROOT = path.dirname(require.resolve('pdfjs-dist/package.json'))
+const PDFJS_WASM_URL = path.join(PDFJS_ROOT, 'wasm') + path.sep
+const PDFJS_STANDARD_FONT_DATA_URL = path.join(PDFJS_ROOT, 'standard_fonts') + path.sep
 
 const VIDEO_URL_PATTERN = /youtube\.com|youtu\.be|drive\.google\.com|docs\.google\.com\/file|vimeo\.com/
 const MEDIA_URL_PATTERN = /\.gif($|\?)|\.mp4($|\?)|\.webm($|\?)/i
@@ -52,7 +57,11 @@ function createRenderer(): IRenderer {
   return {
     async initialize(fileBuffer: Buffer): Promise<void> {
       const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-      doc = await pdfjs.getDocument({ data: new Uint8Array(fileBuffer) }).promise
+      doc = await pdfjs.getDocument({
+        data: new Uint8Array(fileBuffer),
+        wasmUrl: PDFJS_WASM_URL,
+        standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL
+      }).promise
     },
 
     async renderSlide(index: number): Promise<RenderResult> {

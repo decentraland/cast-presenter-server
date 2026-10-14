@@ -53,6 +53,33 @@ describe('when fitting a page into the render box', () => {
     })
   })
 
+  describe('and the page is so thin that its short side scales below 2 px', () => {
+    beforeEach(() => {
+      result = fitRenderSize(1, 2000)
+    })
+
+    it('should keep the short side at 2 px', () => {
+      expect({ width: result.width, height: result.height }).toEqual({ width: 2, height: 1920 })
+    })
+  })
+
+  describe.each([
+    ['a zero width', 0, 500],
+    ['a negative height', 500, -1],
+    ['a NaN width', NaN, 500],
+    ['an infinite height', 500, Infinity]
+  ])('and the page has %s', (_label, pageWidth, pageHeight) => {
+    let fit: () => unknown
+
+    beforeEach(() => {
+      fit = () => fitRenderSize(pageWidth, pageHeight)
+    })
+
+    it('should throw an invalid page size error', () => {
+      expect(fit).toThrow(`Invalid page size ${pageWidth}x${pageHeight}`)
+    })
+  })
+
   describe('and the page comes from a range of common sizes', () => {
     let sizes: Array<{ width: number; height: number }>
 
