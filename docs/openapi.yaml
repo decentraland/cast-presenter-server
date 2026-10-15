@@ -37,6 +37,8 @@ tags:
   - name: Drive proxy
     description: Google Drive public video proxy
 
+security: []
+
 paths:
   /ping:
     get:
