@@ -270,6 +270,15 @@ any failure ──► error (the next play starts over)
   goes to `idle`.
 - **Mid-stream failure:** a sidecar `playback-failed` puts the video
   in `error` with `video-playback-interrupted`.
+- **Early end or failure:** a short clip can end, or fail on its first
+  read, before the server handles the `play` or `resume` ack. The
+  server keeps that event and applies it instead of moving to
+  `playing`, so viewers never see `playing` with no samples flowing.
+  An event from a playback that a newer `play` replaced is ignored.
+- **Commands while loading:** a play for any video, including another
+  index, is ignored while a video is `loading`, and so is a pause.
+  The presenter gets no error; the state still names the loading
+  video in `playingVideoIndex`.
 - **Bake failure:** the video goes to `error`, with
   `video-quota-exceeded` when the bake output would exceed the session
   quota and usually `video-playback-failed` for a failed or timed-out

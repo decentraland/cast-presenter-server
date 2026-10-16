@@ -1,5 +1,6 @@
 import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
-import { encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
+import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { encodePresentationPacket, parsePresentersFromRoomMetadata } from '../../src/adapters/livekit-publisher/comms'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
 import { createLoggerMock } from '../mocks/context'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
@@ -230,5 +231,63 @@ describe('when the LiveKit publisher receives a presentation data packet', () =>
     it('should not call the data handler', () => {
       expect(dataHandler).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('when a presenter sends a presentation command', () => {
+  let logger: ILoggerComponent.ILogger
+  let room: FakeRoom
+  let dataHandler: jest.Mock
+
+  function emitData(message: Record<string, unknown>): void {
+    const onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+    onData(encodePresentationPacket(message, 'scene-1'), { identity: '0xPresenter' })
+  }
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['0xpresenter'] }) })
+    logger = createLoggerMock()
+    dataHandler = jest.fn()
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', logger)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    publisher.setDataHandler(dataHandler)
+    jest.mocked(logger.info).mockClear()
+  })
+
+  describe('and the command is an overlay update', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should hand the command to the data handler', () => {
+      expect(dataHandler).toHaveBeenCalledWith({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 }, '0xPresenter')
+    })
+
+    it('should not log it at info level', () => {
+      expect(logger.info).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the command is a slide navigation', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:navigate', action: 'next' })
+    })
+
+    it('should log that it is processing the command at info level', () => {
+      expect(logger.info).toHaveBeenCalledWith('[DataReceived] Processing command: presentation:navigate')
+    })
+  })
+})
+
+describe('when parsing presenters from room metadata with non-string entries', () => {
+  let presenters: Set<string>
+
+  beforeEach(() => {
+    presenters = parsePresentersFromRoomMetadata(JSON.stringify({ presenters: ['0xABC', 42, null, { id: 'x' }, ''] }))
+  })
+
+  it('should keep only the non-empty strings, lowercased', () => {
+    expect([...presenters]).toEqual(['0xabc'])
   })
 })

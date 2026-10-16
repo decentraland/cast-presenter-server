@@ -108,7 +108,13 @@ presentation manager.
 
 - **PDFRenderer:** Parses PDF/PPTX files using pdfjs-dist, renders
   slides to RGBA buffers using @napi-rs/canvas, and extracts video
-  annotations with geometry information.
+  annotations with geometry information. pdfjs 6 decodes CCITT fax,
+  JBIG2 and JPEG2000 images with WebAssembly, so `getDocument` gets
+  `wasmUrl` (the package's `wasm/` directory) and
+  `standardFontDataUrl`; without `wasmUrl` those images are skipped
+  and scanned pages render blank. `destroy()` does not await the
+  loading task's async teardown, because callers are already in stop
+  or error cleanup and ignore the outcome.
 - **LiveKitPublisher:** Connects to a LiveKit room, publishes a
   video track from raw RGBA frames, handles data channel message
   routing, and manages bot metadata.
@@ -146,7 +152,9 @@ Each presentation runs as an in-memory session identified by a UUID.
 4. **Play video:** Loads or streams the video, composites it onto
    the slide canvas using ffmpeg, and pushes frames to LiveKit.
 5. **Pause/Resume:** Sends SIGSTOP/SIGCONT to the ffmpeg process.
-6. **Stop:** Disconnects from LiveKit, destroys the PDF renderer,
+6. **Stop:** Aborts in-flight downloads first, so none of them races
+   the temporary-directory cleanup or writes into a deleted directory.
+   Then it disconnects from LiveKit, destroys the PDF renderer,
    cleans up the temporary directory, and removes the session.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
@@ -201,12 +209,26 @@ events on stdout, logs on stderr (redacted, logged at debug).
 - Every later command (`publishData`, `updateMetadata`, `play`,
   `pause`, `resume`, `stop`, `shutdown`) carries an `id` and gets one
   `ack` or `error` with that `id`. The server fails a command that has
-  no reply after 10 s.
+  no reply after 10 s. A `stop` whose playback does not wind down
+  within 2 s answers `stop-failed`.
+- `play` also carries a `playId` (the session's play generation), and
+  the sidecar echoes it on that playback's `playbackEnded` and
+  `error { code: 'playback-failed' }`. The sidecar starts a playback
+  before it acks the `play`, and readline delivers every line of a
+  stdout chunk before the ack's continuation runs, so either event can
+  reach the server while the video is still `loading`. The server keeps
+  such an event and applies it when the ack is handled, and it ignores
+  events whose `playId` belongs to a replaced playback.
 - Unsolicited events: `dataReceived` (the server decodes the packet
   and applies the same presenter check as the rtc-node path),
   `roomMetadata` (the presenters list), `participantCount` (feeds the
   idle reaper), `playbackEnded`, `error { code: 'playback-failed' }`
-  and `disconnected`.
+  and `disconnected`. Room events that arrive before `ready` are
+  dropped and logged on stderr.
+- A stdin line over 1 MiB, or any other stdin read error, makes the
+  sidecar send `error { code: 'bad-command' }` without an `id` and
+  exit. The server reads events until the process's stdio closes, so
+  a last error line is never lost to the exit.
 - A `disconnected` event or an unexpected exit stops the session. The
   sidecar never reconnects by itself. On session stop the server sends
   `shutdown` (bounded at 5 s), waits up to 3 s for the exit, then
@@ -223,6 +245,19 @@ promotes it. Each v2 session prefetches its embedded videos one at a
 time right after creation. The bake output counts against the 2 GB
 session quota. See `docs/video-playback-lifecycle.md` for the
 playback state machine.
+
+- **Preset:** x264 `ultrafast`. On the 0.5 vCPU `.zone` task
+  `veryfast` baked at about 0.3× realtime and `ultrafast` at about
+  0.7×. The cost is quality: `ultrafast` turns off deblocking and
+  most motion search, so a 1080p bake at 6 Mbps shows more blocking
+  than `veryfast` would.
+- **Inputs:** ffprobe and ffmpeg read only local files
+  (`-protocol_whitelist file`) in the mov/mp4, asf, avi, mpeg, mpegts
+  and matroska/webm containers (`-format_whitelist`), so an HLS
+  playlist or concat list posing as an embedded video cannot pull
+  other files into a bake.
+- **Shutdown:** stopping the component kills the running bake and
+  rejects every queued one.
 
 ## Data channel protocol
 
@@ -294,22 +329,28 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
-With `CLIENT_COMPOSITION_ENABLED=true` (which requires
-`PUBLIC_BASE_URL`), both channels also carry these fields for clients
-that composite the presentation themselves:
+With `CLIENT_COMPOSITION_ENABLED=true` (which requires an `https://`
+`PUBLIC_BASE_URL`, or `http://` on localhost), both channels also
+carry these fields for clients that composite the presentation
+themselves:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
   `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
   `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
-  presence marks the v2 protocol. Each session caches the last 8
+  presence marks the v2 protocol, so it is never dropped: if the first
+  slide fails to encode, creation fails, and if a later slide fails,
+  the navigation is rejected and the previous slide stays current. The
+  LiveKit frame is pushed before the encode, so v1 viewers see the new
+  slide without waiting for it. Each session caches the last 8
   slides in memory; an evicted hash, or any hash after the session
   stops, returns 404.
 - `presenterIdentity`: the identity of the participant who started
   the presentation, or `null`. It comes from the optional
   `presenterIdentity` field of `POST /presentations` (multipart or
-  JSON), which must be `stream:`-prefixed or a `0x` address, at most
-  128 characters. An absent or invalid value is stored as `null`, and
-  an invalid one is logged; it never causes a 400.
+  JSON), which must be `stream:` followed by letters, digits and
+  `:_.-`, or a `0x` address, at most 128 characters. An absent or
+  invalid value is stored as `null`, and an invalid one is logged; it
+  never causes a 400. It is not checked against the LiveKit token.
 - `playingVideoIndex`: the index into `slideVideos` while
   `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
 - `slideVideos[i].source`: `client` or `stream`, on every entry. A

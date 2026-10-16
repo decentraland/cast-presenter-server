@@ -641,17 +641,20 @@ function renderShape(ctx: SKRSContext2D, shape: Shape): void {
 function createRenderer(): IRenderer {
   let parser: PPTXParser | null = null
   let embeddedVideoDir: string | null = null
+  let embeddedVideoDirCreation: Promise<string> | null = null
   const embeddedVideos = new Map<string, Promise<string>>()
 
   async function writeEmbeddedVideo(activeParser: PPTXParser, mediaRef: string): Promise<string> {
-    if (!embeddedVideoDir) {
-      embeddedVideoDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cast-pptx-video-'))
-    }
+    embeddedVideoDirCreation ??= fsp.mkdtemp(path.join(os.tmpdir(), 'cast-pptx-video-')).then((dir) => {
+      embeddedVideoDir = dir
+      return dir
+    })
+    const dir = await embeddedVideoDirCreation
     const data = await activeParser.getMedia(mediaRef)
     if (data.byteLength > MAX_EMBEDDED_MEDIA_BYTES) {
       throw new Error(`Embedded media ${mediaRef} exceeds ${MAX_EMBEDDED_MEDIA_BYTES / 1024 / 1024} MB limit`)
     }
-    const filePath = path.join(embeddedVideoDir, path.basename(mediaRef))
+    const filePath = path.join(dir, path.basename(mediaRef))
     await fsp.writeFile(filePath, new Uint8Array(data))
     return filePath
   }
@@ -757,6 +760,7 @@ function createRenderer(): IRenderer {
     destroy(): void {
       parser = null
       embeddedVideos.clear()
+      embeddedVideoDirCreation = null
       if (embeddedVideoDir) {
         fs.rmSync(embeddedVideoDir, { recursive: true, force: true })
         embeddedVideoDir = null

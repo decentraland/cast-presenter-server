@@ -1539,6 +1539,11 @@ describe('when client composition is enabled', () => {
     return (states[states.length - 1].slide as { url: string }).url
   }
 
+  function lastPlayId(): number {
+    const calls = sidecar.play.mock.calls
+    return calls[calls.length - 1][1]
+  }
+
   function bakeSignal(call: number): AbortSignal {
     return components.mediaEncoder.bake.mock.calls[call][2].signal
   }
@@ -1604,6 +1609,29 @@ describe('when client composition is enabled', () => {
 
     it('should reject creating the manager', async () => {
       await expect(createManager(components)).rejects.toThrow('PUBLIC_BASE_URL')
+    })
+  })
+
+  describe.each([
+    ['has no scheme', 'cast.example.com'],
+    ['uses http on a public host', 'http://cast.example.com']
+  ])('and PUBLIC_BASE_URL %s', (_label, value) => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = value
+    })
+
+    it('should reject creating the manager with an https requirement', async () => {
+      await expect(createManager(components)).rejects.toThrow('PUBLIC_BASE_URL must be an https:// URL')
+    })
+  })
+
+  describe('and PUBLIC_BASE_URL uses http on localhost', () => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = 'http://localhost:5000'
+    })
+
+    it('should create the manager', async () => {
+      await expect(createManager(components)).resolves.toBeDefined()
     })
   })
 
@@ -1679,18 +1707,43 @@ describe('when client composition is enabled', () => {
       })
     })
 
+    describe('and the presenter navigates to the next slide while its image is encoding', () => {
+      let pushedFrameBeforeEncode: boolean
+
+      beforeEach(async () => {
+        sidecar.pushFrame.mockClear()
+        jest.mocked(encodeSlidePng).mockClear()
+        await manager.navigate(presentationId, 'next')
+        pushedFrameBeforeEncode =
+          sidecar.pushFrame.mock.invocationCallOrder[0] < jest.mocked(encodeSlidePng).mock.invocationCallOrder[0]
+      })
+
+      it('should push the new frame before encoding the slide image', () => {
+        expect(pushedFrameBeforeEncode).toBe(true)
+      })
+    })
+
     describe('and encoding the next slide fails', () => {
+      let navigation: Promise<unknown>
+
       beforeEach(async () => {
         jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
-        await manager.navigate(presentationId, 'next')
+        navigation = manager.navigate(presentationId, 'next')
+        await navigation.catch(() => undefined)
       })
 
-      it('should still move to the next slide', () => {
-        expect(manager.getState(presentationId)?.currentSlide).toBe(1)
+      it('should reject the navigation with the encode error', async () => {
+        await expect(navigation).rejects.toThrow('encode failed')
       })
 
-      it('should leave the stale slide out of the state', () => {
-        expect(manager.getState(presentationId)?.slide).toBeUndefined()
+      it('should stay on the current slide', () => {
+        expect(manager.getState(presentationId)?.currentSlide).toBe(0)
+      })
+
+      it('should keep the previous slide url', () => {
+        expect(manager.getState(presentationId)?.slide?.url).toBe(
+          `${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`
+        )
       })
     })
 
@@ -1735,7 +1788,10 @@ describe('when client composition is enabled', () => {
       })
 
       it('should play the baked files on the sidecar', () => {
-        expect(sidecar.play).toHaveBeenCalledWith({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' })
+        expect(sidecar.play).toHaveBeenCalledWith(
+          { videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' },
+          expect.any(Number)
+        )
       })
 
       it('should broadcast loading and then playing with playingVideoIndex 0', () => {
@@ -1772,7 +1828,7 @@ describe('when client composition is enabled', () => {
 
       describe('and the sidecar reports the natural end', () => {
         beforeEach(async () => {
-          sidecar.onPlaybackEnded.mock.calls[0][0]()
+          sidecar.onPlaybackEnded.mock.calls[0][0](lastPlayId())
           await flushMicrotasks()
         })
 
@@ -1785,7 +1841,7 @@ describe('when client composition is enabled', () => {
 
       describe('and the sidecar reports a playback failure', () => {
         beforeEach(async () => {
-          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error')
+          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error', lastPlayId())
           await flushMicrotasks()
         })
 
@@ -1834,6 +1890,90 @@ describe('when client composition is enabled', () => {
           expect(manager.getState(presentationId)?.videoState).toBe('playing')
         })
       })
+
+      describe('and the presenter replays it and the first playback reports a late end', () => {
+        let firstPlayId: number
+
+        beforeEach(async () => {
+          firstPlayId = lastPlayId()
+          await manager.stopVideo(presentationId)
+          await manager.playVideo(presentationId, 0)
+          sidecar.onPlaybackEnded.mock.calls[0][0](firstPlayId)
+          await flushMicrotasks()
+        })
+
+        it('should keep playing the replay', () => {
+          expect(manager.getState(presentationId)?.videoState).toBe('playing')
+        })
+      })
+
+      describe('and the presenter pauses and the clip ends before the resume ack is handled', () => {
+        beforeEach(async () => {
+          await manager.pauseVideo(presentationId)
+          const playId = lastPlayId()
+          sidecar.resume.mockImplementationOnce(async () => {
+            sidecar.onPlaybackEnded.mock.calls[0][0](playId)
+          })
+          await manager.playVideo(presentationId, 0)
+          await flushMicrotasks()
+        })
+
+        it('should go idle instead of staying in playing', () => {
+          expect(manager.getState(presentationId)?.videoState).toBe('idle')
+        })
+      })
+    })
+
+    describe('and the sidecar reports the end before the play ack is handled', () => {
+      beforeEach(async () => {
+        sidecar.play.mockImplementationOnce(async (_files, playId) => {
+          sidecar.onPlaybackEnded.mock.calls[0][0](playId)
+        })
+        await manager.playVideo(presentationId, 0)
+        await flushMicrotasks()
+      })
+
+      it('should go idle instead of staying in playing', () => {
+        expect(manager.getState(presentationId)?.videoState).toBe('idle')
+      })
+
+      it('should never broadcast playing', () => {
+        expect(stateBroadcasts().map((s) => s.videoState)).not.toContain('playing')
+      })
+    })
+
+    describe('and the sidecar reports a failure before the play ack is handled', () => {
+      beforeEach(async () => {
+        sidecar.play.mockImplementationOnce(async (_files, playId) => {
+          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: unexpected EOF', playId)
+        })
+        await manager.playVideo(presentationId, 0)
+        await flushMicrotasks()
+      })
+
+      it('should put the video in the interrupted error state', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-playback-interrupted' })
+        )
+      })
+    })
+  })
+
+  describe('and encoding the first slide fails', () => {
+    let creation: Promise<unknown>
+
+    beforeEach(async () => {
+      jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+      creation = createPdfSession(manager)
+      await creation.catch(() => undefined)
+    })
+
+    it('should reject creating the presentation with the encode error', async () => {
+      await expect(creation).rejects.toThrow('encode failed')
+    })
+
+    it('should disconnect the sidecar', () => {
+      expect(sidecar.disconnect).toHaveBeenCalled()
     })
   })
 
@@ -2189,7 +2329,7 @@ describe('when client composition is enabled', () => {
       await manager.playVideo(presentationId, 0)
       const pausing = manager.pauseVideo(presentationId)
       await flushMicrotasks()
-      sidecar.onPlaybackEnded.mock.calls[0][0]()
+      sidecar.onPlaybackEnded.mock.calls[0][0](lastPlayId())
       await flushMicrotasks()
       pause.resolve()
       await pausing
@@ -2470,7 +2610,7 @@ describe('when client composition is enabled', () => {
 
         describe('and the sidecar reports playbackEnded while it plays', () => {
           beforeEach(async () => {
-            sidecar.onPlaybackEnded.mock.calls[0][0]()
+            sidecar.onPlaybackEnded.mock.calls[0][0](0)
             await flushMicrotasks()
           })
 
@@ -2481,7 +2621,7 @@ describe('when client composition is enabled', () => {
 
         describe('and the sidecar reports a playback failure while it plays', () => {
           beforeEach(async () => {
-            sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error')
+            sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error', 0)
             await flushMicrotasks()
           })
 

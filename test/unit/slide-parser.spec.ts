@@ -29,6 +29,7 @@ const RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2007/relationships/media" Target="../media/media1.mp4"/>
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="../media/media1.mp4"/>
   <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="file:///etc/passwd" TargetMode="External"/>
 </Relationships>`
 
 function parseSlide(nvPr: string): Slide {
@@ -57,6 +58,16 @@ describe('when parsing a slide picture', () => {
 
     it('should expose one video shape pointing at the video file', () => {
       expect(slide.getVideos().map((shape) => shape.mediaRef)).toEqual(['ppt/media/media1.mp4'])
+    })
+  })
+
+  describe('and its video file is an external link', () => {
+    beforeEach(() => {
+      slide = parseSlide('<a:videoFile r:link="rId5"/>')
+    })
+
+    it('should not point any video shape at an embedded media file', () => {
+      expect(slide.getVideos().filter((shape) => shape.mediaRef)).toEqual([])
     })
   })
 

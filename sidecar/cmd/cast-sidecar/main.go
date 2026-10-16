@@ -58,7 +58,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 	select {
 	case initCmd = <-cmds:
 	case err := <-readDone:
-		return exitCode(err)
+		return exitCode(out, err)
 	}
 	if initCmd.Type != "init" {
 		_ = out.Error(initCmd.ID, "bad-command", "first command must be init")
@@ -88,7 +88,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 			}
 		case err := <-readDone:
 			s.shutdown(rm)
-			return exitCode(err)
+			return exitCode(out, err)
 		case reason := <-s.lost:
 			log.Printf("room lost: %s", reason)
 			_ = out.Send(ipc.Event{Type: "disconnected", Reason: reason})
@@ -97,9 +97,10 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 	}
 }
 
-func exitCode(readErr error) int {
+func exitCode(out *ipc.Writer, readErr error) int {
 	if readErr != nil {
 		log.Printf("stdin: %v", readErr)
+		_ = out.Error(0, "bad-command", fmt.Sprintf("stdin: %v", readErr))
 		return 1
 	}
 	return 0
@@ -128,9 +129,11 @@ func (s *session) events() room.Events {
 func (s *session) emit(ev ipc.Event) {
 	s.gate.Lock()
 	defer s.gate.Unlock()
-	if s.ready {
-		_ = s.out.Send(ev)
+	if !s.ready {
+		log.Printf("dropped %s before ready", ev.Type)
+		return
 	}
+	_ = s.out.Send(ev)
 }
 
 func (s *session) open(rm Room) {
@@ -159,7 +162,7 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 	case "updateMetadata":
 		s.reply(cmd.ID, "publish-failed", rm.SetMetadata(cmd.Metadata))
 	case "play":
-		s.reply(cmd.ID, "play-failed", s.engine.Play(cmd.VideoPath, cmd.AudioPath))
+		s.reply(cmd.ID, "play-failed", s.engine.Play(cmd.PlayID, cmd.VideoPath, cmd.AudioPath))
 	case "pause":
 		s.engine.Pause()
 		_ = s.out.Ack(cmd.ID)
@@ -167,7 +170,7 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 		s.engine.Resume()
 		_ = s.out.Ack(cmd.ID)
 	case "stop":
-		s.reply(cmd.ID, "playback-failed", s.engine.Stop())
+		s.reply(cmd.ID, "stop-failed", s.engine.Stop())
 	case "shutdown":
 		_ = s.out.Ack(cmd.ID)
 		s.shutdown(rm)

@@ -24,19 +24,21 @@ type Engine struct {
 }
 
 type playback struct {
+	id      int64
 	cancel  context.CancelFunc
 	done    chan struct{}
 	clock   *Clock
 	stopped atomic.Bool
 }
 
-// NewEngine returns an idle engine that reports playbackEnded and playback-failed through send.
+// NewEngine returns an idle engine that reports playbackEnded and playback-failed through send,
+// each tagged with the id given to the Play that started the playback.
 func NewEngine(video, audio SampleWriter, send func(ipc.Event)) *Engine {
 	return &Engine{video: video, audio: audio, send: send, stopTimeout: defaultStopTimeout}
 }
 
 // Play stops the current playback without playbackEnded, then plays videoPath and, when set, audioPath from the start.
-func (e *Engine) Play(videoPath string, audioPath *string) error {
+func (e *Engine) Play(id int64, videoPath string, audioPath *string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.stopLocked(); err != nil {
@@ -65,7 +67,7 @@ func (e *Engine) Play(videoPath string, audioPath *string) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pb := &playback{cancel: cancel, done: make(chan struct{}), clock: NewClock(time.Now())}
+	pb := &playback{id: id, cancel: cancel, done: make(chan struct{}), clock: NewClock(time.Now())}
 	errs := make(chan error, len(streams))
 	var wg sync.WaitGroup
 	for _, play := range streams {
@@ -82,9 +84,9 @@ func (e *Engine) Play(videoPath string, audioPath *string) error {
 		close(errs)
 		if !pb.stopped.Load() {
 			if err := <-errs; err != nil {
-				e.send(ipc.Event{Type: "error", Code: "playback-failed", Message: err.Error()})
+				e.send(ipc.Event{Type: "error", Code: "playback-failed", Message: err.Error(), PlayID: pb.id})
 			} else {
-				e.send(ipc.Event{Type: "playbackEnded"})
+				e.send(ipc.Event{Type: "playbackEnded", PlayID: pb.id})
 			}
 		}
 		close(pb.done)

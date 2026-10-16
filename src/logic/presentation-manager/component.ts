@@ -27,6 +27,7 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
 const OVERLAY_BROADCAST_INTERVAL_MS = 250
 const SLIDE_IMAGE_CACHE_SIZE = 8
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -45,6 +46,11 @@ interface BakeJob {
   abort: AbortController
   priority: BakePriority
   settled: boolean
+}
+
+interface SidecarOutcome {
+  playId: number
+  failure: string | null
 }
 
 interface InternalSession extends PresentationSession {
@@ -72,6 +78,8 @@ interface InternalSession extends PresentationSession {
   currentSlideImage: SlideImage | null
   activeVideoIndex: number
   playGeneration: number
+  sidecarPlayId: number
+  earlySidecarOutcome: SidecarOutcome | null
   presenterIdentity: string | null
   sidecar: ISidecarPublisher | null
   bakeJobs: Map<string, BakeJob>
@@ -167,6 +175,12 @@ function clearVideoEndTimer(session: InternalSession): void {
   session.videoEndTimer = null
 }
 
+function isServableBaseUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const { protocol, hostname } = new URL(value)
+  return protocol === 'https:' || (protocol === 'http:' && LOCAL_HOSTNAMES.has(hostname))
+}
+
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
   session.slideImages.delete(image.hash)
   session.slideImages.set(image.hash, image)
@@ -236,6 +250,9 @@ export async function createPresentationManager(
   const publicBaseUrl = ((await config.getString('PUBLIC_BASE_URL')) ?? '').replace(/\/+$/, '')
   if (clientComposition && !publicBaseUrl) {
     throw new Error('PUBLIC_BASE_URL is required when CLIENT_COMPOSITION_ENABLED=true')
+  }
+  if (clientComposition && !isServableBaseUrl(publicBaseUrl)) {
+    throw new Error('PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost)')
   }
 
   const sessions = new Map<string, InternalSession>()
@@ -467,6 +484,8 @@ export async function createPresentationManager(
         currentSlideImage: null,
         activeVideoIndex: -1,
         playGeneration: 0,
+        sidecarPlayId: 0,
+        earlySidecarOutcome: null,
         presenterIdentity: presenterIdentity ?? null,
         sidecar,
         bakeJobs: new Map()
@@ -589,34 +608,18 @@ export async function createPresentationManager(
     }
   }
 
-  async function encodeSlideImage(
-    session: InternalSession,
-    buffer: Buffer,
-    width: number,
-    height: number
-  ): Promise<SlideImage | null> {
-    try {
-      return await encodeSlidePng(buffer, width, height)
-    } catch (err) {
-      logger.warn(`Failed to encode slide image for presentation ${session.id}`, {
-        error: errorMessage(err)
-      })
-      return null
-    }
-  }
-
   function registerSidecarEvents(id: string, sidecar: ISidecarPublisher): () => string | null {
     let unhandledFatal: string | null = null
     const onFailure = (err: unknown): void => {
       logger.warn(`Sidecar event handling failed for ${id}: ${errorMessage(err)}`)
     }
-    sidecar.onPlaybackEnded(() => {
+    sidecar.onPlaybackEnded((playId) => {
       const session = sessions.get(id)
-      if (session) endSidecarPlayback(session).catch(onFailure)
+      if (session) settleSidecarPlayback(session, { playId, failure: null }).catch(onFailure)
     })
-    sidecar.onPlaybackFailed((message) => {
+    sidecar.onPlaybackFailed((message, playId) => {
       const session = sessions.get(id)
-      if (session) interruptSidecarPlayback(session, message).catch(onFailure)
+      if (session) settleSidecarPlayback(session, { playId, failure: message }).catch(onFailure)
     })
     sidecar.onFatal((reason) => {
       logger.error(`Sidecar failed for presentation ${id}: ${reason}`)
@@ -625,6 +628,20 @@ export async function createPresentationManager(
       else unhandledFatal = reason
     })
     return () => unhandledFatal
+  }
+
+  async function settleSidecarPlayback(session: InternalSession, outcome: SidecarOutcome): Promise<void> {
+    if (outcome.playId !== session.sidecarPlayId) return
+    if (session.videoState === 'loading') {
+      session.earlySidecarOutcome = outcome
+      return
+    }
+    await finishSidecarPlayback(session, outcome)
+  }
+
+  async function finishSidecarPlayback(session: InternalSession, { failure }: SidecarOutcome): Promise<void> {
+    if (failure === null) await endSidecarPlayback(session)
+    else await interruptSidecarPlayback(session, failure)
   }
 
   async function endSidecarPlayback(session: InternalSession): Promise<void> {
@@ -674,16 +691,22 @@ export async function createPresentationManager(
       return existing
     }
     const abort = new AbortController()
-    session.abortController.signal.addEventListener('abort', () => abort.abort(), { once: true })
+    const sessionSignal = session.abortController.signal
+    const abortWithSession = (): void => abort.abort()
+    sessionSignal.addEventListener('abort', abortWithSession, { once: true })
+    const settle = (): void => {
+      job.settled = true
+      sessionSignal.removeEventListener('abort', abortWithSession)
+    }
     const state: Omit<BakeJob, 'promise'> = { abort, priority, settled: false }
     const job: BakeJob = Object.assign(state, {
       promise: runBakeJob(session, url, state).then(
         (result) => {
-          job.settled = true
+          settle()
           return result
         },
         (err: unknown) => {
-          job.settled = true
+          settle()
           if (session.bakeJobs.get(url) === job) session.bakeJobs.delete(url)
           throw err
         }
@@ -748,6 +771,14 @@ export async function createPresentationManager(
     }
   }
 
+  async function markSidecarPlaying(session: InternalSession, videoIndex: number): Promise<void> {
+    const early = session.earlySidecarOutcome
+    session.earlySidecarOutcome = null
+    if (early?.playId !== session.sidecarPlayId) return markV2Playing(session, videoIndex)
+    session.videoState = 'playing'
+    await finishSidecarPlayback(session, early)
+  }
+
   async function markV2Playing(session: InternalSession, videoIndex: number): Promise<void> {
     session.videoState = 'playing'
     metrics.increment('video_playback_total', { action: 'play' })
@@ -767,6 +798,7 @@ export async function createPresentationManager(
     const generation = ++session.playGeneration
     const isCurrent = (): boolean => session.playGeneration === generation
     session.videoState = 'loading'
+    session.earlySidecarOutcome = null
     session.activeVideoIndex = videoIndex
     session.videoErrorReason = null
     session.videoErrorCode = null
@@ -794,7 +826,7 @@ export async function createPresentationManager(
         await abandon()
         return
       }
-      await markV2Playing(session, videoIndex)
+      await markSidecarPlaying(session, videoIndex)
       return
     }
 
@@ -825,7 +857,11 @@ export async function createPresentationManager(
     const played = await runSidecarCommand(
       session,
       videoIndex,
-      () => sidecar.play({ videoPath: files.videoPath, audioPath: files.audioPath }),
+      () => {
+        session.sidecarPlayId = generation
+        session.earlySidecarOutcome = null
+        return sidecar.play({ videoPath: files.videoPath, audioPath: files.audioPath }, generation)
+      },
       isCurrent
     )
     if (!played) return
@@ -837,7 +873,7 @@ export async function createPresentationManager(
       }
       return
     }
-    await markV2Playing(session, videoIndex)
+    await markSidecarPlaying(session, videoIndex)
   }
 
   async function playClientVideo(
@@ -953,15 +989,14 @@ export async function createPresentationManager(
       session.videoElapsedBeforePause = 0
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
-      const slideImage = clientComposition ? await encodeSlideImage(session, buffer, width, height) : null
 
       session.publisher.pushFrame(buffer, width, height)
       session.publisher.startHeartbeat(buffer, width, height)
 
+      const slideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
       if (slideImage) rememberSlideImage(session, slideImage)
-      else session.currentSlideImage = null
       session.currentSlide = targetSlide
       session.lastFrameBuffer = buffer
       session.lastFrameWidth = width
