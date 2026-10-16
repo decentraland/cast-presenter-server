@@ -1,6 +1,7 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
+import { SlideRenderError } from '../../src/adapters/renderer'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
 import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'
 import { createLoggerMock, createMockLogger } from '../mocks/context'
@@ -19,24 +20,30 @@ function createMockFileProvider(overrides?: { fromUrlError?: Error }) {
   }
 }
 
-function createMockPresentationManager(overrides?: { validateCredentialsError?: Error }) {
+function createMockPresentationManager(overrides?: {
+  validateCredentialsError?: Error
+  createPresentationError?: Error
+}) {
   return {
     validateCredentials: jest.fn().mockImplementation(async () => {
       if (overrides?.validateCredentialsError) throw overrides.validateCredentialsError
     }),
-    createPresentation: jest.fn().mockResolvedValue({
-      id: 'test-id',
-      fileName: 'test',
-      slideCount: 1,
-      currentSlide: 0,
-      fileType: 'pdf' as const
+    createPresentation: jest.fn().mockImplementation(async () => {
+      if (overrides?.createPresentationError) throw overrides.createPresentationError
+      return {
+        id: 'test-id',
+        fileName: 'test',
+        slideCount: 1,
+        currentSlide: 0,
+        fileType: 'pdf' as const
+      }
     })
   }
 }
 
 function createJsonContext(
   body: Record<string, unknown>,
-  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error },
+  overrides?: { fromUrlError?: Error; validateCredentialsError?: Error; createPresentationError?: Error },
   components?: Record<string, unknown>
 ) {
   const jsonBytes = Buffer.from(JSON.stringify(body), 'utf-8')
@@ -435,6 +442,25 @@ describe('when handling a create presentation request', () => {
       it('should not trigger the URL download', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((context.components.fileProvider as any).fromUrl).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('and the slide cannot be rendered', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
+            { createPresentationError: new SlideRenderError(0, new Error('Create skia surface failed')) }
+          )
+        )
+      })
+
+      it('should return status 422', () => {
+        expect(result.status).toBe(422)
+      })
+
+      it('should not leak the native error message', () => {
+        expect(JSON.stringify(result.body)).not.toContain('skia')
       })
     })
 

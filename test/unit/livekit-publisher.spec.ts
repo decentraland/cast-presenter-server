@@ -291,3 +291,42 @@ describe('when parsing presenters from room metadata with non-string entries', (
     expect([...presenters]).toEqual(['0xabc'])
   })
 })
+
+describe('when a participant outside the presenters list sends a presentation command', () => {
+  let logger: ILoggerComponent.ILogger
+  let room: FakeRoom
+
+  function emitData(message: Record<string, unknown>): void {
+    const onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+    onData(new TextEncoder().encode(JSON.stringify(message)), { identity: '0xViewer' })
+  }
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['0xpresenter'] }) })
+    logger = createLoggerMock()
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', logger)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    publisher.setDataHandler(jest.fn())
+  })
+
+  describe('and the command is an overlay update', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should not log a warning', () => {
+      expect(logger.warn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the command is a slide navigation', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:navigate', action: 'next' })
+    })
+
+    it('should log a warning that the command is ignored', () => {
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Identity '0xViewer' not in presenters list"))
+    })
+  })
+})

@@ -159,10 +159,12 @@ function isVideoActive(session: InternalSession): boolean {
   return session.videoState === 'loading' || session.videoState === 'playing' || session.videoState === 'paused'
 }
 
-function isServableBaseUrl(value: string): boolean {
-  if (!URL.canParse(value)) return false
-  const { protocol, hostname } = new URL(value)
-  return protocol === 'https:' || (protocol === 'http:' && LOCAL_HOSTNAMES.has(hostname))
+function servableBaseUrl(value: string): string | null {
+  if (!URL.canParse(value)) return null
+  const { protocol, hostname, origin, pathname, username, password, search, hash } = new URL(value)
+  const secure = protocol === 'https:' || (protocol === 'http:' && LOCAL_HOSTNAMES.has(hostname))
+  if (!secure || username || password || search || hash) return null
+  return `${origin}${pathname}`.replace(/\/+$/, '')
 }
 
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
@@ -229,12 +231,15 @@ export async function createPresentationManager(
   const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
   const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
   const clientComposition = (await config.getString('CLIENT_COMPOSITION_ENABLED')) === 'true'
-  const publicBaseUrl = ((await config.getString('PUBLIC_BASE_URL')) ?? '').replace(/\/+$/, '')
-  if (clientComposition && !publicBaseUrl) {
+  const configuredBaseUrl = (await config.getString('PUBLIC_BASE_URL')) ?? ''
+  if (clientComposition && !configuredBaseUrl) {
     throw new Error('PUBLIC_BASE_URL is required when CLIENT_COMPOSITION_ENABLED=true')
   }
-  if (clientComposition && !isServableBaseUrl(publicBaseUrl)) {
-    throw new Error('PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost)')
+  const publicBaseUrl = servableBaseUrl(configuredBaseUrl)
+  if (clientComposition && publicBaseUrl === null) {
+    throw new Error(
+      'PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost) with no credentials, query or fragment'
+    )
   }
 
   const sessions = new Map<string, InternalSession>()
@@ -934,24 +939,33 @@ export async function createPresentationManager(
       session.activeVideoIndex = -1
       session.videoElapsedBeforePause = 0
 
-      const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
+      try {
+        const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
-      session.publisher.pushFrame(buffer, width, height)
-      session.publisher.startHeartbeat(buffer, width, height)
+        session.publisher.pushFrame(buffer, width, height)
+        session.publisher.startHeartbeat(buffer, width, height)
 
-      const slideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
-      const slideVideos = await session.renderer.getSlideVideos(targetSlide)
+        const slideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
+        const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
-      if (slideImage) rememberSlideImage(session, slideImage)
-      session.currentSlide = targetSlide
-      session.lastFrameBuffer = buffer
-      session.lastFrameWidth = width
-      session.lastFrameHeight = height
-      session.slideVideos = slideVideos
+        if (slideImage) rememberSlideImage(session, slideImage)
+        session.currentSlide = targetSlide
+        session.lastFrameBuffer = buffer
+        session.lastFrameWidth = width
+        session.lastFrameHeight = height
+        session.slideVideos = slideVideos
+      } catch (err) {
+        if (session.lastFrameBuffer) {
+          session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+          session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+        }
+        await broadcastState(session)
+        throw err
+      }
 
       metrics.increment('slide_navigations_total', { action })
       logger.info(`Navigated presentation ${session.id} to slide ${targetSlide}`, {
-        slideVideos: slideVideos.length
+        slideVideos: session.slideVideos.length
       })
 
       await broadcastState(session)
