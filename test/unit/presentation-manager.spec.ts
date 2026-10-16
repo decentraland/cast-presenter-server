@@ -1547,18 +1547,43 @@ describe('when client composition is enabled', () => {
         })
       })
 
+      describe('and the presenter navigates to the next slide while its image is encoding', () => {
+        let pushedFrameBeforeEncode: boolean
+
+        beforeEach(async () => {
+          publisher.pushFrame.mockClear()
+          jest.mocked(encodeSlidePng).mockClear()
+          await manager.navigate(presentationId, 'next')
+          pushedFrameBeforeEncode =
+            publisher.pushFrame.mock.invocationCallOrder[0] < jest.mocked(encodeSlidePng).mock.invocationCallOrder[0]
+        })
+
+        it('should push the new frame before encoding the slide image', () => {
+          expect(pushedFrameBeforeEncode).toBe(true)
+        })
+      })
+
       describe('and encoding the next slide fails', () => {
+        let navigation: Promise<unknown>
+
         beforeEach(async () => {
           jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
-          await manager.navigate(presentationId, 'next')
+          navigation = manager.navigate(presentationId, 'next')
+          await navigation.catch(() => undefined)
         })
 
-        it('should still move to the next slide', () => {
-          expect(manager.getState(presentationId)?.currentSlide).toBe(1)
+        it('should reject the navigation with the encode error', async () => {
+          await expect(navigation).rejects.toThrow('encode failed')
         })
 
-        it('should leave the stale slide out of the state', () => {
-          expect(manager.getState(presentationId)?.slide).toBeUndefined()
+        it('should stay on the current slide', () => {
+          expect(manager.getState(presentationId)?.currentSlide).toBe(0)
+        })
+
+        it('should keep the previous slide url', () => {
+          expect(manager.getState(presentationId)?.slide?.url).toBe(
+            `${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`
+          )
         })
       })
 
@@ -1626,6 +1651,30 @@ describe('when client composition is enabled', () => {
             )
           })
         })
+      })
+    })
+
+    describe('and encoding the first slide fails', () => {
+      let creation: Promise<unknown>
+
+      beforeEach(async () => {
+        jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+        creation = manager.createPresentation(
+          Buffer.from('%PDF-1.7'),
+          'pdf',
+          'test-token',
+          'wss://lk.example.com',
+          'test.pdf'
+        )
+        await creation.catch(() => undefined)
+      })
+
+      it('should reject creating the presentation with the encode error', async () => {
+        await expect(creation).rejects.toThrow('encode failed')
+      })
+
+      it('should disconnect from LiveKit', () => {
+        expect(publisher.disconnect).toHaveBeenCalled()
       })
     })
 

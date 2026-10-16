@@ -216,7 +216,11 @@ that composite the presentation themselves:
 - `slide: { url, width, height }`: the current slide as a PNG at
   `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
   `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
-  presence marks the v2 protocol. Each session caches the last 8
+  presence marks the v2 protocol, so it is never dropped: if the first
+  slide fails to encode, creation fails, and if a later slide fails,
+  the navigation is rejected and the previous slide stays current. The
+  LiveKit frame is pushed before the encode, so v1 viewers see the new
+  slide without waiting for it. Each session caches the last 8
   slides in memory; an evicted hash, or any hash after the session
   stops, returns 404.
 - `presenterIdentity`: the identity of the participant who started
