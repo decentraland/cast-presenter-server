@@ -22,6 +22,10 @@ export interface IMediaEncoder extends IBaseComponent {
   ): Promise<BakeResult>
   /** Moves the still-queued bake owning `signal` to the front of the pending queue; no-op if running, finished or unknown. */
   promote(signal: AbortSignal): void
-  /** @returns the real path and size when `url` is a file the PPTX renderer extracted, otherwise null. */
-  resolveEmbeddedVideo(url: string): { path: string; bytes: number } | null
+  /**
+   * @param url - A slide video URL, which may be a local path the PPTX renderer extracted
+   * @param embeddedDir - The calling renderer's embedded-media directory, or null when it has none
+   * @returns the real path and size when `url` is a file directly inside `embeddedDir`, otherwise null.
+   */
+  resolveEmbeddedVideo(url: string, embeddedDir: string | null): { path: string; bytes: number } | null
 }

@@ -14,8 +14,10 @@ import { createTracerComponent } from '@dcl/tracer-component'
 import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
 import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
+import { createMediaEncoderComponent } from './adapters/media-encoder'
 import { createPdfRendererComponent } from './adapters/pdf-renderer'
 import { createPptxRendererComponent } from './adapters/pptx-renderer'
+import { createSidecarPublisherComponent } from './adapters/sidecar-publisher'
 import { createVideoCompositorComponent } from './adapters/video-compositor'
 import { createNetworkValidatorComponent } from './logic/network-validator'
 import { createPresentationManager } from './logic/presentation-manager'
@@ -81,6 +83,8 @@ export async function initComponents(): Promise<AppComponents> {
   const pdfRenderer = createPdfRendererComponent()
   const pptxRenderer = createPptxRendererComponent()
   const videoCompositor = createVideoCompositorComponent({ networkValidator })
+  const sidecarPublisher = await createSidecarPublisherComponent({ config })
+  const mediaEncoder = await createMediaEncoderComponent({ logs })
 
   const presentationManager = await createPresentationManager({
     config,
@@ -90,7 +94,9 @@ export async function initComponents(): Promise<AppComponents> {
     liveKitPublisher,
     pdfRenderer,
     pptxRenderer,
-    videoCompositor
+    videoCompositor,
+    sidecarPublisher,
+    mediaEncoder
   })
 
   return {
@@ -108,6 +114,8 @@ export async function initComponents(): Promise<AppComponents> {
     pdfRenderer,
     pptxRenderer,
     videoCompositor,
+    sidecarPublisher,
+    mediaEncoder,
     networkValidator
   }
 }

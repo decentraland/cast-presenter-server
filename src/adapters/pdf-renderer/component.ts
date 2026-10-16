@@ -136,6 +136,10 @@ function createRenderer(): IRenderer {
         }))
     },
 
+    getEmbeddedMediaDir(): string | null {
+      return null
+    },
+
     getSlideCount(): number {
       if (!doc) throw new Error('PDF not initialized')
       return doc.numPages
