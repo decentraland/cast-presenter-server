@@ -288,7 +288,8 @@ components:
         Presenters change it with
         `{ "type": "presentation:overlay:update", ... }` on the data
         channel; partial updates merge into the stored layout and an
-        invalid field drops the whole command. The server only stores
+        invalid field drops the whole command. There is one layout per
+        session, shared by every presenter. The server only stores
         and broadcasts this layout — clients draw the bubble.
       required: [x, y, size]
       properties:
