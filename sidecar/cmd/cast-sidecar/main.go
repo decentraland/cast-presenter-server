@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/decentraland/cast-presenter-server/sidecar/internal/ipc"
@@ -38,6 +39,7 @@ type session struct {
 	lost  chan string
 	gate  sync.Mutex
 	ready bool
+	token string
 }
 
 func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
@@ -60,10 +62,10 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 		return 1
 	}
 
-	s := &session{out: out, lost: make(chan string, 1)}
+	s := &session{out: out, lost: make(chan string, 1), token: initCmd.Token}
 	rm, err := connect(initCmd.URL, initCmd.Token, initCmd.PresentationID, s.events())
 	if err != nil {
-		msg := room.Redact(err.Error())
+		msg := s.redact(err.Error())
 		code := "connect-failed"
 		if errors.Is(err, room.ErrPublish) {
 			code = "publish-failed"
@@ -160,9 +162,17 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 	return false
 }
 
+func (s *session) redact(msg string) string {
+	msg = room.Redact(msg)
+	if s.token == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, s.token, "REDACTED")
+}
+
 func (s *session) reply(id int64, code string, err error) {
 	if err != nil {
-		_ = s.out.Error(id, code, room.Redact(err.Error()))
+		_ = s.out.Error(id, code, s.redact(err.Error()))
 		return
 	}
 	_ = s.out.Ack(id)
