@@ -62,6 +62,11 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       requireString: jest.fn().mockResolvedValue(''),
       requireNumber: jest.fn().mockResolvedValue(0)
     },
+    features: {
+      getIsFeatureEnabled: jest.fn().mockResolvedValue(false),
+      getEnvFeature: jest.fn().mockResolvedValue(undefined),
+      getFeatureVariant: jest.fn().mockResolvedValue(null)
+    },
     logs: {
       getLogger: jest.fn().mockReturnValue({
         info: jest.fn(),
@@ -1447,10 +1452,11 @@ describe('when client composition is enabled', () => {
       encodeCount++
       return { hash: `h${encodeCount}`, png: Buffer.from(`png${encodeCount}`), width: 1920, height: 1080 }
     })
-    configValues = { CLIENT_COMPOSITION_ENABLED: 'true', PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
+    configValues = { PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
     publisher = createMockPublisher()
     components = createMockComponents({ publisher })
     components.config.getString.mockImplementation(async (key: string) => configValues[key])
+    components.features.getIsFeatureEnabled.mockResolvedValue(true)
     renderer = createMockRenderer()
     renderer.getSlideCount.mockReturnValue(10)
     renderer.getSlideVideos.mockResolvedValue([
@@ -1464,14 +1470,17 @@ describe('when client composition is enabled', () => {
   })
 
   describe('and PUBLIC_BASE_URL is unset', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       configValues.PUBLIC_BASE_URL = undefined
+      await createManagerWithSession(components)
     })
 
-    it('should reject creating the manager', async () => {
-      await expect(
-        createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
-      ).rejects.toThrow('PUBLIC_BASE_URL')
+    it('should create the session without a slide in the state', () => {
+      expect(stateBroadcasts()[0]).not.toHaveProperty('slide')
+    })
+
+    it('should not encode a slide image', () => {
+      expect(encodeSlidePng).not.toHaveBeenCalled()
     })
   })
 
@@ -1513,6 +1522,22 @@ describe('when client composition is enabled', () => {
       manager = await createPresentationManager(
         components as unknown as Parameters<typeof createPresentationManager>[0]
       )
+    })
+
+    describe('and a session is created', () => {
+      beforeEach(async () => {
+        await manager.createPresentation(
+          Buffer.from('%PDF-1.7'),
+          'pdf',
+          'test-token',
+          'wss://lk.example.com',
+          'test.pdf'
+        )
+      })
+
+      it('should read the dapps cast-client-composition feature flag', () => {
+        expect(components.features.getIsFeatureEnabled).toHaveBeenCalledWith('dapps', 'cast-client-composition')
+      })
     })
 
     describe('and a session is created with a presenterIdentity', () => {
@@ -1558,6 +1583,17 @@ describe('when client composition is enabled', () => {
 
         it('should serve the current slide image', () => {
           expect(manager.getSlideImage(presentationId, 'h2')).toEqual(Buffer.from('png2'))
+        })
+      })
+
+      describe('and the flag is turned off before the presenter navigates', () => {
+        beforeEach(async () => {
+          components.features.getIsFeatureEnabled.mockResolvedValue(false)
+          await manager.navigate(presentationId, 'next')
+        })
+
+        it('should keep broadcasting slide urls for the running session', () => {
+          expect(lastSlideUrl()).toBe(`${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h2.png`)
         })
       })
 
