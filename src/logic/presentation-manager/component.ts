@@ -21,6 +21,7 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
 const OVERLAY_BROADCAST_INTERVAL_MS = 250
 const SLIDE_IMAGE_CACHE_SIZE = 8
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -127,6 +128,12 @@ function classifyVideoError(err: Error): VideoErrorInfo {
   return { code: 'video-playback-failed', message: 'Video unavailable' }
 }
 
+function isServableBaseUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const { protocol, hostname } = new URL(value)
+  return protocol === 'https:' || (protocol === 'http:' && LOCAL_HOSTNAMES.has(hostname))
+}
+
 function rememberSlideImage(session: InternalSession, image: SlideImage): void {
   session.slideImages.delete(image.hash)
   session.slideImages.set(image.hash, image)
@@ -175,6 +182,9 @@ export async function createPresentationManager(
   const publicBaseUrl = ((await config.getString('PUBLIC_BASE_URL')) ?? '').replace(/\/+$/, '')
   if (clientComposition && !publicBaseUrl) {
     throw new Error('PUBLIC_BASE_URL is required when CLIENT_COMPOSITION_ENABLED=true')
+  }
+  if (clientComposition && !isServableBaseUrl(publicBaseUrl)) {
+    throw new Error('PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost)')
   }
 
   const sessions = new Map<string, InternalSession>()
@@ -516,22 +526,6 @@ export async function createPresentationManager(
     }
   }
 
-  async function encodeSlideImage(
-    session: InternalSession,
-    buffer: Buffer,
-    width: number,
-    height: number
-  ): Promise<SlideImage | null> {
-    try {
-      return await encodeSlidePng(buffer, width, height)
-    } catch (err) {
-      logger.warn(`Failed to encode slide image for presentation ${session.id}`, {
-        error: err instanceof Error ? err.message : String(err)
-      })
-      return null
-    }
-  }
-
   async function navigateSession(
     session: InternalSession,
     action: 'next' | 'prev' | 'goto',
@@ -575,15 +569,14 @@ export async function createPresentationManager(
       session.videoElapsedBeforePause = 0
 
       const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
-      const slideImage = clientComposition ? await encodeSlideImage(session, buffer, width, height) : null
 
       session.publisher.pushFrame(buffer, width, height)
       session.publisher.startHeartbeat(buffer, width, height)
 
+      const slideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
       const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
       if (slideImage) rememberSlideImage(session, slideImage)
-      else session.currentSlideImage = null
       session.currentSlide = targetSlide
       session.lastFrameBuffer = buffer
       session.lastFrameWidth = width

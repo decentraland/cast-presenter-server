@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { STOP_COMPONENT } from '@well-known-components/interfaces'
 import type { BakePriority, BakeResult, IMediaEncoder } from './types'
 import type { AppComponents } from '../../types'
 
@@ -10,6 +11,7 @@ const PROBE_TIMEOUT_MS = 30_000
 const BAKE_TIMEOUT_MS = 20 * 60 * 1000
 const STDERR_TAIL_CHARS = 300
 const EMBEDDED_DIR_PREFIX = 'cast-pptx-video-'
+const VIDEO_CONTAINER_FORMATS = 'mov,mp4,m4a,3gp,3g2,mj2,asf,avi,mpeg,mpegts,matroska,webm'
 const HTTP_URL = /^https?:\/\//i
 const SCALE_FILTER =
   "scale='if(gte(iw,ih),min(1920,iw),min(1080,iw))':'if(gte(iw,ih),min(1080,ih),min(1920,ih))'" +
@@ -39,6 +41,8 @@ function probeArgs(sourcePath: string): string[] {
     'csv=p=0',
     '-protocol_whitelist',
     'file',
+    '-format_whitelist',
+    VIDEO_CONTAINER_FORMATS,
     sourcePath
   ]
 }
@@ -54,6 +58,8 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
     '-nostdin',
     '-protocol_whitelist',
     'file',
+    '-format_whitelist',
+    VIDEO_CONTAINER_FORMATS,
     '-i',
     sourcePath,
     '-map',
@@ -118,12 +124,15 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
  * 3. encode it with a niced ffmpeg into `bake-<uuid>.h264` and, when audio exists, `bake-<uuid>.ogg`;
  * 4. on any failure, timeout or abort, SIGKILL the process, delete the partial outputs and reject.
  *
+ * Stopping the component aborts the running bake and rejects every queued one.
+ *
  * @param components - `logs` for the `media-encoder` logger.
  * @returns the media encoder.
  */
 export async function createMediaEncoderComponent(components: Pick<AppComponents, 'logs'>): Promise<IMediaEncoder> {
   const logger = components.logs.getLogger('media-encoder')
   const queue: QueueEntry[] = []
+  const shutdown = new AbortController()
   let running = false
 
   function queueLengths(): Record<string, number> {
@@ -234,24 +243,29 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
   }
 
   return {
+    async [STOP_COMPONENT]() {
+      shutdown.abort(new Error('Media encoder stopped'))
+    },
+
     async bake(sourcePath, outDir, { priority, signal }) {
-      signal.throwIfAborted()
+      const active = AbortSignal.any([signal, shutdown.signal])
+      active.throwIfAborted()
       return new Promise<BakeResult>((resolve, reject) => {
         const onQueuedAbort = (): void => {
           const index = queue.indexOf(entry)
           if (index === -1) return
           queue.splice(index, 1)
-          reject(signal.reason)
+          reject(active.reason)
         }
         const entry: QueueEntry = {
           signal,
           priority,
           run: async () => {
-            signal.removeEventListener('abort', onQueuedAbort)
+            active.removeEventListener('abort', onQueuedAbort)
             const startedAt = Date.now()
             logger.info('Bake started', { sourcePath, priority, ...queueLengths() })
             try {
-              const result = await runBake(sourcePath, outDir, signal)
+              const result = await runBake(sourcePath, outDir, active)
               logger.info('Bake finished', {
                 durationMs: Date.now() - startedAt,
                 bytes: result.bytes,
@@ -268,7 +282,7 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
             }
           }
         }
-        signal.addEventListener('abort', onQueuedAbort, { once: true })
+        active.addEventListener('abort', onQueuedAbort, { once: true })
         queue.push(entry)
         pump()
       })

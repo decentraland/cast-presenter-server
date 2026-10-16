@@ -13,7 +13,7 @@ export type BakePriority = 'play' | 'prefetch'
 export interface IMediaEncoder extends IBaseComponent {
   /**
    * Queues a bake; `play` requests run before queued `prefetch` requests. A running bake is never preempted.
-   * @throws immediately if `signal` is already aborted; otherwise when ffmpeg fails, times out, or `signal` aborts (queued or running); partial outputs are deleted.
+   * @throws immediately if `signal` is already aborted; otherwise when ffmpeg fails, times out, `signal` aborts or the encoder stops (queued or running); partial outputs are deleted.
    */
   bake(
     sourcePath: string,
