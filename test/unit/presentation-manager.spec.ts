@@ -73,6 +73,11 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
       requireString: jest.fn().mockResolvedValue(''),
       requireNumber: jest.fn().mockResolvedValue(0)
     },
+    features: {
+      getIsFeatureEnabled: jest.fn().mockResolvedValue(false),
+      getEnvFeature: jest.fn().mockResolvedValue(undefined),
+      getFeatureVariant: jest.fn().mockResolvedValue(null)
+    },
     logs: {
       getLogger: jest.fn().mockReturnValue({
         info: jest.fn(),
@@ -1581,11 +1586,12 @@ describe('when client composition is enabled', () => {
       encodeCount++
       return { hash: `h${encodeCount}`, png: Buffer.from(`png${encodeCount}`), width: 1920, height: 1080 }
     })
-    configValues = { CLIENT_COMPOSITION_ENABLED: 'true', PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
+    configValues = { PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
     sidecar = createMockPublisher()
     compositor = createMockCompositor()
     components = createMockComponents({ publisher: sidecar })
     components.config.getString.mockImplementation(async (key: string) => configValues[key])
+    components.features.getIsFeatureEnabled.mockResolvedValue(true)
     components.videoCompositor.createCompositor.mockReturnValue(compositor)
     renderer = createMockRenderer()
     renderer.getSlideCount.mockReturnValue(10)
@@ -1603,12 +1609,21 @@ describe('when client composition is enabled', () => {
   })
 
   describe('and PUBLIC_BASE_URL is unset', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       configValues.PUBLIC_BASE_URL = undefined
+      manager = await createManager(components)
+      await createSession()
     })
 
-    it('should reject creating the manager', async () => {
-      await expect(createManager(components)).rejects.toThrow('PUBLIC_BASE_URL')
+    it('should create the session publisher through the rtc-node factory instead of the sidecar one', () => {
+      expect([
+        components.sidecarPublisher.createPublisher.mock.calls.length,
+        components.liveKitPublisher.createPublisher.mock.calls.length
+      ]).toEqual([0, 1])
+    })
+
+    it('should create the session without a slide in the state', () => {
+      expect(stateBroadcasts()[0]).not.toHaveProperty('slide')
     })
   })
 
@@ -1655,6 +1670,21 @@ describe('when client composition is enabled', () => {
         components.sidecarPublisher.createPublisher.mock.calls.length,
         components.liveKitPublisher.createPublisher.mock.calls.length
       ]).toEqual([1, 0])
+    })
+
+    it('should read the dapps cast-client-composition feature flag', () => {
+      expect(components.features.getIsFeatureEnabled).toHaveBeenCalledWith('dapps', 'cast-client-composition')
+    })
+
+    describe('and the flag is turned off before the presenter navigates', () => {
+      beforeEach(async () => {
+        components.features.getIsFeatureEnabled.mockResolvedValue(false)
+        await manager.navigate(presentationId, 'next')
+      })
+
+      it('should keep broadcasting slide urls for the running session', () => {
+        expect(lastSlideUrl()).toBe(`${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h2.png`)
+      })
     })
 
     it('should not publish a composite track', () => {

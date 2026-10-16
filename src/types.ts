@@ -5,6 +5,7 @@ import type {
   IMetricsComponent
 } from '@well-known-components/interfaces'
 import type { IFetchComponent, IHttpServerComponent } from '@dcl/core-commons'
+import type { IFeaturesComponent } from '@dcl/features-component'
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
 import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
@@ -28,6 +29,7 @@ export interface BaseComponents {
   server: IHttpServerComponent<GlobalContext>
   metrics: IMetricsComponent<keyof typeof metricDeclarations>
   fetcher: IFetchComponent
+  features: IFeaturesComponent
   presentationManager: IPresentationManager
   googleDrive: IGoogleDriveComponent
   fileProvider: IFileProviderComponent

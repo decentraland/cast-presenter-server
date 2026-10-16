@@ -214,7 +214,7 @@ needed on our side.
 
 ## v2 (client composition)
 
-With `CLIENT_COMPOSITION_ENABLED=true` none of the above runs: there
+With client composition on for the session none of the above runs: there
 is no compositor, no ffmpeg during playback, and no audio-track
 churn. A slide video takes one of two paths, chosen on play by its
 URL and announced as `slideVideos[i].source`:
