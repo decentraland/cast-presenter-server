@@ -179,7 +179,9 @@ The layout is the bubble centre `x`, `y` as fractions of the slide
 width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
 `(1, 0)`, `(0, 1)` and `(1, 1)` are the four corner presets. Values of
 `x` and `y` are clamped to `[0, 1]`. A new session starts at
-`{ "x": 0, "y": 1, "size": "small" }`, bottom-left.
+`{ "x": 0, "y": 1, "size": "small" }`, bottom-left. There is one
+layout per session, so when several presenters update it the last
+update wins.
 
 ### State broadcast (bot to all participants)
 
