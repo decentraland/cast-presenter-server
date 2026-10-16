@@ -53,7 +53,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 	select {
 	case initCmd = <-cmds:
 	case err := <-readDone:
-		return exitCode(err)
+		return exitCode(out, err)
 	}
 	if initCmd.Type != "init" {
 		_ = out.Error(initCmd.ID, "bad-command", "first command must be init")
@@ -82,7 +82,7 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 			}
 		case err := <-readDone:
 			rm.Disconnect()
-			return exitCode(err)
+			return exitCode(out, err)
 		case reason := <-s.lost:
 			log.Printf("room lost: %s", reason)
 			_ = out.Send(ipc.Event{Type: "disconnected", Reason: reason})
@@ -91,9 +91,10 @@ func run(stdin io.Reader, stdout io.Writer, connect ConnectFunc) int {
 	}
 }
 
-func exitCode(readErr error) int {
+func exitCode(out *ipc.Writer, readErr error) int {
 	if readErr != nil {
 		log.Printf("stdin: %v", readErr)
+		_ = out.Error(0, "bad-command", fmt.Sprintf("stdin: %v", readErr))
 		return 1
 	}
 	return 0
@@ -122,9 +123,11 @@ func (s *session) events() room.Events {
 func (s *session) emit(ev ipc.Event) {
 	s.gate.Lock()
 	defer s.gate.Unlock()
-	if s.ready {
-		_ = s.out.Send(ev)
+	if !s.ready {
+		log.Printf("dropped %s before ready", ev.Type)
+		return
 	}
+	_ = s.out.Send(ev)
 }
 
 func (s *session) open(rm Room) {

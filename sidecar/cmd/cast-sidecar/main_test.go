@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +232,49 @@ func TestRunDropsRoomEventsBeforeReady(t *testing.T) {
 	if len(events) != 1 || events[0]["type"] != "ready" || events[0]["participantCount"] != float64(5) {
 		t.Fatalf("expected only ready, got %s", raw)
 	}
+}
+
+func TestRunLogsRoomEventsDroppedBeforeReady(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	f := &fakeRoom{onConnect: func(ev room.Events) {
+		ev.OnData("0xabc", []byte("early"))
+	}}
+
+	runLines(t, f, initLine)
+
+	if !strings.Contains(logs.String(), "dropped dataReceived before ready") {
+		t.Fatalf("expected the dropped event to be logged, got %q", logs.String())
+	}
+}
+
+func TestRunReportsAnOversizedStdinLine(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{name: "before init", lines: []string{oversizedLine()}},
+		{name: "after init", lines: []string{initLine, oversizedLine()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, events, raw := runLines(t, &fakeRoom{}, tc.lines...)
+
+			if code != 1 {
+				t.Fatalf("expected exit 1, got %d", code)
+			}
+			if len(events) == 0 {
+				t.Fatalf("expected an unsolicited bad-command error, got no stdout")
+			}
+			if last := events[len(events)-1]; last["type"] != "error" || last["code"] != "bad-command" || last["id"] != nil {
+				t.Fatalf("expected an unsolicited bad-command error last, got %s", raw)
+			}
+		})
+	}
+}
+
+func oversizedLine() string {
+	return `{"type":"publishData","id":2,"payloadBase64":"` + strings.Repeat("A", 1<<20) + `"}`
 }
 
 func TestRunPublishesDecodedData(t *testing.T) {
