@@ -240,8 +240,19 @@ describe('when resolving a client video duration', () => {
         expect(logger.info).toHaveBeenCalledWith('Video duration unknown', { provider: 'youtube', reason: 'timeout' })
       })
 
-      describe('and the duration is looked up again', () => {
-        beforeEach(() => {
+      describe('and the duration is looked up again within a minute', () => {
+        beforeEach(async () => {
+          result = await videoDuration.getDurationMs(YOUTUBE_VIDEO)
+        })
+
+        it('should resolve null without a new request', () => {
+          expect({ result, calls: fetcher.fetch.mock.calls.length }).toEqual({ result: null, calls: 1 })
+        })
+      })
+
+      describe('and the duration is looked up again after a minute', () => {
+        beforeEach(async () => {
+          await jest.advanceTimersByTimeAsync(60_000)
           videoDuration.getDurationMs(YOUTUBE_VIDEO).catch(() => undefined)
         })
 
@@ -294,13 +305,19 @@ describe('when resolving a client video duration', () => {
       })
     })
 
-    describe('and a previous lookup resolved null', () => {
+    describe('and a previous lookup resolved null more than a minute ago', () => {
       beforeEach(async () => {
+        jest.useFakeTimers()
         fetcher.fetch
           .mockRejectedValueOnce(new Error('socket hang up'))
           .mockResolvedValueOnce(playerResponse(okPlayerBody('212')))
         await videoDuration.getDurationMs(YOUTUBE_VIDEO)
+        jest.setSystemTime(Date.now() + 60_000)
         result = await videoDuration.getDurationMs(YOUTUBE_VIDEO)
+      })
+
+      afterEach(() => {
+        jest.useRealTimers()
       })
 
       it('should retry the lookup and resolve the duration', () => {
@@ -370,6 +387,23 @@ describe('when resolving a client video duration', () => {
       })
     })
 
+    describe('and ffprobe is killed for printing more than the output cap', () => {
+      beforeEach(async () => {
+        mockFfprobe(
+          Object.assign(new Error('stdout maxBuffer length exceeded'), {
+            code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            killed: true
+          }),
+          ''
+        )
+        result = await videoDuration.getDurationMs(DRIVE_VIDEO)
+      })
+
+      it('should log that the duration is unknown with the parse reason instead of timeout', () => {
+        expect(logger.info).toHaveBeenCalledWith('Video duration unknown', { provider: 'drive', reason: 'parse' })
+      })
+    })
+
     describe('and ffprobe prints a duration longer than 24 hours', () => {
       beforeEach(async () => {
         mockFfprobe(null, '2200000\n')
@@ -417,6 +451,49 @@ describe('when resolving a client video duration', () => {
         'csv=p=0',
         'https://player.vimeo.com/external/123.m3u8?s=abc'
       ])
+    })
+  })
+})
+
+describe('when three probed durations are looked up at the same time', () => {
+  let videoDuration: IVideoDurationComponent
+  let callbacks: ExecFileCallback[]
+
+  beforeEach(async () => {
+    callbacks = []
+    execFileMock.mockImplementation((_file: string, _args: string[], _options: unknown, callback: ExecFileCallback) => {
+      callbacks.push(callback)
+      return {}
+    })
+    const logger = createLoggerMock()
+    videoDuration = await createVideoDurationComponent({
+      fetcher: { fetch: jest.fn() },
+      logs: { getLogger: () => logger }
+    })
+    for (const n of [1, 2, 3]) {
+      videoDuration
+        .getDurationMs({ provider: 'vimeo-hls', id: String(n), url: `https://player.vimeo.com/external/${n}.m3u8` })
+        .catch(() => undefined)
+    }
+    await new Promise((resolve) => setImmediate(resolve))
+  })
+
+  afterEach(() => {
+    jest.resetAllMocks()
+  })
+
+  it('should run at most two ffprobe processes', () => {
+    expect(execFileMock).toHaveBeenCalledTimes(2)
+  })
+
+  describe('and one probe finishes', () => {
+    beforeEach(async () => {
+      callbacks[0](null, '10.0\n', '')
+      await new Promise((resolve) => setImmediate(resolve))
+    })
+
+    it('should start the queued probe', () => {
+      expect(execFileMock).toHaveBeenCalledTimes(3)
     })
   })
 })

@@ -13,6 +13,8 @@ class DurationUnknownError extends Error {
 }
 
 const CACHE_SIZE = 256
+const FAILURE_RETRY_MS = 60_000
+const MAX_CONCURRENT_PROBES = 2
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000
 const INNERTUBE_PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false'
 const INNERTUBE_TIMEOUT_MS = 5000
@@ -80,7 +82,8 @@ function probeDurationMs(url: string, protocols: string, extraArgs: string[]): P
   return new Promise((resolve, reject) => {
     execFile('ffprobe', args, FFPROBE_OPTIONS, (error, stdout) => {
       if (error) {
-        reject(new DurationUnknownError(error.killed ? 'timeout' : 'ffprobe-exit'))
+        const overflowed = 'code' in error && error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+        reject(new DurationUnknownError(overflowed ? 'parse' : error.killed ? 'timeout' : 'ffprobe-exit'))
         return
       }
       const seconds = Number(stdout.trim())
@@ -94,11 +97,12 @@ function probeDurationMs(url: string, protocols: string, extraArgs: string[]): P
  * Creates the video duration component.
  *
  * Flow per lookup:
- * 1. Return a cached duration (successful results only, keyed by canonical URL, capped at 256 entries),
- *    or join the in-flight lookup for the same URL.
- * 2. Ask the provider: one InnerTube `player` request for YouTube, ffprobe for Drive and Vimeo HLS.
- * 3. Resolve `null` and log the reason on any failure or a duration over 24 hours, so a transient failure
- *    retries on the next call.
+ * 1. Return a cached duration (keyed by canonical URL, capped at 256 entries), `null` for a URL whose
+ *    lookup failed less than a minute ago, or join the in-flight lookup for the same URL.
+ * 2. Ask the provider: one InnerTube `player` request for YouTube, ffprobe for Drive and Vimeo HLS, with
+ *    at most two ffprobe processes at a time process-wide.
+ * 3. Resolve `null` and log the reason on any failure or a duration over 24 hours; the URL is retried
+ *    once a minute has passed.
  *
  * @param components - Required: fetcher (InnerTube request), logs
  * @returns The video duration component
@@ -109,7 +113,22 @@ export async function createVideoDurationComponent(
   const { fetcher, logs } = components
   const logger = logs.getLogger('video-duration')
   const durations = new Map<string, number>()
+  const failedAt = new Map<string, number>()
   const inFlight = new Map<string, Promise<number | null>>()
+  const probeQueue: Array<() => void> = []
+  let runningProbes = 0
+
+  async function withProbeSlot<T>(probe: () => Promise<T>): Promise<T> {
+    if (runningProbes < MAX_CONCURRENT_PROBES) runningProbes++
+    else await new Promise<void>((resolve) => probeQueue.push(resolve))
+    try {
+      return await probe()
+    } finally {
+      const next = probeQueue.shift()
+      if (next) next()
+      else runningProbes--
+    }
+  }
 
   async function fetchPlayer(videoId: string, abortController: AbortController): Promise<unknown> {
     let response: Response
@@ -150,18 +169,21 @@ export async function createVideoDurationComponent(
         return youtubeDurationMs(video.id)
       case 'drive': {
         const query = new URLSearchParams({ id: video.id, export: 'download', confirm: 't' })
-        return probeDurationMs(`${DRIVE_DOWNLOAD_URL}?${query}`, DRIVE_PROTOCOLS, ['-format_whitelist', DRIVE_FORMATS])
+        return withProbeSlot(() =>
+          probeDurationMs(`${DRIVE_DOWNLOAD_URL}?${query}`, DRIVE_PROTOCOLS, ['-format_whitelist', DRIVE_FORMATS])
+        )
       }
       case 'vimeo-hls':
-        return probeDurationMs(video.url, VIMEO_HLS_PROTOCOLS, [])
+        return withProbeSlot(() => probeDurationMs(video.url, VIMEO_HLS_PROTOCOLS, []))
     }
   }
 
-  function remember(url: string, durationMs: number): void {
-    durations.set(url, durationMs)
-    if (durations.size > CACHE_SIZE) {
-      const [oldest] = durations.keys()
-      durations.delete(oldest)
+  function setCapped<V>(entries: Map<string, V>, url: string, value: V): void {
+    entries.delete(url)
+    entries.set(url, value)
+    if (entries.size > CACHE_SIZE) {
+      const [oldest] = entries.keys()
+      entries.delete(oldest)
     }
   }
 
@@ -169,11 +191,13 @@ export async function createVideoDurationComponent(
     try {
       const durationMs = await providerDurationMs(video)
       if (durationMs > MAX_DURATION_MS) throw new DurationUnknownError('parse')
-      remember(video.url, durationMs)
+      failedAt.delete(video.url)
+      setCapped(durations, video.url, durationMs)
       return durationMs
     } catch (error) {
       const reason = error instanceof DurationUnknownError ? error.reason : 'unexpected'
       logger.info('Video duration unknown', { provider: video.provider, reason })
+      setCapped(failedAt, video.url, Date.now())
       return null
     }
   }
@@ -182,6 +206,8 @@ export async function createVideoDurationComponent(
     async getDurationMs(video: ClientVideo): Promise<number | null> {
       const cached = durations.get(video.url)
       if (cached !== undefined) return cached
+      const lastFailure = failedAt.get(video.url)
+      if (lastFailure !== undefined && Date.now() - lastFailure < FAILURE_RETRY_MS) return null
       const pending = inFlight.get(video.url)
       if (pending) return pending
       const next = lookup(video).finally(() => inFlight.delete(video.url))
