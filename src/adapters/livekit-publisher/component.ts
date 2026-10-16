@@ -172,9 +172,8 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           )
 
           if (!isPresenter) {
-            logger.warn(
-              `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
-            )
+            const line = `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
+            HIGH_FREQUENCY_COMMANDS.has(msgType) ? logger.debug(line) : logger.warn(line)
             return
           }
 

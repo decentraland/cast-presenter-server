@@ -191,6 +191,27 @@ func TestRunStartupOutcomes(t *testing.T) {
 	}
 }
 
+func TestRunRedactsTheInitTokenFromConnectErrors(t *testing.T) {
+	var out bytes.Buffer
+
+	run(strings.NewReader(initLine), &out, fakeConnect(&fakeRoom{}, fmt.Errorf("%w: invalid token tok-example123", room.ErrConnect), nil))
+
+	if strings.Contains(out.String(), "tok-example123") {
+		t.Fatalf("stdout leaked the token: %s", out.String())
+	}
+}
+
+func TestRunRedactsTheInitTokenFromCommandErrors(t *testing.T) {
+	var out bytes.Buffer
+	stdin := initLine + "\n" + `{"type":"updateMetadata","id":2,"metadata":"{}"}` + "\n"
+
+	run(strings.NewReader(stdin), &out, fakeConnect(&fakeRoom{setErr: errors.New("rejected tok-example123")}, nil, nil))
+
+	if strings.Contains(out.String(), "tok-example123") {
+		t.Fatalf("stdout leaked the token: %s", out.String())
+	}
+}
+
 func TestRunPassesInitFieldsToConnect(t *testing.T) {
 	var out bytes.Buffer
 	var calls []connectCall

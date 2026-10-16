@@ -124,7 +124,7 @@ function bakeArgs(sourcePath: string, videoPath: string, audioPath: string | nul
  * 3. encode it with a niced ffmpeg into `bake-<uuid>.h264` and, when audio exists, `bake-<uuid>.ogg`;
  * 4. on any failure, timeout or abort, SIGKILL the process, delete the partial outputs and reject.
  *
- * Stopping the component aborts the running bake and rejects every queued one.
+ * Stopping the component aborts the running bake, waits for its cleanup and rejects every queued one.
  *
  * @param components - `logs` for the `media-encoder` logger.
  * @returns the media encoder.
@@ -133,7 +133,7 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
   const logger = components.logs.getLogger('media-encoder')
   const queue: QueueEntry[] = []
   const shutdown = new AbortController()
-  let running = false
+  let running: Promise<void> | null = null
 
   function queueLengths(): Record<string, number> {
     return {
@@ -234,17 +234,17 @@ export async function createMediaEncoderComponent(components: Pick<AppComponents
     const playIndex = queue.findIndex((entry) => entry.priority === 'play')
     const [next] = queue.splice(playIndex === -1 ? 0 : playIndex, 1)
     if (!next) return
-    running = true
     const release = (): void => {
-      running = false
+      running = null
       pump()
     }
-    void next.run().then(release, release)
+    running = next.run().then(release, release)
   }
 
   return {
     async [STOP_COMPONENT]() {
       shutdown.abort(new Error('Media encoder stopped'))
+      await running
     },
 
     async bake(sourcePath, outDir, { priority, signal }) {
