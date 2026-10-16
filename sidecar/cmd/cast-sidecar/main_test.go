@@ -390,6 +390,17 @@ func TestRunPlaysABakedFileToItsEnd(t *testing.T) {
 	}
 }
 
+func TestRunTagsPlaybackEventsWithThePlayID(t *testing.T) {
+	s := startHarness(t, &fakeRoom{})
+
+	s.send(t, strings.Replace(playLine(t, 40, 3), `"type":"play"`, `"type":"play","playId":7`, 1))
+
+	s.expectEvent(t, "ack", 40)
+	if ev := s.next(t); ev["type"] != "playbackEnded" || ev["playId"] != float64(7) {
+		t.Fatalf("expected playbackEnded for play 7, got %v", ev)
+	}
+}
+
 func TestRunShutdownStopsAPlaybackWithoutPlaybackEnded(t *testing.T) {
 	f := &fakeRoom{}
 	s := startHarness(t, f)

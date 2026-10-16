@@ -162,7 +162,7 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 	case "updateMetadata":
 		s.reply(cmd.ID, "publish-failed", rm.SetMetadata(cmd.Metadata))
 	case "play":
-		s.reply(cmd.ID, "play-failed", s.engine.Play(cmd.VideoPath, cmd.AudioPath))
+		s.reply(cmd.ID, "play-failed", s.engine.Play(cmd.PlayID, cmd.VideoPath, cmd.AudioPath))
 	case "pause":
 		s.engine.Pause()
 		_ = s.out.Ack(cmd.ID)
@@ -170,7 +170,7 @@ func (s *session) handle(rm Room, cmd ipc.Command) (done bool) {
 		s.engine.Resume()
 		_ = s.out.Ack(cmd.ID)
 	case "stop":
-		s.reply(cmd.ID, "playback-failed", s.engine.Stop())
+		s.reply(cmd.ID, "stop-failed", s.engine.Stop())
 	case "shutdown":
 		_ = s.out.Ack(cmd.ID)
 		s.shutdown(rm)

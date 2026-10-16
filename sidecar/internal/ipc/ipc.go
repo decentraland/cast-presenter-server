@@ -22,6 +22,7 @@ type Command struct {
 	Metadata       string  `json:"metadata,omitempty"`
 	VideoPath      string  `json:"videoPath,omitempty"`
 	AudioPath      *string `json:"audioPath,omitempty"`
+	PlayID         int64   `json:"playId,omitempty"`
 }
 
 // Event is one line written to the Node parent on stdout.
@@ -37,6 +38,7 @@ type Event struct {
 	Count            *int   `json:"count,omitempty"`
 	ParticipantCount *int   `json:"participantCount,omitempty"`
 	Reason           string `json:"reason,omitempty"`
+	PlayID           int64  `json:"playId,omitempty"`
 }
 
 // Writer emits Events as JSON lines and is safe for concurrent use.
