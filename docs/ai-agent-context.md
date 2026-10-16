@@ -72,6 +72,12 @@ remote control through LiveKit data channels.
   (`src/adapters/sidecar-publisher/`, JSON-lines IPC), and never
   composites a frame; see
   [architecture.md](architecture.md#client-composition-v2).
+- **Client-played videos (v2):** YouTube, Google Drive and Vimeo
+  `.m3u8` links are played by the clients from their canonical URL
+  (`slideVideos[i].source: 'client'`); the server only tracks the
+  state and `videoPositionMs`/`videoPositionAt`, and ends them on a
+  timer when `video-duration` knows their length. Only embedded PPTX
+  videos are baked.
 
 **Video playback lifecycle:**
 

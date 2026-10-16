@@ -8,7 +8,7 @@ import type { AppComponents } from '../../types'
 const FILE_ID_REGEX = /^[a-zA-Z0-9_-]+$/
 
 export function getPublicDriveDownloadUrl(fileId: string): string {
-  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&authuser=0`
+  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&authuser=0&confirm=t`
 }
 
 function isNodeReadable(value: unknown): value is Readable {
