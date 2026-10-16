@@ -181,12 +181,26 @@ events on stdout, logs on stderr (redacted, logged at debug).
 - Every later command (`publishData`, `updateMetadata`, `play`,
   `pause`, `resume`, `stop`, `shutdown`) carries an `id` and gets one
   `ack` or `error` with that `id`. The server fails a command that has
-  no reply after 10 s.
+  no reply after 10 s. A `stop` whose playback does not wind down
+  within 2 s answers `stop-failed`.
+- `play` also carries a `playId` (the session's play generation), and
+  the sidecar echoes it on that playback's `playbackEnded` and
+  `error { code: 'playback-failed' }`. The sidecar starts a playback
+  before it acks the `play`, and readline delivers every line of a
+  stdout chunk before the ack's continuation runs, so either event can
+  reach the server while the video is still `loading`. The server keeps
+  such an event and applies it when the ack is handled, and it ignores
+  events whose `playId` belongs to a replaced playback.
 - Unsolicited events: `dataReceived` (the server decodes the packet
   and applies the same presenter check as the rtc-node path),
   `roomMetadata` (the presenters list), `participantCount` (feeds the
   idle reaper), `playbackEnded`, `error { code: 'playback-failed' }`
-  and `disconnected`.
+  and `disconnected`. Room events that arrive before `ready` are
+  dropped and logged on stderr.
+- A stdin line over 1 MiB, or any other stdin read error, makes the
+  sidecar send `error { code: 'bad-command' }` without an `id` and
+  exit. The server reads events until the process's stdio closes, so
+  a last error line is never lost to the exit.
 - A `disconnected` event or an unexpected exit stops the session. The
   sidecar never reconnects by itself. On session stop the server sends
   `shutdown` (bounded at 5 s), waits up to 3 s for the exit, then
@@ -203,6 +217,19 @@ at a time right after creation. A downloaded source counts against the
 2 GB session quota until its bake finishes, and is then replaced by
 the bake output. See `docs/video-playback-lifecycle.md` for the
 playback state machine.
+
+- **Preset:** x264 `ultrafast`. On the 0.5 vCPU `.zone` task
+  `veryfast` baked at about 0.3× realtime and `ultrafast` at about
+  0.7×. The cost is quality: `ultrafast` turns off deblocking and
+  most motion search, so a 1080p bake at 6 Mbps shows more blocking
+  than `veryfast` would.
+- **Inputs:** ffprobe and ffmpeg read only local files
+  (`-protocol_whitelist file`) in the mov/mp4, asf, avi, mpeg, mpegts
+  and matroska/webm containers (`-format_whitelist`), so an HLS
+  playlist or concat list posing as an embedded video cannot pull
+  other files into a bake.
+- **Shutdown:** stopping the component kills the running bake and
+  rejects every queued one.
 
 ## Data channel protocol
 

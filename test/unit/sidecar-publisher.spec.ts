@@ -137,6 +137,27 @@ describe('when using the sidecar publisher', () => {
     })
   })
 
+  describe('and the process exits before its connect error line is read', () => {
+    let error: Error
+
+    beforeEach(async () => {
+      const outcome = publisher.connect(LIVEKIT_URL, TOKEN).then(
+        () => new Error('connect resolved'),
+        (err: Error) => err
+      )
+      await flush()
+      fake.emit('exit', 1, null)
+      emit({ type: 'error', code: 'connect-failed', message: 'dial: no route to host' })
+      await flush()
+      fake.emit('close', 1, null)
+      error = await outcome
+    })
+
+    it('should reject with the connect error the sidecar reported', () => {
+      expect(error.message).toBe('LiveKit connect failed: dial: no route to host')
+    })
+  })
+
   describe('and it is connected', () => {
     let dataHandler: jest.Mock
 
@@ -243,14 +264,20 @@ describe('when using the sidecar publisher', () => {
       let line: Record<string, unknown>
 
       beforeEach(async () => {
-        const playing = publisher.play({ videoPath: '/tmp/v.h264', audioPath: null })
+        const playing = publisher.play({ videoPath: '/tmp/v.h264', audioPath: null }, 7)
         await ackLast()
         await playing
         line = lastLine()
       })
 
-      it('should write a play command with a null audio path', () => {
-        expect(line).toEqual({ type: 'play', id: expect.any(Number), videoPath: '/tmp/v.h264', audioPath: null })
+      it('should write a play command with the play id and a null audio path', () => {
+        expect(line).toEqual({
+          type: 'play',
+          id: expect.any(Number),
+          playId: 7,
+          videoPath: '/tmp/v.h264',
+          audioPath: null
+        })
       })
     })
 
@@ -258,7 +285,7 @@ describe('when using the sidecar publisher', () => {
       let playing: Promise<void>
 
       beforeEach(async () => {
-        playing = publisher.play({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' })
+        playing = publisher.play({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' }, 1)
         playing.catch(noop)
         await flush()
         emit({ type: 'error', id: lastLine().id, code: 'play-failed', message: 'open /tmp/v.h264: no such file' })
@@ -306,12 +333,12 @@ describe('when using the sidecar publisher', () => {
       beforeEach(async () => {
         ended = jest.fn()
         publisher.onPlaybackEnded(ended)
-        emit({ type: 'playbackEnded' })
+        emit({ type: 'playbackEnded', playId: 7 })
         await flush()
       })
 
-      it('should call the playback ended callback', () => {
-        expect(ended).toHaveBeenCalledTimes(1)
+      it('should call the playback ended callback once with the play id', () => {
+        expect(ended.mock.calls).toEqual([[7]])
       })
     })
 
@@ -321,12 +348,12 @@ describe('when using the sidecar publisher', () => {
       beforeEach(async () => {
         failed = jest.fn()
         publisher.onPlaybackFailed(failed)
-        emit({ type: 'error', code: 'playback-failed', message: 'read v.h264: input/output error' })
+        emit({ type: 'error', code: 'playback-failed', message: 'read v.h264: input/output error', playId: 9 })
         await flush()
       })
 
-      it('should call the playback failed callback with the message', () => {
-        expect(failed).toHaveBeenCalledWith('read v.h264: input/output error')
+      it('should call the playback failed callback with the message and the play id', () => {
+        expect(failed).toHaveBeenCalledWith('read v.h264: input/output error', 9)
       })
     })
 
@@ -351,7 +378,7 @@ describe('when using the sidecar publisher', () => {
       beforeEach(async () => {
         fatal = jest.fn()
         publisher.onFatal(fatal)
-        fake.emit('exit', 1, null)
+        fake.emit('close', 1, null)
         await flush()
       })
 
@@ -380,7 +407,7 @@ describe('when using the sidecar publisher', () => {
         publisher.onFatal(fatal)
         emit({ type: 'disconnected', reason: 'room closed' })
         await flush()
-        fake.emit('exit', 1, null)
+        fake.emit('close', 1, null)
         await flush()
       })
 
@@ -401,7 +428,7 @@ describe('when using the sidecar publisher', () => {
         shutdown = lastLine()
         emit({ type: 'ack', id: shutdown.id })
         await flush()
-        fake.emit('exit', 0, null)
+        fake.emit('close', 0, null)
         await disconnecting
       })
 

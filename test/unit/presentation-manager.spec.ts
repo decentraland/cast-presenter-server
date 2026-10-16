@@ -1534,6 +1534,11 @@ describe('when client composition is enabled', () => {
     return (states[states.length - 1].slide as { url: string }).url
   }
 
+  function lastPlayId(): number {
+    const calls = sidecar.play.mock.calls
+    return calls[calls.length - 1][1]
+  }
+
   function bakeSignal(call: number): AbortSignal {
     return components.mediaEncoder.bake.mock.calls[call][2].signal
   }
@@ -1766,7 +1771,10 @@ describe('when client composition is enabled', () => {
       })
 
       it('should play the baked files on the sidecar', () => {
-        expect(sidecar.play).toHaveBeenCalledWith({ videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' })
+        expect(sidecar.play).toHaveBeenCalledWith(
+          { videoPath: '/tmp/v.h264', audioPath: '/tmp/a.ogg' },
+          expect.any(Number)
+        )
       })
 
       it('should broadcast loading and then playing with playingVideoIndex 0', () => {
@@ -1809,7 +1817,7 @@ describe('when client composition is enabled', () => {
 
       describe('and the sidecar reports the natural end', () => {
         beforeEach(async () => {
-          sidecar.onPlaybackEnded.mock.calls[0][0]()
+          sidecar.onPlaybackEnded.mock.calls[0][0](lastPlayId())
           await flushMicrotasks()
         })
 
@@ -1822,7 +1830,7 @@ describe('when client composition is enabled', () => {
 
       describe('and the sidecar reports a playback failure', () => {
         beforeEach(async () => {
-          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error')
+          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: input/output error', lastPlayId())
           await flushMicrotasks()
         })
 
@@ -1870,6 +1878,72 @@ describe('when client composition is enabled', () => {
         it('should be playing', () => {
           expect(manager.getState(presentationId)?.videoState).toBe('playing')
         })
+      })
+
+      describe('and the presenter replays it and the first playback reports a late end', () => {
+        let firstPlayId: number
+
+        beforeEach(async () => {
+          firstPlayId = lastPlayId()
+          await manager.stopVideo(presentationId)
+          await manager.playVideo(presentationId, 0)
+          sidecar.onPlaybackEnded.mock.calls[0][0](firstPlayId)
+          await flushMicrotasks()
+        })
+
+        it('should keep playing the replay', () => {
+          expect(manager.getState(presentationId)?.videoState).toBe('playing')
+        })
+      })
+
+      describe('and the presenter pauses and the clip ends before the resume ack is handled', () => {
+        beforeEach(async () => {
+          await manager.pauseVideo(presentationId)
+          const playId = lastPlayId()
+          sidecar.resume.mockImplementationOnce(async () => {
+            sidecar.onPlaybackEnded.mock.calls[0][0](playId)
+          })
+          await manager.playVideo(presentationId, 0)
+          await flushMicrotasks()
+        })
+
+        it('should go idle instead of staying in playing', () => {
+          expect(manager.getState(presentationId)?.videoState).toBe('idle')
+        })
+      })
+    })
+
+    describe('and the sidecar reports the end before the play ack is handled', () => {
+      beforeEach(async () => {
+        sidecar.play.mockImplementationOnce(async (_files, playId) => {
+          sidecar.onPlaybackEnded.mock.calls[0][0](playId)
+        })
+        await manager.playVideo(presentationId, 0)
+        await flushMicrotasks()
+      })
+
+      it('should go idle instead of staying in playing', () => {
+        expect(manager.getState(presentationId)?.videoState).toBe('idle')
+      })
+
+      it('should never broadcast playing', () => {
+        expect(stateBroadcasts().map((s) => s.videoState)).not.toContain('playing')
+      })
+    })
+
+    describe('and the sidecar reports a failure before the play ack is handled', () => {
+      beforeEach(async () => {
+        sidecar.play.mockImplementationOnce(async (_files, playId) => {
+          sidecar.onPlaybackFailed.mock.calls[0][0]('read v.h264: unexpected EOF', playId)
+        })
+        await manager.playVideo(presentationId, 0)
+        await flushMicrotasks()
+      })
+
+      it('should put the video in the interrupted error state', () => {
+        expect(manager.getState(presentationId)).toEqual(
+          expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-playback-interrupted' })
+        )
       })
     })
   })
@@ -2300,7 +2374,7 @@ describe('when client composition is enabled', () => {
       await manager.playVideo(presentationId, 0)
       const pausing = manager.pauseVideo(presentationId)
       await flushMicrotasks()
-      sidecar.onPlaybackEnded.mock.calls[0][0]()
+      sidecar.onPlaybackEnded.mock.calls[0][0](lastPlayId())
       await flushMicrotasks()
       pause.resolve()
       await pausing

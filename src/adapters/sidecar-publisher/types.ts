@@ -9,18 +9,21 @@ export interface PlaybackFiles {
 
 /** Session publisher backed by the Go sidecar; inherited frame, heartbeat and audio methods are no-ops. */
 export interface ISidecarPublisher extends ILiveKitPublisher {
-  /** Starts paced playback of baked files from the start, replacing any current playback. */
-  play(files: PlaybackFiles): Promise<void>
+  /**
+   * Starts paced playback of baked files from the start, replacing any current playback.
+   * @param playId - Echoed on this playback's ended and failed events
+   */
+  play(files: PlaybackFiles, playId: number): Promise<void>
   /** Stops writing samples; the pacing clock freezes. */
   pause(): Promise<void>
   /** Continues from the paused sample. */
   resume(): Promise<void>
   /** Ends the current playback; the tracks stay published and idle. */
   stopVideo(): Promise<void>
-  /** Registers the callback for the natural end of a playback. */
-  onPlaybackEnded(cb: () => void): void
-  /** Registers the callback for a mid-stream read failure. */
-  onPlaybackFailed(cb: (message: string) => void): void
+  /** Registers the callback for the natural end of a playback, called with the playback's `playId`. */
+  onPlaybackEnded(cb: (playId: number) => void): void
+  /** Registers the callback for a mid-stream read failure, called with the playback's `playId`. */
+  onPlaybackFailed(cb: (message: string, playId: number) => void): void
   /** Sidecar exited unexpectedly or the room dropped. */
   onFatal(cb: (reason: string) => void): void
 }

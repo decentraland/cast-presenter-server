@@ -1,2 +1,2 @@
 export { createSidecarPublisherComponent } from './component'
-export type { ISidecarPublisher, ISidecarPublisherComponent, PlaybackFiles } from './types'
+export type { ISidecarPublisherComponent } from './types'

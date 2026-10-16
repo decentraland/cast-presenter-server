@@ -34,6 +34,7 @@ interface SidecarEvent {
   count?: number
   participantCount?: number
   reason?: string
+  playId?: number
 }
 
 interface PendingCommand {
@@ -75,8 +76,8 @@ function createPublisher(
   let participantCount = 0
   let lastSceneId = ''
   let dataHandler: ((data: Record<string, unknown>, senderIdentity: string) => void) | null = null
-  let playbackEndedCallback: (() => void) | null = null
-  let playbackFailedCallback: ((message: string) => void) | null = null
+  let playbackEndedCallback: ((playId: number) => void) | null = null
+  let playbackFailedCallback: ((message: string, playId: number) => void) | null = null
   let fatalCallback: ((reason: string) => void) | null = null
   let fatalFired = false
 
@@ -166,7 +167,7 @@ function createPublisher(
         if (!ready) {
           settle(INIT_ID, connectError(event.message ?? event.code ?? 'unknown error'))
         } else if (event.code === 'playback-failed') {
-          playbackFailedCallback?.(redact(event.message ?? 'playback failed'))
+          playbackFailedCallback?.(redact(event.message ?? 'playback failed'), event.playId ?? 0)
         } else {
           logger.warn('Sidecar error', { code: event.code ?? '', message: redact(event.message ?? '') })
         }
@@ -181,7 +182,7 @@ function createPublisher(
         if (typeof event.count === 'number') participantCount = event.count
         return
       case 'playbackEnded':
-        playbackEndedCallback?.()
+        playbackEndedCallback?.(event.playId ?? 0)
         return
       case 'disconnected':
         fireFatal(`Room disconnected: ${event.reason ?? 'unknown'}`)
@@ -211,7 +212,7 @@ function createPublisher(
       child = proc
       running = true
       exited = new Promise<void>((resolve) => {
-        proc.on('exit', (code, signal) => {
+        proc.on('close', (code, signal) => {
           onExit(`Sidecar exited (code=${code}, signal=${signal})`)
           resolve()
         })
@@ -268,8 +269,8 @@ function createPublisher(
       return running ? participantCount : 0
     },
 
-    play(files: PlaybackFiles): Promise<void> {
-      return rpc({ type: 'play', videoPath: files.videoPath, audioPath: files.audioPath })
+    play(files: PlaybackFiles, playId: number): Promise<void> {
+      return rpc({ type: 'play', playId, videoPath: files.videoPath, audioPath: files.audioPath })
     },
 
     pause(): Promise<void> {
@@ -284,11 +285,11 @@ function createPublisher(
       return rpc({ type: 'stop' })
     },
 
-    onPlaybackEnded(cb: () => void): void {
+    onPlaybackEnded(cb: (playId: number) => void): void {
       playbackEndedCallback = cb
     },
 
-    onPlaybackFailed(cb: (message: string) => void): void {
+    onPlaybackFailed(cb: (message: string, playId: number) => void): void {
       playbackFailedCallback = cb
     },
 
