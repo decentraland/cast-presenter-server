@@ -1,6 +1,7 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
+import { SlideRenderError } from '../../adapters/renderer'
 import { errorMessage } from '../../logic/error-message'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
@@ -166,6 +167,10 @@ export async function createPresentationHandler(
     }
     if (error instanceof InvalidLivekitCredentialsError) {
       return { status: 401, body: { error: 'Invalid LiveKit credentials' } }
+    }
+    if (error instanceof SlideRenderError) {
+      logger.warn(error.message)
+      return { status: 422, body: { error: 'Unable to render the presentation' } }
     }
     logger.error(`Failed to create presentation: ${errorMessage(error)}`)
     return { status: 500, body: { error: 'Internal error' } }

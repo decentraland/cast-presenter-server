@@ -37,6 +37,8 @@ tags:
   - name: Drive proxy
     description: Google Drive public video proxy
 
+security: []
+
 paths:
   /ping:
     get:
@@ -150,12 +152,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "422":
+          description: Unable to render the presentation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: >
-            Unhandled server error (e.g., LiveKit connection failure,
-            PDF render failure, or unexpected exception). The response
-            body contains a generic message; inspect server logs for
-            details.
+            Unhandled server error (e.g., LiveKit connection failure
+            or unexpected exception). The response body contains a
+            generic message; inspect server logs for details.
           content:
             application/json:
               schema:
@@ -387,7 +394,8 @@ components:
         Presenters change it with
         `{ "type": "presentation:overlay:update", ... }` on the data
         channel; partial updates merge into the stored layout and an
-        invalid field drops the whole command. The server only stores
+        invalid field drops the whole command. There is one layout per
+        session, shared by every presenter. The server only stores
         and broadcasts this layout — clients draw the bubble.
       required: [x, y, size]
       properties:

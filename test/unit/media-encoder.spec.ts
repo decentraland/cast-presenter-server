@@ -427,6 +427,48 @@ describe('when using the media encoder', () => {
     })
   })
 
+  describe('and the encoder stops before the running ffmpeg has closed', () => {
+    let running: StartedBake
+    let ffmpeg: FakeChildProcess
+    let rmSpy: jest.SpyInstance
+    let outputs: string[]
+    let stop: Promise<void>
+    let stopped: boolean
+
+    beforeEach(async () => {
+      running = await startRunningBake('/src/running.mp4', 'play')
+      running.promise.catch(() => undefined)
+      ffmpeg = lastSpawn(processes, 'nice')
+      ffmpeg.kill.mockImplementation(() => true)
+      outputs = outputPaths(ffmpeg)
+      rmSpy = jest.spyOn(fs, 'rmSync')
+      stopped = false
+      stop = Promise.resolve(encoder[STOP_COMPONENT]?.()).then(() => {
+        stopped = true
+      })
+      await flush()
+    })
+
+    afterEach(() => {
+      ffmpeg.emit('close', null)
+    })
+
+    it('should not resolve the stop yet', () => {
+      expect(stopped).toBe(false)
+    })
+
+    describe('and ffmpeg then closes', () => {
+      beforeEach(async () => {
+        ffmpeg.emit('close', null)
+        await stop
+      })
+
+      it('should remove the partial outputs before the stop resolves', () => {
+        expect(rmSpy.mock.calls).toEqual(outputs.map((output) => [output, { force: true }]))
+      })
+    })
+  })
+
   describe('and the bake is aborted while probing for audio', () => {
     let bake: StartedBake
     let ffprobe: FakeChildProcess

@@ -296,7 +296,9 @@ The layout is the bubble centre `x`, `y` as fractions of the slide
 width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
 `(1, 0)`, `(0, 1)` and `(1, 1)` are the four corner presets. Values of
 `x` and `y` are clamped to `[0, 1]`. A new session starts at
-`{ "x": 0, "y": 1, "size": "small" }`, bottom-left.
+`{ "x": 0, "y": 1, "size": "small" }`, bottom-left. There is one
+layout per session, so when several presenters update it the last
+update wins.
 
 `presentation:presenter:claim` is v2-only (it is ignored with the flag
 off): it sets `presenterIdentity` to the sender's identity.
@@ -330,7 +332,8 @@ so late joiners can read it immediately without waiting for a
 broadcast.
 
 With `CLIENT_COMPOSITION_ENABLED=true` (which requires an `https://`
-`PUBLIC_BASE_URL`, or `http://` on localhost), both channels also
+`PUBLIC_BASE_URL` with no credentials, query or fragment, or `http://`
+on localhost), both channels also
 carry these fields for clients that composite the presentation
 themselves:
 
@@ -339,7 +342,8 @@ themselves:
   `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
   presence marks the v2 protocol, so it is never dropped: if the first
   slide fails to encode, creation fails, and if a later slide fails,
-  the navigation is rejected and the previous slide stays current. The
+  the navigation is rejected, the previous frame is pushed back onto
+  the LiveKit track and the state is broadcast again. On navigation the
   LiveKit frame is pushed before the encode, so v1 viewers see the new
   slide without waiting for it. Each session caches the last 8
   slides in memory; an evicted hash, or any hash after the session
