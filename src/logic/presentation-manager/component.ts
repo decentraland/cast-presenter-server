@@ -3,9 +3,11 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
+import { ApplicationName } from '@dcl/features-component'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import { FILE_TYPES } from '../file-validator'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
+import { encodeSlidePng } from '../slide-image'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
 import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { IRenderer } from '../../adapters/renderer/types'
@@ -13,11 +15,15 @@ import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/vid
 import type { AppComponents } from '../../types'
 import type { FileType } from '../file-validator'
 import type { OverlayLayout } from '../overlay-layout'
+import type { SlideImage } from '../slide-image'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000
 const DEFAULT_MAX_CONCURRENT = 10
 const OVERLAY_BROADCAST_INTERVAL_MS = 250
+const SLIDE_IMAGE_CACHE_SIZE = 8
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
+const CLIENT_COMPOSITION_FEATURE = 'cast-client-composition'
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -51,6 +57,11 @@ interface InternalSession extends PresentationSession {
   // Cumulative bytes written to tempDir across all downloads; enforced against
   // SESSION_DISK_QUOTA_BYTES to bound disk usage per session.
   bytesDownloaded: number
+  slideImages: Map<string, SlideImage>
+  currentSlideImage: SlideImage | null
+  activeVideoIndex: number
+  presenterIdentity: string | null
+  clientComposition: boolean
 }
 
 /**
@@ -120,6 +131,24 @@ function classifyVideoError(err: Error): VideoErrorInfo {
   return { code: 'video-playback-failed', message: 'Video unavailable' }
 }
 
+function servableBaseUrl(value: string): string | null {
+  if (!URL.canParse(value)) return null
+  const { protocol, hostname, origin, pathname, username, password, search, hash } = new URL(value)
+  const secure = protocol === 'https:' || (protocol === 'http:' && LOCAL_HOSTNAMES.has(hostname))
+  if (!secure || username || password || search || hash) return null
+  return `${origin}${pathname}`.replace(/\/+$/, '')
+}
+
+function rememberSlideImage(session: InternalSession, image: SlideImage): void {
+  session.slideImages.delete(image.hash)
+  session.slideImages.set(image.hash, image)
+  if (session.slideImages.size > SLIDE_IMAGE_CACHE_SIZE) {
+    const [oldest] = session.slideImages.keys()
+    session.slideImages.delete(oldest)
+  }
+  session.currentSlideImage = image
+}
+
 /**
  * Creates the presentation manager logic component.
  *
@@ -131,16 +160,16 @@ function classifyVideoError(err: Error): VideoErrorInfo {
  *
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
- * @param components - Required: config, logs, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor
+ * @param components - Required: config, features, logs, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    'config' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
+    'config' | 'features' | 'logs' | 'metrics' | 'liveKitPublisher' | 'pdfRenderer' | 'pptxRenderer' | 'videoCompositor'
   >
 ): Promise<IPresentationManager> {
-  const { config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
+  const { config, features, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor } = components
   const logger = logs.getLogger('presentation-manager')
 
   // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
@@ -154,10 +183,26 @@ export async function createPresentationManager(
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
   const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
   const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
+  const configuredBaseUrl = await config.getString('PUBLIC_BASE_URL')
+  const publicBaseUrl = configuredBaseUrl ? servableBaseUrl(configuredBaseUrl) : null
+  if (configuredBaseUrl && publicBaseUrl === null) {
+    throw new Error(
+      'PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost) with no credentials, query or fragment'
+    )
+  }
 
   const sessions = new Map<string, InternalSession>()
   let inFlightCreations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
+
+  async function isClientCompositionEnabled(): Promise<boolean> {
+    if (!(await features.getIsFeatureEnabled(ApplicationName.DAPPS, CLIENT_COMPOSITION_FEATURE))) return false
+    if (publicBaseUrl === null) {
+      logger.error('Client composition is enabled but PUBLIC_BASE_URL is unset; composing on the server')
+      return false
+    }
+    return true
+  }
 
   async function cleanupIdleSessions(): Promise<void> {
     const now = Date.now()
@@ -249,7 +294,8 @@ export async function createPresentationManager(
     fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
-    fileName?: string
+    fileName?: string,
+    presenterIdentity?: string | null
   ): Promise<PresentationInfo> {
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
@@ -326,10 +372,10 @@ export async function createPresentationManager(
         }
       })
 
-      // Render first slide
+      const clientComposition = await isClientCompositionEnabled()
       const { buffer, width, height } = await renderer.renderSlide(0)
+      const firstSlideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
 
-      // Start publishing video track
       await publisher.startPublishing(width, height)
 
       publisher.pushFrame(buffer, width, height)
@@ -373,10 +419,16 @@ export async function createPresentationManager(
         overlay: { ...DEFAULT_OVERLAY_LAYOUT },
         overlayBroadcastTimer: null,
         abortController: new AbortController(),
-        bytesDownloaded: 0
+        bytesDownloaded: 0,
+        slideImages: new Map(),
+        currentSlideImage: null,
+        activeVideoIndex: -1,
+        presenterIdentity: presenterIdentity ?? null,
+        clientComposition
       }
 
       sessions.set(id, session)
+      if (firstSlideImage) rememberSlideImage(session, firstSlideImage)
       metrics.increment('session_created_total', { status: 'success' })
       metrics.increment('active_sessions')
       await broadcastState(session)
@@ -531,22 +583,33 @@ export async function createPresentationManager(
       session.pausedVideoIndex = -1
       session.videoElapsedBeforePause = 0
 
-      const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
+      try {
+        const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
 
-      session.publisher.pushFrame(buffer, width, height)
-      session.publisher.startHeartbeat(buffer, width, height)
+        session.publisher.pushFrame(buffer, width, height)
+        session.publisher.startHeartbeat(buffer, width, height)
 
-      const slideVideos = await session.renderer.getSlideVideos(targetSlide)
+        const slideImage = session.clientComposition ? await encodeSlidePng(buffer, width, height) : null
+        const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
-      session.currentSlide = targetSlide
-      session.lastFrameBuffer = buffer
-      session.lastFrameWidth = width
-      session.lastFrameHeight = height
-      session.slideVideos = slideVideos
+        if (slideImage) rememberSlideImage(session, slideImage)
+        session.currentSlide = targetSlide
+        session.lastFrameBuffer = buffer
+        session.lastFrameWidth = width
+        session.lastFrameHeight = height
+        session.slideVideos = slideVideos
+      } catch (err) {
+        if (session.lastFrameBuffer) {
+          session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+          session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
+        }
+        await broadcastState(session)
+        throw err
+      }
 
       metrics.increment('slide_navigations_total', { action })
       logger.info(`Navigated presentation ${session.id} to slide ${targetSlide}`, {
-        slideVideos: slideVideos.length
+        slideVideos: session.slideVideos.length
       })
 
       await broadcastState(session)
@@ -584,6 +647,7 @@ export async function createPresentationManager(
 
     const requestedSlide = session.currentSlide
     session.videoState = 'loading'
+    session.activeVideoIndex = videoIndex
     session.videoErrorReason = null
     session.videoErrorCode = null
     await broadcastState(session)
@@ -932,8 +996,34 @@ export async function createPresentationManager(
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
         : {}),
-      ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {})
+      ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {}),
+      ...(session.clientComposition ? v2Fields(session) : {})
     }
+  }
+
+  function v2Fields(
+    session: InternalSession
+  ): Pick<PresentationState, 'slide' | 'presenterIdentity' | 'playingVideoIndex'> {
+    const image = session.currentSlideImage
+    const videoActive =
+      session.videoState === 'loading' || session.videoState === 'playing' || session.videoState === 'paused'
+    return {
+      ...(image
+        ? {
+            slide: {
+              url: `${publicBaseUrl}/presentations/${session.id}/slides/${image.hash}.png`,
+              width: image.width,
+              height: image.height
+            }
+          }
+        : {}),
+      presenterIdentity: session.presenterIdentity,
+      playingVideoIndex: videoActive ? session.activeVideoIndex : null
+    }
+  }
+
+  function getSlideImage(id: string, hash: string): Buffer | null {
+    return sessions.get(id)?.slideImages.get(hash)?.png ?? null
   }
 
   async function navigate(
@@ -978,6 +1068,7 @@ export async function createPresentationManager(
     createPresentation,
     navigate,
     getState,
+    getSlideImage,
     playVideo,
     pauseVideo,
     stopVideo,

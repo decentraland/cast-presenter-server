@@ -1,6 +1,7 @@
 // This file is the "test-environment" analogous for src/components.ts
 // Here we define the test components to be used in the testing environment
 
+import { type AddressInfo, createServer } from 'net'
 import { createLocalFetchComponent, createRunner } from '@dcl/test-helpers'
 import { initComponents as originalInitComponents } from '../src/components'
 import { main } from '../src/service'
@@ -18,7 +19,16 @@ export const test = createRunner<TestComponents>({
   initComponents
 })
 
+async function getFreePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, resolve))
+  const { port } = server.address() as AddressInfo
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return port
+}
+
 async function initComponents(): Promise<TestComponents> {
+  process.env.HTTP_SERVER_PORT = String(await getFreePort())
   const components = await originalInitComponents()
 
   const { config } = components

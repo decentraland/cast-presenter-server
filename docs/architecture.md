@@ -211,6 +211,43 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
+Client composition is the `dapps-cast-client-composition` feature
+flag, served by the Decentraland feature-flags service through
+`@dcl/features-component`. Each session reads it once when it starts
+and keeps that mode until it ends, so turning the flag off or on only
+affects new sessions. `FF_DAPPS_CAST_CLIENT_COMPOSITION=1` forces it on
+without the service, and any other value forces it off. A session also
+needs a `PUBLIC_BASE_URL`: `https://` with no credentials, query or
+fragment, or `http://` on localhost. The server refuses to start with
+an invalid one, and while it is unset sessions fall back to server
+composition.
+
+With client composition on, both channels also carry three fields for
+clients that composite the presentation themselves:
+
+- `slide: { url, width, height }`: the current slide as a PNG at
+  `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
+  `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
+  presence marks the v2 protocol, so it is never dropped: if the first
+  slide fails to encode, creation fails, and if a later slide fails,
+  the navigation is rejected, the previous frame is pushed back onto
+  the LiveKit track and the state is broadcast again. On navigation the
+  LiveKit frame is pushed before the encode, so v1 viewers see the new
+  slide without waiting for it. Each session caches the last 8
+  slides in memory; an evicted hash, or any hash after the session
+  stops, returns 404.
+- `presenterIdentity`: the identity of the participant who started
+  the presentation, or `null`. It comes from the optional
+  `presenterIdentity` field of `POST /presentations` (multipart or
+  JSON), which must be `stream:` followed by letters, digits and
+  `:_.-`, or a `0x` address, at most 128 characters. An absent or
+  invalid value is stored as `null`, and an invalid one is logged; it
+  never causes a 400. It is not checked against the LiveKit token.
+- `playingVideoIndex`: the index into `slideVideos` while
+  `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
+
+With the flag off, none of these fields are emitted.
+
 ### Authorization
 
 Commands are accepted only from participants whose identity appears in

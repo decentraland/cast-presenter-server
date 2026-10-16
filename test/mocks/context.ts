@@ -1,16 +1,12 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { PresentationState } from '../../src/logic/presentation-manager'
 
+export function createLoggerMock(): jest.Mocked<ILoggerComponent.ILogger> {
+  return { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), log: jest.fn() }
+}
+
 export function createMockLogger(): ILoggerComponent {
-  return {
-    getLogger: () => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-      log: jest.fn()
-    })
-  }
+  return { getLogger: () => createLoggerMock() }
 }
 
 export function createMockPresentationState(): PresentationState {

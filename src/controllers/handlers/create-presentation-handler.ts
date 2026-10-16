@@ -1,3 +1,4 @@
+import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
 import { SlideRenderError } from '../../adapters/renderer'
@@ -24,6 +25,15 @@ function validateLivekitUrl(lkUrl: string): void {
   }
 }
 
+const PRESENTER_IDENTITY_PATTERN = /^(stream:[A-Za-z0-9:_.-]{1,121}|0x[0-9a-fA-F]{40})$/
+
+function parsePresenterIdentity(value: unknown, logger: ILoggerComponent.ILogger): string | null {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'string' && PRESENTER_IDENTITY_PATTERN.test(value)) return value
+  logger.warn('Ignoring invalid presenterIdentity', { presenterIdentity: String(value).slice(0, 16) })
+  return null
+}
+
 export async function createPresentationHandler(
   context: HandlerContextWithPath<'logs' | 'presentationManager' | 'fileProvider', '/presentations'>
 ): Promise<IHttpServerComponent.IResponse> {
@@ -41,6 +51,7 @@ export async function createPresentationHandler(
     let fileName: string
     let livekitToken: string
     let livekitUrl: string
+    let presenterIdentity: string | null
 
     if (contentType.includes('application/json')) {
       // Buffer the full body and check actual size — Content-Length is client-supplied
@@ -63,6 +74,7 @@ export async function createPresentationHandler(
       const url = typeof body.url === 'string' ? body.url : undefined
       const token = typeof body.livekitToken === 'string' ? body.livekitToken : undefined
       const lkUrl = typeof body.livekitUrl === 'string' ? body.livekitUrl : undefined
+      presenterIdentity = parsePresenterIdentity(body.presenterIdentity, logger)
 
       if (!url) {
         throw new ValidationError('Missing url')
@@ -99,6 +111,7 @@ export async function createPresentationHandler(
 
       const token = result.fields.livekitToken || null
       const lkUrl = result.fields.livekitUrl || null
+      presenterIdentity = parsePresenterIdentity(result.fields.presenterIdentity, logger)
       if (!token || !lkUrl) {
         throw new ValidationError('Missing livekitToken or livekitUrl')
       }
@@ -133,7 +146,8 @@ export async function createPresentationHandler(
       fileType,
       livekitToken,
       livekitUrl,
-      rawFileName
+      rawFileName,
+      presenterIdentity
     )
 
     return { status: 201, body: info }

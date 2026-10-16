@@ -47,6 +47,12 @@ export interface PresentationState {
   videoErrorCode?: string
   /** Camera-bubble layout; bubble centre as fractions of the slide. */
   overlay: OverlayLayout
+  /** Current slide image and its render size; present only with client composition enabled. */
+  slide?: { url: string; width: number; height: number }
+  /** Identity of the participant whose camera fills the bubble; present only with client composition enabled. */
+  presenterIdentity?: string | null
+  /** Index into `slideVideos` while a video is loading, playing or paused; present only with client composition enabled. */
+  playingVideoIndex?: number | null
 }
 
 /**
@@ -78,6 +84,7 @@ export interface IPresentationManager extends IBaseComponent {
    * @param livekitToken - Authentication token for the LiveKit room
    * @param livekitUrl - WebSocket URL of the LiveKit server
    * @param fileName - Optional display name for the presentation
+   * @param presenterIdentity - Identity of the participant who started the presentation.
    * @returns Metadata about the created presentation
    * @throws {MaxConcurrentPresentationsError} When the session limit is reached
    */
@@ -86,7 +93,8 @@ export interface IPresentationManager extends IBaseComponent {
     fileType: FileType,
     livekitToken: string,
     livekitUrl: string,
-    fileName?: string
+    fileName?: string,
+    presenterIdentity?: string | null
   ): Promise<PresentationInfo>
 
   /**
@@ -107,6 +115,15 @@ export interface IPresentationManager extends IBaseComponent {
    * @returns Current state or null
    */
   getState(id: string): PresentationState | null
+
+  /**
+   * Returns the cached PNG of a recently shown slide, or null.
+   *
+   * @param id - Presentation session ID
+   * @param hash - Content hash from the slide URL
+   * @returns PNG bytes, or null when the session or hash is unknown
+   */
+  getSlideImage(id: string, hash: string): Buffer | null
 
   /**
    * Starts or resumes video playback on the current slide.
