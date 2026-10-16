@@ -1477,7 +1477,10 @@ describe('when client composition is enabled', () => {
 
   describe.each([
     ['has no scheme', 'cast.example.com'],
-    ['uses http on a public host', 'http://cast.example.com']
+    ['uses http on a public host', 'http://cast.example.com'],
+    ['has a query string', 'https://cast.example.com?a=1'],
+    ['has a fragment', 'https://cast.example.com#f'],
+    ['has credentials', 'https://user:pass@cast.example.com']
   ])('and PUBLIC_BASE_URL %s', (_label, value) => {
     beforeEach(() => {
       configValues.PUBLIC_BASE_URL = value
@@ -1574,7 +1577,7 @@ describe('when client composition is enabled', () => {
         })
       })
 
-      describe('and the presenter navigates to the next slide while its image is encoding', () => {
+      describe('and the presenter navigates to the next slide with a fresh frame', () => {
         let pushedFrameBeforeEncode: boolean
 
         beforeEach(async () => {
@@ -1594,9 +1597,25 @@ describe('when client composition is enabled', () => {
         let navigation: Promise<unknown>
 
         beforeEach(async () => {
+          renderer.renderSlide.mockResolvedValueOnce({ buffer: Buffer.alloc(100, 1), width: 1920, height: 1080 })
           jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+          publisher.publishData.mockClear()
           navigation = manager.navigate(presentationId, 'next')
           await navigation.catch(() => undefined)
+        })
+
+        it('should publish the previous frame again', () => {
+          expect(publisher.pushFrame).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
+        })
+
+        it('should repeat the previous frame in the heartbeat', () => {
+          expect(publisher.startHeartbeat).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
+        })
+
+        it('should broadcast the state of the current slide', () => {
+          expect(publisher.publishData).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'presentation:state', currentSlide: 0, videoState: 'idle' })
+          )
         })
 
         it('should reject the navigation with the encode error', async () => {
@@ -1616,8 +1635,13 @@ describe('when client composition is enabled', () => {
 
       describe('and loading the next slide videos fails', () => {
         beforeEach(async () => {
+          renderer.renderSlide.mockResolvedValueOnce({ buffer: Buffer.alloc(100, 1), width: 1920, height: 1080 })
           renderer.getSlideVideos.mockRejectedValueOnce(new Error('videos failed'))
           await manager.navigate(presentationId, 'next').catch(() => undefined)
+        })
+
+        it('should publish the previous frame again', () => {
+          expect(publisher.pushFrame).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
         })
 
         it('should keep the previous slide url', () => {
@@ -1767,6 +1791,18 @@ describe('when client composition is disabled', () => {
 
     it('should not encode a slide image', () => {
       expect(encodeSlidePng).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the bot metadata is set', () => {
+    let metadata: Record<string, unknown>
+
+    beforeEach(() => {
+      metadata = publisher.updateMetadataState.mock.calls[0][0] as unknown as Record<string, unknown>
+    })
+
+    it.each(['slide', 'presenterIdentity', 'playingVideoIndex'])('should not include a %s', (field) => {
+      expect(metadata).not.toHaveProperty(field)
     })
   })
 })
