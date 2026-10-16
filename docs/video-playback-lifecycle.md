@@ -214,7 +214,7 @@ needed on our side.
 
 ## v2 (client composition)
 
-With `CLIENT_COMPOSITION_ENABLED=true` none of the above runs: there
+With client composition on for the session none of the above runs: there
 is no compositor, no ffmpeg during playback, and no audio-track
 churn. Each video is baked once, and the session's `cast-sidecar`
 plays the baked files onto `presentation-video` and

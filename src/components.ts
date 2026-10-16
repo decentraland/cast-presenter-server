@@ -1,5 +1,6 @@
 import { createDotEnvConfigComponent } from '@well-known-components/env-config-provider'
 import { createLogComponent } from '@well-known-components/logger'
+import { ApplicationName, createFeaturesComponent } from '@dcl/features-component'
 import { Verbosity, instrumentHttpServerWithRequestLogger } from '@dcl/http-requests-logger-component'
 import {
   createServerComponent,
@@ -30,6 +31,11 @@ export async function initComponents(): Promise<AppComponents> {
   const tracer = await createTracerComponent()
   const fetcher = await createTracedFetcherComponent({ tracer })
   const logs = await createLogComponent({ metrics, tracer })
+  const features = await createFeaturesComponent(
+    { config, logs, fetch: fetcher },
+    (await config.getString('PUBLIC_BASE_URL')) ?? '',
+    { apps: [ApplicationName.DAPPS] }
+  )
   const server = await createServerComponent<GlobalContext>(
     { config, logs },
     {
@@ -82,6 +88,7 @@ export async function initComponents(): Promise<AppComponents> {
 
   const presentationManager = await createPresentationManager({
     config,
+    features,
     logs,
     metrics,
     liveKitPublisher,
@@ -94,6 +101,7 @@ export async function initComponents(): Promise<AppComponents> {
 
   return {
     fetcher,
+    features,
     config,
     logs,
     server,

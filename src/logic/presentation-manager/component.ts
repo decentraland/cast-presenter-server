@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
+import { ApplicationName } from '@dcl/features-component'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
 import { errorMessage } from '../error-message'
 import { FILE_TYPES } from '../file-validator'
@@ -30,6 +31,7 @@ const DEFAULT_MAX_CONCURRENT = 10
 const OVERLAY_BROADCAST_INTERVAL_MS = 250
 const SLIDE_IMAGE_CACHE_SIZE = 8
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
+const CLIENT_COMPOSITION_FEATURE = 'cast-client-composition'
 // Total disk a single session may consume across all its downloaded videos.
 // Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
 // This bound protects tempDir capacity when a deck references many videos.
@@ -84,6 +86,7 @@ interface InternalSession extends PresentationSession {
   presenterIdentity: string | null
   sidecar: ISidecarPublisher | null
   bakeJobs: Map<string, BakeJob>
+  clientComposition: boolean
 }
 
 /**
@@ -188,14 +191,15 @@ function rememberSlideImage(session: InternalSession, image: SlideImage): void {
  *
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
- * @param components - Required: config, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer, videoCompositor,
- *   sidecarPublisher, mediaEncoder
+ * @param components - Required: config, features, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer,
+ *   videoCompositor, sidecarPublisher, mediaEncoder
  * @returns IPresentationManager implementation
  */
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
     | 'config'
+    | 'features'
     | 'logs'
     | 'metrics'
     | 'liveKitPublisher'
@@ -208,6 +212,7 @@ export async function createPresentationManager(
 ): Promise<IPresentationManager> {
   const {
     config,
+    features,
     logs,
     metrics,
     liveKitPublisher,
@@ -230,13 +235,9 @@ export async function createPresentationManager(
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
   const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
   const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
-  const clientComposition = (await config.getString('CLIENT_COMPOSITION_ENABLED')) === 'true'
-  const configuredBaseUrl = (await config.getString('PUBLIC_BASE_URL')) ?? ''
-  if (clientComposition && !configuredBaseUrl) {
-    throw new Error('PUBLIC_BASE_URL is required when CLIENT_COMPOSITION_ENABLED=true')
-  }
-  const publicBaseUrl = servableBaseUrl(configuredBaseUrl)
-  if (clientComposition && publicBaseUrl === null) {
+  const configuredBaseUrl = await config.getString('PUBLIC_BASE_URL')
+  const publicBaseUrl = configuredBaseUrl ? servableBaseUrl(configuredBaseUrl) : null
+  if (configuredBaseUrl && publicBaseUrl === null) {
     throw new Error(
       'PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost) with no credentials, query or fragment'
     )
@@ -245,6 +246,15 @@ export async function createPresentationManager(
   const sessions = new Map<string, InternalSession>()
   let inFlightCreations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
+
+  async function isClientCompositionEnabled(): Promise<boolean> {
+    if (!(await features.getIsFeatureEnabled(ApplicationName.DAPPS, CLIENT_COMPOSITION_FEATURE))) return false
+    if (publicBaseUrl === null) {
+      logger.error('Client composition is enabled but PUBLIC_BASE_URL is unset; composing on the server')
+      return false
+    }
+    return true
+  }
 
   async function cleanupIdleSessions(): Promise<void> {
     const now = Date.now()
@@ -339,6 +349,7 @@ export async function createPresentationManager(
     fileName?: string,
     presenterIdentity?: string | null
   ): Promise<PresentationInfo> {
+    const clientComposition = await isClientCompositionEnabled()
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
     }
@@ -407,7 +418,7 @@ export async function createPresentationManager(
               break
             }
             case 'presentation:presenter:claim':
-              if (!clientComposition) break
+              if (!session.clientComposition) break
               session.presenterIdentity = senderIdentity
               await broadcastState(session)
               break
@@ -474,7 +485,8 @@ export async function createPresentationManager(
         earlySidecarOutcome: null,
         presenterIdentity: presenterIdentity ?? null,
         sidecar,
-        bakeJobs: new Map()
+        bakeJobs: new Map(),
+        clientComposition
       }
 
       const fatalReason = unhandledSidecarFatal?.()
@@ -945,7 +957,7 @@ export async function createPresentationManager(
         session.publisher.pushFrame(buffer, width, height)
         session.publisher.startHeartbeat(buffer, width, height)
 
-        const slideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
+        const slideImage = session.clientComposition ? await encodeSlidePng(buffer, width, height) : null
         const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
         if (slideImage) rememberSlideImage(session, slideImage)
@@ -1355,7 +1367,7 @@ export async function createPresentationManager(
         ? { videoErrorReason: session.videoErrorReason }
         : {}),
       ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {}),
-      ...(clientComposition ? v2Fields(session) : {})
+      ...(session.clientComposition ? v2Fields(session) : {})
     }
   }
 
