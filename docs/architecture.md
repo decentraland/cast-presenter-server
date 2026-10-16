@@ -211,11 +211,19 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
-With `CLIENT_COMPOSITION_ENABLED=true` (which requires an `https://`
-`PUBLIC_BASE_URL` with no credentials, query or fragment, or `http://`
-on localhost), both channels also
-carry three fields for clients that composite the presentation
-themselves:
+Client composition is the `dapps-cast-client-composition` feature
+flag, served by the Decentraland feature-flags service through
+`@dcl/features-component`. Each session reads it once when it starts
+and keeps that mode until it ends, so turning the flag off or on only
+affects new sessions. `FF_DAPPS_CAST_CLIENT_COMPOSITION=1` forces it on
+without the service, and any other value forces it off. A session also
+needs a `PUBLIC_BASE_URL`: `https://` with no credentials, query or
+fragment, or `http://` on localhost. The server refuses to start with
+an invalid one, and while it is unset sessions fall back to server
+composition.
+
+With client composition on, both channels also carry three fields for
+clients that composite the presentation themselves:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
   `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where

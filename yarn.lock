@@ -486,6 +486,13 @@
   dependencies:
     "@well-known-components/interfaces" "^1.5.2"
 
+"@dcl/core-commons@0.11.0":
+  version "0.11.0"
+  resolved "https://registry.yarnpkg.com/@dcl/core-commons/-/core-commons-0.11.0.tgz#a5d36935cc1d4151073971cfa82a17f96d403298"
+  integrity sha512-VJ6FgMQoF242slJy1EDJkfkOqYKrywSKJf/ZNg5buGsZj2CAc+RLyBnp0XSl/iCp3VJfpJA3lm5yuKCqWralCA==
+  dependencies:
+    "@well-known-components/interfaces" "^1.5.2"
+
 "@dcl/crypto-middleware@^4.0.0":
   version "4.1.1"
   resolved "https://registry.yarnpkg.com/@dcl/crypto-middleware/-/crypto-middleware-4.1.1.tgz#a46861caa68bf38f0355ce72d77a8232200d54ed"
@@ -519,6 +526,14 @@
     eslint-plugin-import "npm:eslint-plugin-i@^2.29.1"
     eslint-plugin-prettier "^5.1.3"
     prettier "^3.3.2"
+
+"@dcl/features-component@1.0.3":
+  version "1.0.3"
+  resolved "https://registry.yarnpkg.com/@dcl/features-component/-/features-component-1.0.3.tgz#22d0b3c015b714d7e3f26f1cda553ab1f5cad905"
+  integrity sha512-8Jpy81nvcQrCmzyFQf2bDKFoHgxuz6mjbglgazhwR4HCTXkP6BMfMKmV4IwuhHECjuPyxmrlGgwvO8gMKAGQnQ==
+  dependencies:
+    "@dcl/core-commons" "0.11.0"
+    "@well-known-components/interfaces" "^1.5.2"
 
 "@dcl/fetch-component@1.1.1", "@dcl/fetch-component@^1.1.1":
   version "1.1.1"
