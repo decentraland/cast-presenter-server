@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +253,49 @@ func TestRunDropsRoomEventsBeforeReady(t *testing.T) {
 	}
 }
 
+func TestRunLogsRoomEventsDroppedBeforeReady(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	f := &fakeRoom{onConnect: func(ev room.Events) {
+		ev.OnData("0xabc", []byte("early"))
+	}}
+
+	runLines(t, f, initLine)
+
+	if !strings.Contains(logs.String(), "dropped dataReceived before ready") {
+		t.Fatalf("expected the dropped event to be logged, got %q", logs.String())
+	}
+}
+
+func TestRunReportsAnOversizedStdinLine(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{name: "before init", lines: []string{oversizedLine()}},
+		{name: "after init", lines: []string{initLine, oversizedLine()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, events, raw := runLines(t, &fakeRoom{}, tc.lines...)
+
+			if code != 1 {
+				t.Fatalf("expected exit 1, got %d", code)
+			}
+			if len(events) == 0 {
+				t.Fatalf("expected an unsolicited bad-command error, got no stdout")
+			}
+			if last := events[len(events)-1]; last["type"] != "error" || last["code"] != "bad-command" || last["id"] != nil {
+				t.Fatalf("expected an unsolicited bad-command error last, got %s", raw)
+			}
+		})
+	}
+}
+
+func oversizedLine() string {
+	return `{"type":"publishData","id":2,"payloadBase64":"` + strings.Repeat("A", 1<<20) + `"}`
+}
+
 type reply struct {
 	typ, code string
 	id        float64
@@ -343,6 +387,17 @@ func TestRunPlaysABakedFileToItsEnd(t *testing.T) {
 	s.expectEvent(t, "ack", 21)
 	if code := s.exitCode(t); code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
+	}
+}
+
+func TestRunTagsPlaybackEventsWithThePlayID(t *testing.T) {
+	s := startHarness(t, &fakeRoom{})
+
+	s.send(t, strings.Replace(playLine(t, 40, 3), `"type":"play"`, `"type":"play","playId":7`, 1))
+
+	s.expectEvent(t, "ack", 40)
+	if ev := s.next(t); ev["type"] != "playbackEnded" || ev["playId"] != float64(7) {
+		t.Fatalf("expected playbackEnded for play 7, got %v", ev)
 	}
 }
 

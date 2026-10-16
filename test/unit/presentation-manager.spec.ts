@@ -1590,6 +1590,29 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe.each([
+    ['has no scheme', 'cast.example.com'],
+    ['uses http on a public host', 'http://cast.example.com']
+  ])('and PUBLIC_BASE_URL %s', (_label, value) => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = value
+    })
+
+    it('should reject creating the manager with an https requirement', async () => {
+      await expect(createManager(components)).rejects.toThrow('PUBLIC_BASE_URL must be an https:// URL')
+    })
+  })
+
+  describe('and PUBLIC_BASE_URL uses http on localhost', () => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = 'http://localhost:5000'
+    })
+
+    it('should create the manager', async () => {
+      await expect(createManager(components)).resolves.toBeDefined()
+    })
+  })
+
   describe('and a session is created with a presenterIdentity', () => {
     let expectedFields: Record<string, unknown>
 
@@ -1662,18 +1685,43 @@ describe('when client composition is enabled', () => {
       })
     })
 
+    describe('and the presenter navigates to the next slide while its image is encoding', () => {
+      let pushedFrameBeforeEncode: boolean
+
+      beforeEach(async () => {
+        sidecar.pushFrame.mockClear()
+        jest.mocked(encodeSlidePng).mockClear()
+        await manager.navigate(presentationId, 'next')
+        pushedFrameBeforeEncode =
+          sidecar.pushFrame.mock.invocationCallOrder[0] < jest.mocked(encodeSlidePng).mock.invocationCallOrder[0]
+      })
+
+      it('should push the new frame before encoding the slide image', () => {
+        expect(pushedFrameBeforeEncode).toBe(true)
+      })
+    })
+
     describe('and encoding the next slide fails', () => {
+      let navigation: Promise<unknown>
+
       beforeEach(async () => {
         jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
-        await manager.navigate(presentationId, 'next')
+        navigation = manager.navigate(presentationId, 'next')
+        await navigation.catch(() => undefined)
       })
 
-      it('should still move to the next slide', () => {
-        expect(manager.getState(presentationId)?.currentSlide).toBe(1)
+      it('should reject the navigation with the encode error', async () => {
+        await expect(navigation).rejects.toThrow('encode failed')
       })
 
-      it('should leave the stale slide out of the state', () => {
-        expect(manager.getState(presentationId)?.slide).toBeUndefined()
+      it('should stay on the current slide', () => {
+        expect(manager.getState(presentationId)?.currentSlide).toBe(0)
+      })
+
+      it('should keep the previous slide url', () => {
+        expect(manager.getState(presentationId)?.slide?.url).toBe(
+          `${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h1.png`
+        )
       })
     })
 
@@ -1823,6 +1871,24 @@ describe('when client composition is enabled', () => {
           expect(manager.getState(presentationId)?.videoState).toBe('playing')
         })
       })
+    })
+  })
+
+  describe('and encoding the first slide fails', () => {
+    let creation: Promise<unknown>
+
+    beforeEach(async () => {
+      jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+      creation = createPdfSession(manager)
+      await creation.catch(() => undefined)
+    })
+
+    it('should reject creating the presentation with the encode error', async () => {
+      await expect(creation).rejects.toThrow('encode failed')
+    })
+
+    it('should disconnect the sidecar', () => {
+      expect(sidecar.disconnect).toHaveBeenCalled()
     })
   })
 

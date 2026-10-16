@@ -3,6 +3,7 @@ import { EventEmitter } from 'events'
 import fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { STOP_COMPONENT } from '@well-known-components/interfaces'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { createMediaEncoderComponent } from '../../src/adapters/media-encoder/component'
 import { createLoggerMock } from '../mocks/context'
@@ -32,6 +33,7 @@ interface StartedBake {
 }
 
 const BAKE_TIMEOUT_MS = 20 * 60 * 1000
+const VIDEO_CONTAINER_FORMATS = 'mov,mp4,m4a,3gp,3g2,mj2,asf,avi,mpeg,mpegts,matroska,webm'
 const spawnMock = spawn as unknown as jest.Mock
 
 async function flush(): Promise<void> {
@@ -150,6 +152,24 @@ describe('when using the media encoder', () => {
       it('should probe the first audio stream with ffprobe restricted to local files', () => {
         const expected = ['-select_streams', 'a:0', '-protocol_whitelist', 'file', '/src/with-audio.mp4']
         expect(inOrder(spawnsOf(processes, 'ffprobe')[0].args, expected)).toEqual(expected)
+      })
+
+      it('should probe with ffprobe restricted to video container formats', () => {
+        const expected = ['-format_whitelist', VIDEO_CONTAINER_FORMATS, '/src/with-audio.mp4']
+        expect(inOrder(spawnsOf(processes, 'ffprobe')[0].args, expected)).toEqual(expected)
+      })
+
+      it('should read the source in ffmpeg restricted to local files and video container formats', () => {
+        const expected = [
+          'ffmpeg',
+          '-protocol_whitelist',
+          'file',
+          '-format_whitelist',
+          VIDEO_CONTAINER_FORMATS,
+          '-i',
+          '/src/with-audio.mp4'
+        ]
+        expect(inOrder(lastSpawn(processes, 'nice').args, expected)).toEqual(expected)
       })
 
       it('should spawn nice with the video and audio encode arguments in order', () => {
@@ -374,6 +394,36 @@ describe('when using the media encoder', () => {
 
     it('should start the next queued bake', () => {
       expect(lastSpawn(processes, 'ffprobe').args).toContain('/src/next.mp4')
+    })
+  })
+
+  describe('and the encoder stops while one bake runs and another is queued', () => {
+    let running: StartedBake
+    let queued: StartedBake
+    let ffmpeg: FakeChildProcess
+
+    beforeEach(async () => {
+      running = await startRunningBake('/src/running.mp4', 'play')
+      queued = startBake('/src/queued.mp4', 'prefetch')
+      ffmpeg = lastSpawn(processes, 'nice')
+      await encoder[STOP_COMPONENT]?.()
+      await flush()
+    })
+
+    it('should kill ffmpeg with SIGKILL', () => {
+      expect(ffmpeg.kill).toHaveBeenCalledWith('SIGKILL')
+    })
+
+    it('should reject the running bake', async () => {
+      await expect(running.promise).rejects.toThrow('Media encoder stopped')
+    })
+
+    it('should reject the queued bake', async () => {
+      await expect(queued.promise).rejects.toThrow('Media encoder stopped')
+    })
+
+    it('should never spawn a process for the queued bake', () => {
+      expect(processes.some((proc) => proc.args.includes('/src/queued.mp4'))).toBe(false)
     })
   })
 

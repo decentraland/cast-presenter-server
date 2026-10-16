@@ -326,7 +326,7 @@ func TestEngineSendsOnePlaybackEndedAtNaturalEOF(t *testing.T) {
 				audio = &path
 			}
 
-			if err := h.engine.Play(writeFile(t, "v.h264", longVideo(3, 8)), audio); err != nil {
+			if err := h.engine.Play(1, writeFile(t, "v.h264", longVideo(3, 8)), audio); err != nil {
 				t.Fatal(err)
 			}
 
@@ -349,7 +349,7 @@ func TestEngineStopSuppressesPlaybackEndedAndHaltsWriting(t *testing.T) {
 	h := newEngineHarness()
 	video := writeFile(t, "v.h264", longVideo(300, 8))
 	audio := writeFile(t, "a.ogg", oggStream(500))
-	if err := h.engine.Play(video, &audio); err != nil {
+	if err := h.engine.Play(1, video, &audio); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -369,12 +369,12 @@ func TestEnginePlayReplacesTheCurrentPlaybackWithoutPlaybackEnded(t *testing.T) 
 	h := newEngineHarness()
 	first := writeFile(t, "first.h264", longVideo(300, 8))
 	second := writeFile(t, "second.h264", longVideo(3, 77))
-	if err := h.engine.Play(first, nil); err != nil {
+	if err := h.engine.Play(1, first, nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	if err := h.engine.Play(second, nil); err != nil {
+	if err := h.engine.Play(1, second, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -396,10 +396,10 @@ func TestEnginePlayRejectsMissingFilesWithoutStartingAnything(t *testing.T) {
 	video := writeFile(t, "v.h264", longVideo(3, 8))
 	missing := filepath.Join(t.TempDir(), "missing")
 
-	if err := h.engine.Play(missing, nil); err == nil {
+	if err := h.engine.Play(1, missing, nil); err == nil {
 		t.Fatal("expected an error for a missing video")
 	}
-	if err := h.engine.Play(video, &missing); err == nil {
+	if err := h.engine.Play(1, video, &missing); err == nil {
 		t.Fatal("expected an error for a missing audio")
 	}
 
@@ -415,7 +415,7 @@ func TestEngineVideoWriteErrorStopsAudioAndReportsPlaybackFailedOnce(t *testing.
 	video := writeFile(t, "v.h264", longVideo(300, 8))
 	audio := writeFile(t, "a.ogg", oggStream(500))
 
-	if err := h.engine.Play(video, &audio); err != nil {
+	if err := h.engine.Play(1, video, &audio); err != nil {
 		t.Fatal(err)
 	}
 
@@ -434,7 +434,7 @@ func TestEngineVideoWriteErrorStopsAudioAndReportsPlaybackFailedOnce(t *testing.
 func TestEnginePauseHoldsWritesUntilResume(t *testing.T) {
 	h := newEngineHarness()
 	audio := writeFile(t, "a.ogg", oggStream(500))
-	if err := h.engine.Play(writeFile(t, "v.h264", longVideo(300, 8)), &audio); err != nil {
+	if err := h.engine.Play(1, writeFile(t, "v.h264", longVideo(300, 8)), &audio); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -479,14 +479,33 @@ func TestEngineStopTimesOutOnAStuckWriterAndPlayRefusesToStartAnother(t *testing
 	h.video.block = make(chan struct{})
 	defer close(h.video.block)
 	stuck := writeFile(t, "v.h264", longVideo(3, 8))
-	if err := h.engine.Play(stuck, nil); err != nil {
+	if err := h.engine.Play(1, stuck, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := h.engine.Stop(); err == nil {
 		t.Fatal("expected Stop to time out")
 	}
-	if err := h.engine.Play(stuck, nil); err == nil {
+	if err := h.engine.Play(1, stuck, nil); err == nil {
 		t.Fatal("expected Play to fail while the old writer still runs")
+	}
+}
+
+func TestEngineTagsPlaybackEventsWithThePlayID(t *testing.T) {
+	h := newEngineHarness()
+	if err := h.engine.Play(7, writeFile(t, "v.h264", longVideo(3, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if ev := h.next(t); ev.Type != "playbackEnded" || ev.PlayID != 7 {
+		t.Fatalf("expected playbackEnded for play 7, got %+v", ev)
+	}
+
+	h = newEngineHarness()
+	h.video.failAt = 1
+	if err := h.engine.Play(9, writeFile(t, "w.h264", longVideo(300, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if ev := h.next(t); ev.Type != "error" || ev.Code != "playback-failed" || ev.PlayID != 9 {
+		t.Fatalf("expected playback-failed for play 9, got %+v", ev)
 	}
 }
