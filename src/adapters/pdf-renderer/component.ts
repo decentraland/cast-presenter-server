@@ -17,8 +17,9 @@ interface PDFLinkAnnotation {
 }
 
 const PDFJS_ROOT = path.dirname(require.resolve('pdfjs-dist/package.json'))
-const PDFJS_WASM_URL = path.join(PDFJS_ROOT, 'wasm') + path.sep
-const PDFJS_STANDARD_FONT_DATA_URL = path.join(PDFJS_ROOT, 'standard_fonts') + path.sep
+const PDFJS_WASM_URL = path.join(PDFJS_ROOT, 'wasm') + '/'
+const PDFJS_STANDARD_FONT_DATA_URL = path.join(PDFJS_ROOT, 'standard_fonts') + '/'
+const MAX_IMAGE_PIXELS = 50_000_000
 
 const VIDEO_URL_PATTERN = /youtube\.com|youtu\.be|drive\.google\.com|docs\.google\.com\/file|vimeo\.com/
 const MEDIA_URL_PATTERN = /\.gif($|\?)|\.mp4($|\?)|\.webm($|\?)/i
@@ -61,7 +62,8 @@ function createRenderer(): IRenderer {
       doc = await pdfjs.getDocument({
         data: new Uint8Array(fileBuffer),
         wasmUrl: PDFJS_WASM_URL,
-        standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL
+        standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
+        maxImageSize: MAX_IMAGE_PIXELS
       }).promise
     },
 
@@ -142,7 +144,7 @@ function createRenderer(): IRenderer {
     destroy(): void {
       annotationsCache.clear()
       if (doc) {
-        void doc.loadingTask.destroy()
+        doc.loadingTask.destroy().catch(() => undefined)
         doc = null
       }
     }
