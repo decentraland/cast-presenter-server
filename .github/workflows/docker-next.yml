@@ -4,8 +4,9 @@ on:
   push:
     branches:
       - 'main'
-      # TEMPORARY: deploys the client-composition stack's top branch to .zone for testing.
-      # Remove this entry once the stack is merged, so only merges to main deploy again.
+      # TEMPORARY: builds the client-composition stack's top branch into a quay image, without deploying it.
+      # Deploy it to .zone with the Manual deployment workflow and its commit sha as the tag.
+      # Remove this entry and the branch conditions below once the stack is merged.
       - 'feat/client-played-videos'
 
 jobs:
@@ -13,5 +14,6 @@ jobs:
     uses: decentraland/platform-actions/.github/workflows/apps-docker-next.yml@main
     with:
       service-name: cast-presenter-service
-      deployment-environment: dev
+      deployment-environment: ${{ github.ref_name == 'main' && 'dev' || '' }}
+      docker-tag: ${{ github.ref_name == 'main' && 'next' || 'client-played-videos' }}
     secrets: inherit
