@@ -61,6 +61,7 @@ export async function driveVideoHandler(
     const headers: Record<string, string> = {
       'Content-Type': result.contentType.replace(/[\r\n\0]/g, ''),
       'Accept-Ranges': 'bytes',
+      'Content-Disposition': 'attachment',
       ...cors
     }
     if (result.contentLength !== undefined) headers['Content-Length'] = String(result.contentLength)

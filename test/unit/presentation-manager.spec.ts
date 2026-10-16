@@ -2912,6 +2912,30 @@ describe('when client composition is enabled', () => {
       expect(components.mediaEncoder.bake).not.toHaveBeenCalled()
     })
   })
+
+  describe('and an unsupported link is played while an embedded video is paused', () => {
+    beforeEach(async () => {
+      renderer.getSlideVideos.mockResolvedValue([
+        { url: VIDEO_URL, geometry: GEOMETRY },
+        { url: 'https://vimeo.com/123', geometry: GEOMETRY }
+      ])
+      embedOnly([VIDEO_URL])
+      await createSession()
+      await manager.playVideo(presentationId, 0)
+      await manager.pauseVideo(presentationId)
+      await manager.playVideo(presentationId, 1)
+    })
+
+    it('should stop the paused sidecar playback', () => {
+      expect(sidecar.stopVideo).toHaveBeenCalledTimes(1)
+    })
+
+    it('should report the error for the unsupported video', () => {
+      expect(lastState()).toEqual(
+        expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-invalid-format' })
+      )
+    })
+  })
 })
 
 describe('when client composition is disabled', () => {

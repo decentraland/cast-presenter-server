@@ -93,6 +93,7 @@ describe('when classifying a slide video URL', () => {
     ['a YouTube watch link without an id', 'https://www.youtube.com/watch'],
     ['a YouTube channel link', 'https://www.youtube.com/@decentraland'],
     ['a too short Drive id', 'https://drive.google.com/file/d/abc/view'],
+    ['a Google Docs document', 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit'],
     ['a Vimeo page link', 'https://vimeo.com/123'],
     ['a Vimeo player page link', 'https://player.vimeo.com/video/123'],
     ['a Vimeo playlist with a non-numeric id', 'https://player.vimeo.com/external/abc.m3u8'],

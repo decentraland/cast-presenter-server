@@ -26,6 +26,7 @@ video.src = `${API_BASE}/api/drive-video?fileId=${fileId}`
 ```
 
 - Range requests are supported: the server forwards the `Range` header to Drive and returns `Accept-Ranges: bytes` and `Content-Range` when applicable, so the `<video>` element can seek.
+- Every response carries `Content-Disposition: attachment`, so a browser that opens the URL directly downloads the file instead of rendering it from this origin. A `<video>` element ignores the header. The upstream `Content-Type` is passed through as is: Drive often answers `application/octet-stream` even for a video, so the relay cannot require `video/*`.
 - A plain `<video src>` loads cross-origin without CORS. Set `DRIVE_VIDEO_CORS_ORIGIN` (see below) only when the frontend reads the response from script or sets `crossorigin` on the element.
 
 ## Environment variables

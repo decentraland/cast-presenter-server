@@ -310,7 +310,9 @@ playing / paused ── stop, navigate, end timer (playing only) ──► idle
 - **Switching from a paused embedded video:** the server stops the
   sidecar first, then announces the client video. If that stop fails,
   the video goes to `error` with `video-playback-failed`. Switching
-  from a paused client video needs no sidecar call.
+  from a paused client video needs no sidecar call. Playing an
+  unsupported link while an embedded video is paused also stops the
+  sidecar before the video goes to `error`.
 - **Natural end:** on every play and resume, the server looks up the
   duration through the `video-duration` component (an InnerTube
   `player` request for YouTube, ffprobe for Drive and Vimeo). When it
@@ -319,7 +321,10 @@ playing / paused ── stop, navigate, end timer (playing only) ──► idle
   `playingVideoIndex: null`. A duration over 24 hours counts as
   unknown. An unknown duration arms no timer, so the video plays
   until it is stopped or the slide changes. A lookup never fails
-  playback.
+  playback. A failed lookup is remembered for a minute, so replaying
+  the same link within that minute arms no timer without asking the
+  provider again, and at most two ffprobe processes run at a time
+  across all sessions.
 - **Stale work:** every client play, stop, navigate and session stop
   clears the end timer, pause clears it too, and every play, stop,
   navigate and session stop bumps the play generation.

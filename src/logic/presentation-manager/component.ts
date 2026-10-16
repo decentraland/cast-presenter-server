@@ -1034,6 +1034,12 @@ export async function createPresentationManager(
       const clientVideo = classifyClientVideo(url)
       if (clientVideo) return playClientVideo(session, session.sidecar, videoIndex, clientVideo)
       if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir()) === null) {
+        if (session.videoState === 'paused' && activeClientVideo(session) === null) {
+          session.playGeneration++
+          await session.sidecar.stopVideo().catch((err) => {
+            logger.warn(`Sidecar stop before an unsupported video failed: ${errorMessage(err)}`)
+          })
+        }
         await failVideo(session, videoIndex, 'video-invalid-format', UNSUPPORTED_VIDEO_MESSAGE)
         return
       }

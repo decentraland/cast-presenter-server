@@ -152,6 +152,10 @@ describe('when handling a drive video proxy request', () => {
     it('should include Accept-Ranges header', () => {
       expect(result.headers['Accept-Ranges']).toBe('bytes')
     })
+
+    it('should tell browsers to download the file instead of rendering it', () => {
+      expect(result.headers['Content-Disposition']).toBe('attachment')
+    })
   })
 
   describe('and a CORS origin is configured', () => {
