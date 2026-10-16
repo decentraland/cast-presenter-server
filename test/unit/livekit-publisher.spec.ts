@@ -1,6 +1,6 @@
 import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
-import { encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
+import { encodePresentationPacket, parsePresentersFromRoomMetadata } from '../../src/adapters/livekit-publisher/comms'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
 import { createLoggerMock } from '../mocks/context'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
@@ -277,5 +277,17 @@ describe('when a presenter sends a presentation command', () => {
     it('should log that it is processing the command at info level', () => {
       expect(logger.info).toHaveBeenCalledWith('[DataReceived] Processing command: presentation:navigate')
     })
+  })
+})
+
+describe('when parsing presenters from room metadata with non-string entries', () => {
+  let presenters: Set<string>
+
+  beforeEach(() => {
+    presenters = parsePresentersFromRoomMetadata(JSON.stringify({ presenters: ['0xABC', 42, null, { id: 'x' }, ''] }))
+  })
+
+  it('should keep only the non-empty strings, lowercased', () => {
+    expect([...presenters]).toEqual(['0xabc'])
   })
 })
