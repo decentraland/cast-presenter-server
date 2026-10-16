@@ -1,4 +1,4 @@
-import { AudioSource, LocalAudioTrack, Room } from '@livekit/rtc-node'
+import { AudioSource, LocalAudioTrack, Room, TrackPublishOptions } from '@livekit/rtc-node'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { createLiveKitPublisherComponent } from '../../src/adapters/livekit-publisher/component'
 import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
@@ -16,7 +16,7 @@ jest.mock('@livekit/rtc-node', () => ({
   TrackPublishOptions: jest.fn(),
   TrackSource: { SOURCE_SCREENSHARE: 'SOURCE_SCREENSHARE', SOURCE_SCREENSHARE_AUDIO: 'SOURCE_SCREENSHARE_AUDIO' },
   VideoBufferType: { RGBA: 0, I420: 5 },
-  VideoCodec: { H264: 'H264' },
+  VideoCodec: { H264: 'H264', VP8: 'VP8' },
   VideoFrame: jest.fn(),
   AudioFrame: jest.fn()
 }))
@@ -182,5 +182,110 @@ describe('when audio start races with a pending stop', () => {
     expect(sources[1].captureFrame).toHaveBeenCalled()
     expect(tracks[0].close).toHaveBeenCalledTimes(1)
     expect(tracks[1].close).not.toHaveBeenCalled()
+  })
+})
+
+describe('when the presentation video track is published', () => {
+  let publisher: ILiveKitPublisher
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    installFakeRoom()
+    publisher = createLiveKitPublisherComponent().createPublisher('p-1', createLogger())
+    await publisher.connect('wss://lk.example.com', 'tok')
+    await publisher.startPublishing(960, 1242)
+  })
+
+  afterEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('should publish it with the VP8 codec so tall slides are not dropped by the H.264 level limit', () => {
+    expect(TrackPublishOptions).toHaveBeenCalledWith(expect.objectContaining({ videoCodec: 'VP8' }))
+  })
+})
+
+describe('when a presenter sends a presentation command', () => {
+  let logger: ILoggerComponent.ILogger
+  let room: FakeRoom
+  let dataHandler: jest.Mock
+
+  function emitData(message: Record<string, unknown>): void {
+    const onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+    onData(new TextEncoder().encode(JSON.stringify(message)), { identity: '0xPresenter' })
+  }
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['0xpresenter'] }) })
+    logger = createLogger()
+    dataHandler = jest.fn()
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', logger)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    publisher.setDataHandler(dataHandler)
+    jest.mocked(logger.info).mockClear()
+  })
+
+  describe('and the command is an overlay update', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should hand the command to the data handler', () => {
+      expect(dataHandler).toHaveBeenCalledWith({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should not log it at info level', () => {
+      expect(logger.info).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the command is a slide navigation', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:navigate', action: 'next' })
+    })
+
+    it('should log that it is processing the command at info level', () => {
+      expect(logger.info).toHaveBeenCalledWith('[DataReceived] Processing command: presentation:navigate')
+    })
+  })
+})
+
+describe('when a participant outside the presenters list sends a presentation command', () => {
+  let logger: ILoggerComponent.ILogger
+  let room: FakeRoom
+
+  function emitData(message: Record<string, unknown>): void {
+    const onData = room.on.mock.calls.find(([event]) => event === 'dataReceived')?.[1]
+    onData(new TextEncoder().encode(JSON.stringify(message)), { identity: '0xViewer' })
+  }
+
+  beforeEach(async () => {
+    RoomMock.mockReset()
+    room = installFakeRoom({ metadata: JSON.stringify({ presenters: ['0xpresenter'] }) })
+    logger = createLogger()
+    const publisher = createLiveKitPublisherComponent().createPublisher('p-1', logger)
+    await publisher.connect('wss://lk.example.com', 'tok')
+    publisher.setDataHandler(jest.fn())
+  })
+
+  describe('and the command is an overlay update', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:overlay:update', x: 0.5, y: 0.5 })
+    })
+
+    it('should not log a warning', () => {
+      expect(logger.warn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and the command is a slide navigation', () => {
+    beforeEach(() => {
+      emitData({ type: 'presentation:navigate', action: 'next' })
+    })
+
+    it('should log a warning that the command is ignored', () => {
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Identity '0xViewer' not in presenters list"))
+    })
   })
 })

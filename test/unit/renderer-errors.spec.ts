@@ -4,14 +4,13 @@ import { SlideRenderError } from '../../src/adapters/renderer'
 
 jest.mock('@napi-rs/canvas', () => ({ createCanvas: jest.fn() }))
 
-// pdfjs-dist ships as ESM (uses import.meta), which jest cannot load; a one-page stub is enough here.
 jest.mock(
   'pdfjs-dist/legacy/build/pdf.mjs',
   () => ({
     getDocument: () => ({
       promise: Promise.resolve({
         numPages: 1,
-        destroy: async () => undefined,
+        loadingTask: { destroy: async () => undefined },
         getPage: async () => ({
           getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 300 * scale })
         })

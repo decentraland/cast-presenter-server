@@ -1,5 +1,6 @@
+import path from 'path'
 import { createCanvas } from '@napi-rs/canvas'
-import { assertRenderableDimensions, toEvenDimension } from '../renderer/dimensions'
+import { fitRenderSize } from '../../logic/render-size'
 import { SlideRenderError } from '../renderer/errors'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
 import type { SlideVideoInfo } from '../video-compositor/types'
@@ -15,7 +16,10 @@ interface PDFLinkAnnotation {
   rect?: number[]
 }
 
-const TARGET_WIDTH = 960
+const PDFJS_ROOT = path.dirname(require.resolve('pdfjs-dist/package.json'))
+const PDFJS_WASM_URL = path.join(PDFJS_ROOT, 'wasm') + '/'
+const PDFJS_STANDARD_FONT_DATA_URL = path.join(PDFJS_ROOT, 'standard_fonts') + '/'
+const MAX_IMAGE_PIXELS = 50_000_000
 
 const VIDEO_URL_PATTERN = /youtube\.com|youtu\.be|drive\.google\.com|docs\.google\.com\/file|vimeo\.com/
 const MEDIA_URL_PATTERN = /\.gif($|\?)|\.mp4($|\?)|\.webm($|\?)/i
@@ -55,7 +59,12 @@ function createRenderer(): IRenderer {
   return {
     async initialize(fileBuffer: Buffer): Promise<void> {
       const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-      doc = await pdfjs.getDocument({ data: new Uint8Array(fileBuffer) }).promise
+      doc = await pdfjs.getDocument({
+        data: new Uint8Array(fileBuffer),
+        wasmUrl: PDFJS_WASM_URL,
+        standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
+        maxImageSize: MAX_IMAGE_PIXELS
+      }).promise
     },
 
     async renderSlide(index: number): Promise<RenderResult> {
@@ -64,19 +73,12 @@ function createRenderer(): IRenderer {
       try {
         const page = await doc.getPage(index + 1)
         const baseViewport = page.getViewport({ scale: 1 })
-        const scale = TARGET_WIDTH / baseViewport.width
+        const { scale, width, height } = fitRenderSize(baseViewport.width, baseViewport.height)
         const viewport = page.getViewport({ scale })
-
-        const width = toEvenDimension(viewport.width)
-        const height = toEvenDimension(viewport.height)
-        assertRenderableDimensions(width, height)
         const canvas = createCanvas(width, height)
         const ctx = canvas.getContext('2d')
 
-        // pdfjs-dist types `canvasContext` as the DOM `CanvasRenderingContext2D`, but
-        // @napi-rs/canvas exports its own structurally-compatible context type. Cast
-        // through `unknown` to bridge the nominal mismatch.
-        await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise
+        await page.render({ canvas: canvas as unknown as HTMLCanvasElement, viewport }).promise
 
         const annotations = await getCachedAnnotations(index, page)
         for (const a of annotations) {
@@ -119,7 +121,7 @@ function createRenderer(): IRenderer {
       const page = await doc.getPage(index + 1)
       const annotations = await getCachedAnnotations(index, page)
       const baseViewport = page.getViewport({ scale: 1 })
-      const scale = TARGET_WIDTH / baseViewport.width
+      const { scale } = fitRenderSize(baseViewport.width, baseViewport.height)
       const viewport = page.getViewport({ scale })
 
       return annotations
@@ -142,9 +144,7 @@ function createRenderer(): IRenderer {
     destroy(): void {
       annotationsCache.clear()
       if (doc) {
-        // Fire-and-forget: pdfjs destroy() is async but our lifecycle is sync;
-        // callers are already in stop/error cleanup paths that ignore the outcome.
-        void doc.destroy()
+        doc.loadingTask.destroy().catch(() => undefined)
         doc = null
       }
     }
