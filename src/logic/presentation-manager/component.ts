@@ -778,14 +778,16 @@ export async function createPresentationManager(
     }
   }
 
-  async function markV2Playing(session: InternalSession, videoIndex: number): Promise<void> {
+  async function markSidecarPlaying(session: InternalSession, videoIndex: number): Promise<void> {
     const early = session.earlySidecarOutcome
     session.earlySidecarOutcome = null
+    if (early?.playId !== session.sidecarPlayId) return markV2Playing(session, videoIndex)
     session.videoState = 'playing'
-    if (early?.playId === session.sidecarPlayId) {
-      await finishSidecarPlayback(session, early)
-      return
-    }
+    await finishSidecarPlayback(session, early)
+  }
+
+  async function markV2Playing(session: InternalSession, videoIndex: number): Promise<void> {
+    session.videoState = 'playing'
     metrics.increment('video_playback_total', { action: 'play' })
     await broadcastState(session)
     logger.info(`Video playback started for presentation ${session.id}`, { videoIndex })
@@ -831,7 +833,7 @@ export async function createPresentationManager(
         await abandon()
         return
       }
-      await markV2Playing(session, videoIndex)
+      await markSidecarPlaying(session, videoIndex)
       return
     }
 
@@ -878,7 +880,7 @@ export async function createPresentationManager(
       }
       return
     }
-    await markV2Playing(session, videoIndex)
+    await markSidecarPlaying(session, videoIndex)
   }
 
   async function navigateSession(
