@@ -217,6 +217,7 @@ describe.each([
 
   describe.each([
     { label: 'contains whitespace', presenterIdentity: 'evil name' },
+    { label: 'is a stream identity with markup characters', presenterIdentity: 'stream:<b>"x"</b>' },
     { label: 'is a stream identity longer than 128 characters', presenterIdentity: 'stream:' + 'x'.repeat(130) },
     { label: 'is a truncated address', presenterIdentity: '0x123' }
   ])('and a presenterIdentity is provided that $label', ({ presenterIdentity }) => {

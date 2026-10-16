@@ -24,7 +24,7 @@ function validateLivekitUrl(lkUrl: string): void {
   }
 }
 
-const PRESENTER_IDENTITY_PATTERN = /^(stream:\S{1,121}|0x[0-9a-fA-F]{40})$/
+const PRESENTER_IDENTITY_PATTERN = /^(stream:[A-Za-z0-9:_.-]{1,121}|0x[0-9a-fA-F]{40})$/
 
 function parsePresenterIdentity(value: unknown, logger: ILoggerComponent.ILogger): string | null {
   if (value === undefined || value === null || value === '') return null

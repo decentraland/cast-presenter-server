@@ -1475,6 +1475,33 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe.each([
+    ['has no scheme', 'cast.example.com'],
+    ['uses http on a public host', 'http://cast.example.com']
+  ])('and PUBLIC_BASE_URL %s', (_label, value) => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = value
+    })
+
+    it('should reject creating the manager with an https requirement', async () => {
+      await expect(
+        createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
+      ).rejects.toThrow('PUBLIC_BASE_URL must be an https:// URL')
+    })
+  })
+
+  describe('and PUBLIC_BASE_URL uses http on localhost', () => {
+    beforeEach(() => {
+      configValues.PUBLIC_BASE_URL = 'http://localhost:5000'
+    })
+
+    it('should create the manager', async () => {
+      await expect(
+        createPresentationManager(components as unknown as Parameters<typeof createPresentationManager>[0])
+      ).resolves.toBeDefined()
+    })
+  })
+
   describe('and the manager is running', () => {
     let manager: IPresentationManager
     let presentationId: string

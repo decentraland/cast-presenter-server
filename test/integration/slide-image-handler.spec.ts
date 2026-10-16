@@ -19,8 +19,8 @@ test('GET /presentations/:id/slides/:file', function ({ components, spyComponent
       expect(response.headers.get('content-type')).toBe('image/png')
     })
 
-    it('should respond with an immutable public cache policy', () => {
-      expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    it('should respond with an immutable cache policy that shared caches may not store', () => {
+      expect(response.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
     })
 
     it('should respond with the PNG bytes', async () => {

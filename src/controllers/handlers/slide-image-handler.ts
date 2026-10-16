@@ -28,7 +28,7 @@ export async function slideImageHandler(
 
   return {
     status: 200,
-    headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable' },
+    headers: { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=31536000, immutable' },
     body: png
   }
 }

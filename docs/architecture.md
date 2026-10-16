@@ -209,9 +209,10 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
-With `CLIENT_COMPOSITION_ENABLED=true` (which requires
-`PUBLIC_BASE_URL`), both channels also carry three fields for clients
-that composite the presentation themselves:
+With `CLIENT_COMPOSITION_ENABLED=true` (which requires an `https://`
+`PUBLIC_BASE_URL`, or `http://` on localhost), both channels also
+carry three fields for clients that composite the presentation
+themselves:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
   `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
@@ -226,9 +227,10 @@ that composite the presentation themselves:
 - `presenterIdentity`: the identity of the participant who started
   the presentation, or `null`. It comes from the optional
   `presenterIdentity` field of `POST /presentations` (multipart or
-  JSON), which must be `stream:`-prefixed or a `0x` address, at most
-  128 characters. An absent or invalid value is stored as `null`, and
-  an invalid one is logged; it never causes a 400.
+  JSON), which must be `stream:` followed by letters, digits and
+  `:_.-`, or a `0x` address, at most 128 characters. An absent or
+  invalid value is stored as `null`, and an invalid one is logged; it
+  never causes a 400. It is not checked against the LiveKit token.
 - `playingVideoIndex`: the index into `slideVideos` while
   `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
 
