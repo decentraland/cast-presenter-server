@@ -10,7 +10,7 @@ import (
 	protoCodecs "github.com/livekit/protocol/codecs"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
 )
 
 func annexBNALs(t *testing.T, au []byte) [][]byte {
@@ -56,10 +56,10 @@ func nalTypes(nals [][]byte) []byte {
 }
 
 type fakeSampleWriter struct {
-	samples []media.Sample
+	samples []pionmedia.Sample
 }
 
-func (f *fakeSampleWriter) WriteSample(sample media.Sample, _ *lksdk.SampleWriteOptions) error {
+func (f *fakeSampleWriter) WriteSample(sample pionmedia.Sample, _ *lksdk.SampleWriteOptions) error {
 	f.samples = append(f.samples, sample)
 	return nil
 }

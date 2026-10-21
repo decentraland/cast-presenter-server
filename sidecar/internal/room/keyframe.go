@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"time"
 
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/decentraland/cast-presenter-server/sidecar/internal/media"
+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
@@ -17,11 +17,7 @@ const (
 //go:embed black-keyframe.h264
 var blackKeyframe []byte
 
-type sampleWriter interface {
-	WriteSample(sample media.Sample, opts *lksdk.SampleWriteOptions) error
-}
-
-func writeBlackKeyframe(ctx context.Context, track sampleWriter, ready func() bool) error {
+func writeBlackKeyframe(ctx context.Context, track media.SampleWriter, ready func() bool) error {
 	ticker := time.NewTicker(readyPoll)
 	defer ticker.Stop()
 	for !ready() {
@@ -31,5 +27,5 @@ func writeBlackKeyframe(ctx context.Context, track sampleWriter, ready func() bo
 		case <-ticker.C:
 		}
 	}
-	return track.WriteSample(media.Sample{Data: blackKeyframe, Duration: frameDuration}, nil)
+	return track.WriteSample(pionmedia.Sample{Data: blackKeyframe, Duration: frameDuration}, nil)
 }
