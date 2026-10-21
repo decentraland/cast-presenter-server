@@ -108,7 +108,13 @@ presentation manager.
 
 - **PDFRenderer:** Parses PDF/PPTX files using pdfjs-dist, renders
   slides to RGBA buffers using @napi-rs/canvas, and extracts video
-  annotations with geometry information.
+  annotations with geometry information. pdfjs 6 decodes CCITT fax,
+  JBIG2 and JPEG2000 images with WebAssembly, so `getDocument` gets
+  `wasmUrl` (the package's `wasm/` directory) and
+  `standardFontDataUrl`; without `wasmUrl` those images are skipped
+  and scanned pages render blank. `destroy()` does not await the
+  loading task's async teardown, because callers are already in stop
+  or error cleanup and ignore the outcome.
 - **LiveKitPublisher:** Connects to a LiveKit room, publishes a
   video track from raw RGBA frames, handles data channel message
   routing, and manages bot metadata.
@@ -130,7 +136,9 @@ Each presentation runs as an in-memory session identified by a UUID.
 4. **Play video:** Loads or streams the video, composites it onto
    the slide canvas using ffmpeg, and pushes frames to LiveKit.
 5. **Pause/Resume:** Sends SIGSTOP/SIGCONT to the ffmpeg process.
-6. **Stop:** Disconnects from LiveKit, destroys the PDF renderer,
+6. **Stop:** Aborts in-flight downloads first, so none of them races
+   the temporary-directory cleanup or writes into a deleted directory.
+   Then it disconnects from LiveKit, destroys the PDF renderer,
    cleans up the temporary directory, and removes the session.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
@@ -152,7 +160,28 @@ strings sent with reliable delivery.
 { "type": "presentation:video:stop" }
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
+{ "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
 ```
+
+`presentation:overlay:update` changes only the fields it carries, and
+the bot drops the whole command if any field is invalid. Bursts are
+coalesced into at most one state broadcast every 250 ms.
+
+### Camera bubble layout
+
+The session carries an `overlay` layout that describes where a
+presenter's camera bubble belongs on the slide. The server stores and
+broadcasts it; it never composites the camera itself. Clients read the
+layout from `presentation:state` (or from the bot metadata) and draw
+the bubble on their side.
+
+The layout is the bubble centre `x`, `y` as fractions of the slide
+width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
+`(1, 0)`, `(0, 1)` and `(1, 1)` are the four corner presets. Values of
+`x` and `y` are clamped to `[0, 1]`. A new session starts at
+`{ "x": 0, "y": 1, "size": "small" }`, bottom-left. There is one
+layout per session, so when several presenters update it the last
+update wins.
 
 ### State broadcast (bot to all participants)
 
@@ -173,7 +202,8 @@ broadcasts:
       "geometry": { "x": 100, "y": 200, "width": 640, "height": 360 }
     }
   ],
-  "videoState": "idle"
+  "videoState": "idle",
+  "overlay": { "x": 0, "y": 1, "size": "small" }
 }
 ```
 

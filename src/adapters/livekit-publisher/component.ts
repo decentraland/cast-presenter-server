@@ -54,6 +54,8 @@ function decodeCommsPayload(sceneData: Uint8Array): { topic: string; data: strin
   return { topic, data }
 }
 
+const HIGH_FREQUENCY_COMMANDS = new Set(['presentation:overlay:update'])
+
 function parsePresentersFromRoomMetadata(metadata: string | undefined): Set<string> {
   try {
     if (!metadata) return new Set()
@@ -162,23 +164,24 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
           if (!dataHandler) return
           if (!msgType.startsWith('presentation:')) return
 
-          logger.info(
+          const logCommand = (line: string): void =>
+            HIGH_FREQUENCY_COMMANDS.has(msgType) ? logger.debug(line) : logger.info(line)
+
+          logCommand(
             `[DataReceived] from=${identity} presenter=${isPresenter} topic=${topic || 'none'} type=${msgType}`
           )
 
           if (!isPresenter) {
-            logger.warn(
-              `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
-            )
+            const line = `[DataReceived] Identity '${identity}' not in presenters list [${[...presenters].join(', ')}], ignoring`
+            HIGH_FREQUENCY_COMMANDS.has(msgType) ? logger.debug(line) : logger.warn(line)
             return
           }
 
-          // Only update sceneId from authorized presenter messages
           if (incomingSceneId) {
             lastSceneId = incomingSceneId
           }
 
-          logger.info(`[DataReceived] Processing command: ${msgType}`)
+          logCommand(`[DataReceived] Processing command: ${msgType}`)
           dataHandler(message)
         }
       )
@@ -191,7 +194,7 @@ function createPublisher(presentationId: string, logger: ILoggerComponent.ILogge
       videoTrack = LocalVideoTrack.createVideoTrack('presentation', videoSource)
       const publishOptions = new TrackPublishOptions({
         source: TrackSource.SOURCE_SCREENSHARE,
-        videoCodec: VideoCodec.H264,
+        videoCodec: VideoCodec.VP8,
         videoEncoding: {
           maxBitrate: BigInt(6_000_000),
           maxFramerate: 30
