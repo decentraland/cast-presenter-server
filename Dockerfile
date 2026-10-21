@@ -1,4 +1,4 @@
-FROM node:24-trixie-slim@sha256:287c662bed62f3c7b68ea68544814eaff9d7ed2254d2fc9627f2df5957bb7401 as builderenv
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea as builderenv
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ RUN go mod download
 COPY sidecar/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cast-sidecar ./cmd/cast-sidecar
 
-FROM node:24-trixie-slim@sha256:287c662bed62f3c7b68ea68544814eaff9d7ed2254d2fc9627f2df5957bb7401
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   tini ffmpeg ca-certificates \
