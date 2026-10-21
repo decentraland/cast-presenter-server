@@ -5,6 +5,7 @@ import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { resolveVideoUrls } from './video-providers'
 import { i420FrameSize } from '../../logic/color-convert'
+import { errorMessage } from '../../logic/error-message'
 import { pinnedHttpsRequest } from '../../logic/network-validator'
 import type {
   CompositorErrorReason,
@@ -548,9 +549,7 @@ function createVideoCompositor(
           try {
             onAudioData(chunk)
           } catch (err) {
-            logger.warn(
-              `onAudioData threw — aborting video playback: ${err instanceof Error ? err.message : String(err)}`
-            )
+            logger.warn(`onAudioData threw — aborting video playback: ${errorMessage(err)}`)
             abortPlayback('audio-processing-failed', publisher, slideBuffer, slideWidth, slideHeight)
           }
         })

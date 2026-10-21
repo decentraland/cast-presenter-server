@@ -18,3 +18,4 @@ state.json
 Dockerfile
 docker-compose*.yml
 *.md
+sidecar/cast-sidecar

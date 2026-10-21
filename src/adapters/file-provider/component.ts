@@ -2,6 +2,7 @@ import { Readable } from 'stream'
 import Busboy = require('busboy')
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from './errors'
 import { resolveFileUrl } from './file-url-providers'
+import { errorMessage } from '../../logic/error-message'
 import { pinnedHttpsRequest } from '../../logic/network-validator'
 import type { FileProviderResult, IFileProviderComponent } from './types'
 import type { AppComponents } from '../../types'
@@ -81,7 +82,7 @@ async function downloadFromUrl(
       try {
         resolved = await networkValidator.resolveAndValidateUrl(currentUrl)
       } catch (err) {
-        throw new InvalidUrlError(err instanceof Error ? err.message : String(err))
+        throw new InvalidUrlError(errorMessage(err))
       }
 
       const { response, destroy } = await pinnedHttpsRequest(resolved.url, resolved.hostname, resolved.addresses)

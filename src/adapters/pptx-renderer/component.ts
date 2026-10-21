@@ -649,23 +649,32 @@ function renderShape(ctx: SKRSContext2D, shape: Shape): void {
 function createRenderer(): IRenderer {
   let parser: PPTXParser | null = null
   let embeddedVideoDir: string | null = null
+  let embeddedVideoDirCreation: Promise<string> | null = null
+  const embeddedVideos = new Map<string, Promise<string>>()
 
-  async function extractEmbeddedVideo(mediaRef: string): Promise<string> {
-    if (!parser) throw new Error('PPTX not initialized')
-    if (!embeddedVideoDir) {
-      embeddedVideoDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cast-pptx-video-'))
-    }
-    const data = await parser.getMedia(mediaRef)
-    // Cap per-media bytes to complement the overall ZIP-bomb guard. An
-    // individual embedded asset shouldn't exceed this — if it does the deck
-    // is almost certainly malicious or corrupted.
+  async function writeEmbeddedVideo(activeParser: PPTXParser, mediaRef: string): Promise<string> {
+    embeddedVideoDirCreation ??= fsp.mkdtemp(path.join(os.tmpdir(), 'cast-pptx-video-')).then((dir) => {
+      embeddedVideoDir = dir
+      return dir
+    })
+    const dir = await embeddedVideoDirCreation
+    const data = await activeParser.getMedia(mediaRef)
     if (data.byteLength > MAX_EMBEDDED_MEDIA_BYTES) {
       throw new Error(`Embedded media ${mediaRef} exceeds ${MAX_EMBEDDED_MEDIA_BYTES / 1024 / 1024} MB limit`)
     }
-    const fileName = path.basename(mediaRef)
-    const filePath = path.join(embeddedVideoDir, fileName)
+    const filePath = path.join(dir, path.basename(mediaRef))
     await fsp.writeFile(filePath, new Uint8Array(data))
     return filePath
+  }
+
+  function extractEmbeddedVideo(mediaRef: string): Promise<string> {
+    if (!parser) throw new Error('PPTX not initialized')
+    const cached = embeddedVideos.get(mediaRef)
+    if (cached) return cached
+    const extraction = writeEmbeddedVideo(parser, mediaRef)
+    embeddedVideos.set(mediaRef, extraction)
+    extraction.catch(() => embeddedVideos.delete(mediaRef))
+    return extraction
   }
 
   return {
@@ -751,6 +760,10 @@ function createRenderer(): IRenderer {
       return videos
     },
 
+    getEmbeddedMediaDir(): string | null {
+      return embeddedVideoDir
+    },
+
     getSlideCount(): number {
       if (!parser) throw new Error('PPTX not initialized')
       return parser.getSlideCount()
@@ -758,6 +771,8 @@ function createRenderer(): IRenderer {
 
     destroy(): void {
       parser = null
+      embeddedVideos.clear()
+      embeddedVideoDirCreation = null
       if (embeddedVideoDir) {
         fs.rmSync(embeddedVideoDir, { recursive: true, force: true })
         embeddedVideoDir = null

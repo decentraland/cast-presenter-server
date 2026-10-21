@@ -143,6 +143,95 @@ Each presentation runs as an in-memory session identified by a UUID.
 7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 
+## Client composition (v2)
+
+With client composition on for a session (see the
+`dapps-cast-client-composition` feature flag below), clients composite
+the presentation themselves. The bot publishes the parts and never
+composites a frame:
+
+- **Slides** are PNGs served at
+  `GET /presentations/:id/slides/:hash.png` and announced in the
+  state's `slide.url` (see "State broadcast" below).
+- **Camera bubble:** clients draw the CAMERA track of
+  `presenterIdentity` themselves, using the existing `overlay` layout.
+  `presenterIdentity` comes from the `POST /presentations` request. A
+  presenter whose identity changed (a refresh, or the starter left)
+  takes it over with `presentation:presenter:claim`; the bot sets it to
+  the sender's LiveKit identity and broadcasts state, and the last
+  claim wins.
+- **Embedded video** is published by the Go sidecar `cast-sidecar`
+  (`SIDECAR_BINARY_PATH`, default `/usr/local/bin/cast-sidecar`), one
+  process per session, which owns the session's only LiveKit
+  connection. It publishes `presentation-video` (SCREENSHARE, H.264
+  constrained baseline level 4.0) and `presentation-audio`
+  (SCREENSHARE_AUDIO, Opus) once at connect, keeps them for the whole
+  session, and writes samples only while a video plays. There is no
+  `presentation` composite track.
+
+### Sidecar IPC
+
+The server drives the sidecar with JSON lines: commands on stdin,
+events on stdout, logs on stderr (redacted, logged at debug).
+
+- `init { url, token, presentationId }` is the first line, so the
+  token never appears on argv or in the environment. The sidecar
+  connects, sets the bot metadata, publishes both tracks and answers
+  `ready { roomMetadata, participantCount }`, or
+  `error { code: 'connect-failed' | 'publish-failed' }` and exits.
+- Every later command (`publishData`, `updateMetadata`, `play`,
+  `pause`, `resume`, `stop`, `shutdown`) carries an `id` and gets one
+  `ack` or `error` with that `id`. The server fails a command that has
+  no reply after 10 s. A `stop` whose playback does not wind down
+  within 2 s answers `stop-failed`.
+- `play` also carries a `playId` (the session's play generation), and
+  the sidecar echoes it on that playback's `playbackEnded` and
+  `error { code: 'playback-failed' }`. The sidecar starts a playback
+  before it acks the `play`, and readline delivers every line of a
+  stdout chunk before the ack's continuation runs, so either event can
+  reach the server while the video is still `loading`. The server keeps
+  such an event and applies it when the ack is handled, and it ignores
+  events whose `playId` belongs to a replaced playback.
+- Unsolicited events: `dataReceived` (the server decodes the packet
+  and applies the same presenter check as the rtc-node path),
+  `roomMetadata` (the presenters list), `participantCount` (feeds the
+  idle reaper), `playbackEnded`, `error { code: 'playback-failed' }`
+  and `disconnected`. Room events that arrive before `ready` are
+  dropped and logged on stderr.
+- A stdin line over 1 MiB, or any other stdin read error, makes the
+  sidecar send `error { code: 'bad-command' }` without an `id` and
+  exit. The server reads events until the process's stdio closes, so
+  a last error line is never lost to the exit.
+- A `disconnected` event or an unexpected exit stops the session. The
+  sidecar never reconnects by itself. On session stop the server sends
+  `shutdown` (bounded at 5 s), waits up to 3 s for the exit, then
+  kills it.
+
+### Bake queue
+
+Every video is baked before it plays: native size capped to 1920×1080
+(1080×1920 portrait), 30 fps H.264 constrained baseline in Annex-B,
+and Opus in Ogg, by the process-wide `media-encoder`. It runs one bake
+at a time; play requests go ahead of prefetches, and a play for a
+queued prefetch promotes it. Each v2 session prefetches its videos one
+at a time right after creation. A downloaded source counts against the
+2 GB session quota until its bake finishes, and is then replaced by
+the bake output. See `docs/video-playback-lifecycle.md` for the
+playback state machine.
+
+- **Preset:** x264 `ultrafast`. On the 0.5 vCPU `.zone` task
+  `veryfast` baked at about 0.3× realtime and `ultrafast` at about
+  0.7×. The cost is quality: `ultrafast` turns off deblocking and
+  most motion search, so a 1080p bake at 6 Mbps shows more blocking
+  than `veryfast` would.
+- **Inputs:** ffprobe and ffmpeg read only local files
+  (`-protocol_whitelist file`) in the mov/mp4, asf, avi, mpeg, mpegts
+  and matroska/webm containers (`-format_whitelist`), so an HLS
+  playlist or concat list posing as an embedded video cannot pull
+  other files into a bake.
+- **Shutdown:** stopping the component kills the running bake and
+  rejects every queued one.
+
 ## Data channel protocol
 
 The bot communicates with Decentraland scenes through LiveKit data
@@ -161,6 +250,7 @@ strings sent with reliable delivery.
 { "type": "presentation:stop" }
 { "type": "presentation:get-state" }
 { "type": "presentation:overlay:update", "x": 0.5, "y": 0.5, "size": "large" }
+{ "type": "presentation:presenter:claim" }
 ```
 
 `presentation:overlay:update` changes only the fields it carries, and
@@ -182,6 +272,9 @@ width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
 `{ "x": 0, "y": 1, "size": "small" }`, bottom-left. There is one
 layout per session, so when several presenters update it the last
 update wins.
+
+`presentation:presenter:claim` is v2-only (it is ignored with the flag
+off): it sets `presenterIdentity` to the sender's identity.
 
 ### State broadcast (bot to all participants)
 

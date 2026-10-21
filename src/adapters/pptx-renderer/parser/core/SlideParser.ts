@@ -484,23 +484,18 @@ export class SlideParser {
     const titleExt = title.split('.').pop()?.toLowerCase() ?? ''
     const isExternalVideo = !!externalUrl && !!VIDEO_EXTENSIONS[titleExt]
 
-    // ── Detect embedded video (p:videoFile or p14:media / p15:media) ──────────
-    let isEmbeddedVideo = false
-    if (nvPr?.['p:videoFile']) isEmbeddedVideo = true
-
-    // ── Resolve blip (thumbnail / embedded image or video file) ──────────────
     const blip = getNode(blipFill, ['a:blip']) as Record<string, unknown> | undefined
     const rId = blip ? (getAttr(blip, 'r:embed') ?? getAttr(blip, 'r:link')) : undefined
 
-    let mediaRef: string | undefined
-    let mediaType: 'image' | 'video' | undefined
+    let mediaRef = this.findEmbeddedVideoPath(nvPr, relParser, slidePath)
+    let mediaType: 'image' | 'video' | undefined = mediaRef ? 'video' : undefined
 
-    if (rId) {
+    if (!mediaRef && rId) {
       const resolvedPath = relParser.resolveTarget(rId, slidePath)
       if (resolvedPath) {
         mediaRef = resolvedPath
         const ext = resolvedPath.split('.').pop()?.toLowerCase() ?? ''
-        if (isEmbeddedVideo || VIDEO_EXTENSIONS[ext]) {
+        if (VIDEO_EXTENSIONS[ext]) {
           mediaType = 'video'
         } else if (IMAGE_EXTENSIONS[ext]) {
           mediaType = 'image'
@@ -508,31 +503,6 @@ export class SlideParser {
       }
     }
 
-    // Also look for video relationship via nvPicPr extLst (p14:media / p15:media)
-    if (!mediaRef && nvPr) {
-      const extLst = nvPr['p:extLst'] as Record<string, unknown> | undefined
-      if (extLst) {
-        const exts = toArray(extLst['p:ext'] as unknown)
-        for (const ext of exts) {
-          const extObj = ext as Record<string, unknown>
-          const mediaEl = extObj['p14:media'] ?? extObj['p15:media']
-          if (mediaEl) {
-            const mediaRId = getAttr(mediaEl as unknown, 'r:embed') ?? getAttr(mediaEl as unknown, 'r:link')
-            if (mediaRId) {
-              const resolvedPath = relParser.resolveTarget(mediaRId, slidePath)
-              if (resolvedPath) {
-                mediaRef = resolvedPath
-                const fileExt = resolvedPath.split('.').pop()?.toLowerCase() ?? ''
-                mediaType = VIDEO_EXTENSIONS[fileExt] ? 'video' : 'image'
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // External video overrides the blip image: render as video, keep mediaRef
-    // only as a poster hint (VideoRenderer may use it).
     if (isExternalVideo) {
       mediaType = 'video'
     }
@@ -547,6 +517,32 @@ export class SlideParser {
       clipShape,
       clipAdjustValues
     })
+  }
+
+  private static findEmbeddedVideoPath(
+    nvPr: Record<string, unknown> | undefined,
+    relParser: RelationshipParser,
+    slidePath: string
+  ): string | undefined {
+    if (!nvPr) return undefined
+
+    const videoFile = nvPr['a:videoFile'] ?? nvPr['p:videoFile']
+    const extLst = nvPr['p:extLst'] as Record<string, unknown> | undefined
+    const mediaElements = toArray(extLst?.['p:ext'] as unknown).map((ext) => {
+      const extObj = ext as Record<string, unknown>
+      return extObj['p14:media'] ?? extObj['p15:media']
+    })
+
+    for (const element of [...mediaElements, videoFile]) {
+      const relId = getAttr(element, 'r:embed') ?? getAttr(element, 'r:link')
+      if (!relId || relParser.getById(relId)?.targetMode === 'External') continue
+
+      const resolvedPath = relParser.resolveTarget(relId, slidePath)
+      const ext = resolvedPath?.split('.').pop()?.toLowerCase() ?? ''
+      if (resolvedPath && (videoFile || VIDEO_EXTENSIONS[ext])) return resolvedPath
+    }
+
+    return undefined
   }
 
   private static parseGraphicFrame(
