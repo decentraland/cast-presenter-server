@@ -2,6 +2,7 @@ import { Router } from '@dcl/http-server'
 import { createPresentationHandler } from './handlers/create-presentation-handler'
 import { driveVideoHandler } from './handlers/drive-video-handler'
 import { pingHandler } from './handlers/ping-handler'
+import { slideImageHandler } from './handlers/slide-image-handler'
 import type { GlobalContext } from '../types'
 
 // We return the entire router because it will be easier to test than a whole server
@@ -16,6 +17,7 @@ export async function setupRouter(_: GlobalContext): Promise<Router<GlobalContex
   // presentation control flows through the LiveKit data channel, which enforces
   // presenter authorization via room metadata. See docs/architecture.md for details.
   router.post('/presentations', createPresentationHandler)
+  router.get('/presentations/:id/slides/:file', slideImageHandler)
 
   return router
 }
