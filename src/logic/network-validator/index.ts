@@ -1,4 +1,5 @@
 export {
+  ALLOWED_VIDEO_DOMAINS,
   createNetworkValidatorComponent,
   isPrivateIP,
   resolveAndValidateUrl,

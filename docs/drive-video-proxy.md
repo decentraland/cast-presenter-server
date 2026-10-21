@@ -26,19 +26,20 @@ video.src = `${API_BASE}/api/drive-video?fileId=${fileId}`
 ```
 
 - Range requests are supported: the server forwards the `Range` header to Drive and returns `Accept-Ranges: bytes` and `Content-Range` when applicable, so the `<video>` element can seek.
-- If the frontend is on a different origin, set `DRIVE_VIDEO_CORS_ORIGIN` (see below) so the browser allows the request.
+- Every response carries `Content-Disposition: attachment`, so a browser that opens the URL directly downloads the file instead of rendering it from this origin. A `<video>` element ignores the header. The upstream `Content-Type` is passed through as is: Drive often answers `application/octet-stream` even for a video, so the relay cannot require `video/*`.
+- A plain `<video src>` loads cross-origin without CORS. Set `DRIVE_VIDEO_CORS_ORIGIN` (see below) only when the frontend reads the response from script or sets `crossorigin` on the element.
 
 ## Environment variables
 
 | Variable                       | Required | Description                                                                                                                        |
 | ------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `DRIVE_VIDEO_ALLOWED_FILE_IDS` | No       | Comma-separated list of Drive file IDs. If set, only these IDs can be requested; if empty or unset, any public file ID is allowed. |
+| `DRIVE_VIDEO_ALLOWED_FILE_IDS` | No       | Comma-separated list of Drive file IDs that can always be requested. Other IDs are served only while a presentation plays them.   |
 | `DRIVE_VIDEO_CORS_ORIGIN`      | No       | Value for `Access-Control-Allow-Origin` on this endpoint (e.g. `https://your-frontend.com` or `*`). Omit for same-origin only.     |
 
 ## Errors
 
 - **400** — Missing or invalid `fileId` (only alphanumeric, `-`, and `_` allowed).
-- **403** — File ID not in the allowlist (when `DRIVE_VIDEO_ALLOWED_FILE_IDS` is set).
+- **403** — File ID neither in the allowlist nor the active client-played video of a running presentation.
 - **404** — File not found or not accessible (e.g. not shared publicly).
 - **502** — Upstream error (e.g. Drive unavailable).
 

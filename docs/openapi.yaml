@@ -219,8 +219,9 @@ paths:
       description: |
         Proxies a public Google Drive file as a binary stream.
         Supports HTTP Range requests for seek. The file ID must
-        appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist;
-        an empty or unset allowlist denies all requests.
+        appear in the `DRIVE_VIDEO_ALLOWED_FILE_IDS` allowlist or be
+        the client-played Drive video a running presentation is
+        playing or has paused; any other ID is denied.
       parameters:
         - name: fileId
           in: query
@@ -261,7 +262,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: File ID not in allowlist
+          description: File ID neither allowlisted nor playing in a presentation
           content:
             application/json:
               schema:
@@ -368,6 +369,23 @@ components:
             Present only when client composition is on. Index
             into `slideVideos` while `videoState` is `loading`,
             `playing` or `paused`; otherwise null.
+        videoPositionMs:
+          type: integer
+          nullable: true
+          description: >
+            Present only when client composition is on. Position
+            in milliseconds of the playing or paused `client` video at
+            `videoPositionAt`; otherwise null. Clients target
+            `videoPositionMs + (now - videoPositionAt)` while playing and
+            `videoPositionMs` while paused.
+        videoPositionAt:
+          type: integer
+          nullable: true
+          description: >
+            Present only when client composition is on. Server
+            epoch milliseconds at which the playing or paused `client`
+            video was at `videoPositionMs`; otherwise null. Changes only
+            on play, resume and pause.
 
     OverlayLayout:
       type: object
@@ -401,6 +419,21 @@ components:
       properties:
         url:
           type: string
+          description: >
+            For a `client` video, the canonical URL
+            (`https://www.youtube.com/watch?v=<id>`,
+            `https://drive.google.com/file/d/<id>/view`, or the
+            `https://player.vimeo.com/external/<digits>.m3u8?<query>` URL
+            without its fragment).
+        source:
+          type: string
+          enum: [client, stream]
+          description: >
+            Present only when client composition is on. `client`
+            for YouTube, Google Drive and Vimeo `.m3u8` links that clients
+            play from `url`; `stream` for embedded PPTX videos the sidecar
+            publishes on `presentation-video` and `presentation-audio`,
+            and for unsupported links, which fail on play.
         geometry:
           type: object
           properties:

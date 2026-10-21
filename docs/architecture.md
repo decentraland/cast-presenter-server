@@ -122,6 +122,22 @@ presentation manager.
   transcodes them with ffmpeg, and composites video frames onto
   slide backgrounds for real-time overlay playback.
 
+### Slide fonts
+
+@napi-rs/canvas only knows the font families that are actually
+installed, and it ignores fontconfig substitutions. The Docker image
+ships Liberation and Noto fonts, not Arial, so a family that is not
+installed renders every glyph as a box, generic `sans-serif` included.
+The PPTX renderer therefore picks an installed family per text run
+(`resolveFontFamily`): the requested family, then its
+metric-compatible Liberation substitute (Arial and Helvetica to
+Liberation Sans, Times New Roman to Liberation Serif, Courier and
+Courier New to Liberation Mono), then Arial, then Liberation Sans.
+Weight keywords in the family name (`Inter Black`) are read before
+this fallback, so a substituted family keeps its weight. Arial is
+preferred over generic `sans-serif` because Skia's generic fallback
+draws some symbols such as ❏ as ⊠.
+
 ## Session lifecycle
 
 Each presentation runs as an in-memory session identified by a UUID.
@@ -168,6 +184,18 @@ composites a frame:
   (SCREENSHARE_AUDIO, Opus) once at connect, keeps them for the whole
   session, and writes samples only while a video plays. There is no
   `presentation` composite track.
+- **Client-played video:** YouTube, Google Drive and Vimeo `.m3u8`
+  links are played by each client from the canonical URL in
+  `slideVideos[i].url`. The server never downloads, bakes or streams
+  them, and sends no sidecar command for them. It stays the source of
+  truth for playback: play, pause, resume, stop and navigate update the
+  state, which anchors the position in `videoPositionMs` and
+  `videoPositionAt`. The server looks up the duration once per play or
+  resume through the `video-duration` component (no API keys), and when
+  it is known, ends the video itself about 2 s after its end. An unknown
+  duration means the video plays until a presenter stops it or changes
+  the slide. Any other non-embedded link fails on play with
+  `video-invalid-format`.
 
 ### Sidecar IPC
 
@@ -209,14 +237,14 @@ events on stdout, logs on stderr (redacted, logged at debug).
 
 ### Bake queue
 
-Every video is baked before it plays: native size capped to 1920×1080
-(1080×1920 portrait), 30 fps H.264 constrained baseline in Annex-B,
-and Opus in Ogg, by the process-wide `media-encoder`. It runs one bake
-at a time; play requests go ahead of prefetches, and a play for a
-queued prefetch promotes it. Each v2 session prefetches its videos one
-at a time right after creation. A downloaded source counts against the
-2 GB session quota until its bake finishes, and is then replaced by
-the bake output. See `docs/video-playback-lifecycle.md` for the
+Only videos embedded in a PPTX are baked, from the file the renderer
+already extracted: native size capped to 1920×1080 (1080×1920
+portrait), 30 fps H.264 constrained baseline in Annex-B, and Opus in
+Ogg, by the process-wide `media-encoder`. It runs one bake at a time;
+play requests go ahead of prefetches, and a play for a queued prefetch
+promotes it. Each v2 session prefetches its embedded videos one at a
+time right after creation. The bake output counts against the 2 GB
+session quota. See `docs/video-playback-lifecycle.md` for the
 playback state machine.
 
 - **Preset:** x264 `ultrafast`. On the 0.5 vCPU `.zone` task
@@ -315,7 +343,7 @@ fragment, or `http://` on localhost. The server refuses to start with
 an invalid one, and while it is unset sessions fall back to server
 composition.
 
-With client composition on, both channels also carry three fields for
+With client composition on, both channels also carry these fields for
 clients that composite the presentation themselves:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
@@ -338,6 +366,50 @@ clients that composite the presentation themselves:
   never causes a 400. It is not checked against the LiveKit token.
 - `playingVideoIndex`: the index into `slideVideos` while
   `videoState` is `loading`, `playing` or `paused`; otherwise `null`.
+- `slideVideos[i].source`: `client` or `stream`, on every entry. A
+  `client` entry is a YouTube, Google Drive or Vimeo `.m3u8` link, and
+  its `url` is replaced by the canonical form:
+  `https://www.youtube.com/watch?v=<id>`,
+  `https://drive.google.com/file/d/<id>/view`, or the
+  `https://player.vimeo.com/external/<digits>.m3u8?<query>` URL without
+  its fragment. Clients branch on `source` and run no allowlist of their
+  own. A `stream` entry is an embedded video that the sidecar publishes
+  on `presentation-video` and `presentation-audio`, or an unsupported
+  link that fails on play.
+- `videoPositionMs` and `videoPositionAt`: while a `client` video is
+  `playing` or `paused`, its position in milliseconds and the server
+  epoch milliseconds (`Date.now()`) at which it was there; otherwise
+  `null`. Clients target `videoPositionMs + (now - videoPositionAt)`
+  while playing and `videoPositionMs` while paused, clamped at 0, and
+  re-seek only when their player is more than 2000 ms off. The server
+  moves the anchor only on play, resume and pause, so repeated
+  broadcasts carry the same values.
+
+When a client video's duration is known, the server arms an end timer
+for the remaining time plus 2 s. Pause clears it, and resume arms it
+again for what is left. When it fires, the state goes to
+`videoState: 'idle'` with `playingVideoIndex: null`, the same natural
+end clients see for an embedded video. There is no seek command and no
+client-sent "ended".
+
+Example while a client video plays:
+
+```json
+{
+  "type": "presentation:state",
+  "videoState": "playing",
+  "playingVideoIndex": 0,
+  "videoPositionMs": 12500,
+  "videoPositionAt": 1760270400123,
+  "slideVideos": [
+    {
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "geometry": { "x": 100, "y": 100, "width": 640, "height": 480 },
+      "source": "client"
+    }
+  ]
+}
+```
 
 With the flag off, none of these fields are emitted.
 
@@ -403,9 +475,12 @@ download:
 
 ### Drive proxy allowlist
 
-The `DRIVE_VIDEO_ALLOWED_FILE_IDS` configuration uses a default-deny
-posture. If the variable is empty or unset, all requests to
-`/api/drive-video` are denied.
+`/api/drive-video` is default-deny. It serves a file ID listed in
+`DRIVE_VIDEO_ALLOWED_FILE_IDS`, or one that a running presentation is
+playing or has paused as its client-played Drive video
+(`presentationManager.isDriveFilePlaying`). Sites plays Drive slide
+videos through this endpoint because Drive rejects browsers' cross-site
+requests; Unity fetches Drive directly.
 
 ### Security headers
 

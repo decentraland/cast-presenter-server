@@ -7,6 +7,8 @@
  * 3. Register it in the PROVIDERS array (before DirectUrlProvider)
  */
 
+import { GOOGLE_DRIVE_ID_PATTERNS } from '../../logic/client-video'
+
 export interface ResolvedVideoUrls {
   downloadUrls: string[]
   streamUrl: string
@@ -28,12 +30,6 @@ const GOOGLE_DRIVE_ENDPOINTS = {
   USERCONTENT: 'https://drive.usercontent.google.com/download',
   LEGACY: 'https://drive.google.com/uc'
 } as const
-
-const GOOGLE_DRIVE_ID_PATTERNS = [
-  /\/file\/d\/([a-zA-Z0-9_-]+)/,
-  /[?&]id=([a-zA-Z0-9_-]+)/,
-  /\/uc\?.*id=([a-zA-Z0-9_-]+)/
-]
 
 export class GoogleDriveProvider extends VideoProvider {
   readonly name = 'google-drive'
