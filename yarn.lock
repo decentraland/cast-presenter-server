@@ -2582,9 +2582,9 @@ expect@^29.0.0:
     jest-util "^29.7.0"
 
 fast-copy@^4.0.0:
-  version "4.0.2"
-  resolved "https://registry.yarnpkg.com/fast-copy/-/fast-copy-4.0.2.tgz#57f14115e1edbec274f69090072a480aa29cbedd"
-  integrity sha512-ybA6PDXIXOXivLJK/z9e+Otk7ve13I4ckBvGO5I2RRmBU1gMHLVDJYEuJYhGwez7YNlYji2M2DvVU+a9mSFDlw==
+  version "4.1.2"
+  resolved "https://registry.yarnpkg.com/fast-copy/-/fast-copy-4.1.2.tgz#9119c178a5f2aa568074cf21cd6823068fbfea15"
+  integrity sha512-DUHggaYcouhy5I1LacDJ+JDSqGlumVJP2EAi5Nwt1pWPeLpSvIjkrY+x4fsoI1/+GlTyq+DM9zdgWCFSfqNODA==
 
 fast-deep-equal@^3.1.1, fast-deep-equal@^3.1.3:
   version "3.1.3"
