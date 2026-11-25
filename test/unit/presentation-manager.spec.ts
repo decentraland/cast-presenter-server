@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { LivekitConnectError } from '../../src/adapters/sidecar-publisher/errors'
 import { DEFAULT_OVERLAY_LAYOUT } from '../../src/logic/overlay-layout'
 import {
   InvalidLivekitCredentialsError,
@@ -144,24 +145,48 @@ describe('when pre-validating LiveKit credentials', () => {
     })
   })
 
-  describe('and the connect rejects', () => {
-    beforeEach(() => {
+  describe('and the connect rejects with a LiveKit connect error', () => {
+    let outcome: unknown
+
+    beforeEach(async () => {
       publisher = createMockPublisher()
-      publisher.connect.mockRejectedValue(new Error('token rejected'))
+      publisher.connect.mockRejectedValue(new LivekitConnectError('LiveKit connect failed: token rejected'))
       components = createMockComponents({ publisher })
+      const manager = await createManager(components)
+      outcome = await manager.validateCredentials('wss://lk.example.com', 'bad-token').catch((err: unknown) => err)
     })
 
-    it('should reject the credentials through the sidecar factory publisher', async () => {
-      const manager = await createManager(components)
-      await manager.validateCredentials('wss://lk.example.com', 'bad-token').catch(() => undefined)
+    it('should reject the credentials through the sidecar factory publisher', () => {
       expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledWith('validate', expect.anything())
     })
 
-    it('should throw InvalidLivekitCredentialsError and still disconnect', async () => {
+    it('should throw InvalidLivekitCredentialsError', () => {
+      expect(outcome).toBeInstanceOf(InvalidLivekitCredentialsError)
+    })
+
+    it('should still disconnect the throw-away publisher', () => {
+      expect(publisher.disconnect).toHaveBeenCalled()
+    })
+  })
+
+  describe('and the connect fails for a reason other than the LiveKit connection', () => {
+    let failure: Error
+    let outcome: unknown
+
+    beforeEach(async () => {
+      failure = new Error('LiveKit connect failed: Sidecar exited (code=1, signal=null)')
+      publisher = createMockPublisher()
+      publisher.connect.mockRejectedValue(failure)
+      components = createMockComponents({ publisher })
       const manager = await createManager(components)
-      await expect(manager.validateCredentials('wss://lk.example.com', 'bad-token')).rejects.toBeInstanceOf(
-        InvalidLivekitCredentialsError
-      )
+      outcome = await manager.validateCredentials('wss://lk.example.com', 'good-token').catch((err: unknown) => err)
+    })
+
+    it('should rethrow the original error', () => {
+      expect(outcome).toBe(failure)
+    })
+
+    it('should still disconnect the throw-away publisher', () => {
       expect(publisher.disconnect).toHaveBeenCalled()
     })
   })

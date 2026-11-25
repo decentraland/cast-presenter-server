@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { LivekitConnectError } from '../../adapters/sidecar-publisher/errors'
 import { classifyClientVideo } from '../client-video'
 import { errorMessage } from '../error-message'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
@@ -238,7 +239,8 @@ export async function createPresentationManager(
     try {
       await publisher.connect(livekitUrl, livekitToken)
     } catch (err) {
-      throw new InvalidLivekitCredentialsError(errorMessage(err))
+      if (err instanceof LivekitConnectError) throw new InvalidLivekitCredentialsError(errorMessage(err))
+      throw err
     } finally {
       await publisher.disconnect().catch(() => undefined)
     }

@@ -434,8 +434,9 @@ the bot by this prefix to display presentation controls.
 The server doesn't have the LiveKit API secret. Authentication is
 implicit: if the LiveKit connection succeeds, the token is valid
 (issued by comms-gatekeeper, verified by the LiveKit SFU). The server
-validates credentials by connecting through the sidecar. If the
-connection fails, the request is rejected before any file processing.
+validates credentials by connecting through the sidecar before any file
+processing. If LiveKit rejects the connection, the request fails with
+401; any other sidecar failure fails it with 500.
 
 ### MITM protection
 

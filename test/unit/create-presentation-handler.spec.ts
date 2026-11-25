@@ -445,6 +445,21 @@ describe('when handling a create presentation request', () => {
       })
     })
 
+    describe('and the LiveKit credentials pre-validation fails for another reason', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
+            { validateCredentialsError: new Error('LiveKit connect failed: timed out publishing track') }
+          )
+        )
+      })
+
+      it('should return status 500', () => {
+        expect(result.status).toBe(500)
+      })
+    })
+
     describe('and the slide cannot be rendered', () => {
       beforeEach(async () => {
         result = await createPresentationHandler(
