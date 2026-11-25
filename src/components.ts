@@ -69,7 +69,7 @@ export async function initComponents(): Promise<AppComponents> {
   const googleDrive = await createGoogleDriveComponent({ config, fetcher })
   const fileProvider = createFileProviderComponent({ logs, networkValidator })
 
-  const slideRenderer = createSlideRendererComponent()
+  const slideRenderer = createSlideRendererComponent({ logs })
   const sidecarPublisher = await createSidecarPublisherComponent({ config })
   const mediaEncoder = await createMediaEncoderComponent({ logs })
   const videoDuration = await createVideoDurationComponent({ fetcher, logs })

@@ -53,9 +53,8 @@ remote control through LiveKit data channels.
 **Key concepts:**
 
 - **Session:** An in-memory object representing an active
-  presentation. Each session holds its slide renderer child process,
-  its sidecar, and its extracted media. Sessions are identified by a
-  UUID.
+  presentation. Each session holds its rendered slides, its sidecar,
+  and its extracted media. Sessions are identified by a UUID.
 - **Bot token:** A LiveKit JWT issued by comms-gatekeeper with
   identity `presentation-bot:{roomId}:{timestamp}` and role
   `presentation`. The server uses this token to join the room. A
@@ -74,9 +73,10 @@ remote control through LiveKit data channels.
   IPC), and never composites a frame; see
   [architecture.md](architecture.md#client-composition).
 - **Slide renderer process:** Each session forks one child process
-  (`src/adapters/slide-renderer/`) that renders slides and encodes
-  PNGs. The server process loads no native rendering or LiveKit code;
-  see [architecture.md](architecture.md#slide-renderer-process).
+  (`src/adapters/slide-renderer/`) that writes every slide of the deck
+  to disk as a PNG and then exits. The server process loads no native
+  rendering or LiveKit code; see
+  [architecture.md](architecture.md#slide-renderer-process).
 - **Client-played videos:** YouTube, Google Drive and Vimeo
   `.m3u8` links are played by the clients from their canonical URL
   (`slideVideos[i].source: 'client'`); the server only tracks the

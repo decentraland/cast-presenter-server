@@ -1,87 +1,130 @@
 import { fork } from 'child_process'
-import { rmSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
+import { readFile } from 'fs/promises'
+import os from 'os'
 import path from 'path'
 import { SlideRenderError } from '../renderer/errors'
 import type { ISlideRenderer, ISlideRendererComponent } from './types'
-import type { WorkerResponse, WorkerResults } from './worker'
+import type { RenderedSlide, WorkerMessage, WorkerRequest } from './worker'
 import type { FileType } from '../../logic/file-validator'
 import type { SlideImage } from '../../logic/slide-image'
+import type { AppComponents } from '../../types'
 import type { SlideVideoInfo } from '../renderer/types'
 
-const DESTROY_GRACE_MS = 2_000
+interface Settleable<T> {
+  promise: Promise<T>
+  settle(result: T | Error): void
+}
 
-interface PendingCall {
-  index: number
-  resolve(result: unknown): void
-  reject(error: Error): void
+function settleable<T>(): Settleable<T> {
+  let settle: (result: T | Error) => void = () => undefined
+  const promise = new Promise<T>((resolve, reject) => {
+    settle = (result) => (result instanceof Error ? reject(result) : resolve(result))
+  })
+  promise.catch(() => undefined)
+  return { promise, settle }
 }
 
 /**
- * Creates the slide renderer component. Each renderer it creates forks its own
- * render process, so a native crash while rendering ends only that renderer.
+ * Creates the slide renderer component. Each renderer forks a render process that
+ * writes every slide of its deck to a directory the renderer owns, then exits, so a
+ * native crash while rendering ends only that renderer and a live session holds no process.
  *
+ * @param components.logs - Logger factory; warns when a render process exits before finishing its deck
  * @param options.workerPath - Entry point of the render process; defaults to the sibling `worker` module
  * @returns The slide renderer factory component
  */
-export function createSlideRendererComponent(options: { workerPath?: string } = {}): ISlideRendererComponent {
+export function createSlideRendererComponent(
+  components: Pick<AppComponents, 'logs'>,
+  options: { workerPath?: string } = {}
+): ISlideRendererComponent {
+  const logger = components.logs.getLogger('slide-renderer')
   const workerPath = options.workerPath ?? path.join(__dirname, `worker${path.extname(__filename)}`)
   const execArgv = workerPath.endsWith('.ts') ? ['-r', 'ts-node/register/transpile-only'] : []
 
   function createRenderer(fileType: FileType): ISlideRenderer {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'cast-slides-'))
     const child = fork(workerPath, [], {
       serialization: 'advanced',
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      execArgv
+      execArgv,
+      env: { ...process.env, TMPDIR: dir }
     })
-    const pending = new Map<number, PendingCall>()
-    let nextId = 0
-    let exitCause: Error | null = null
+    const deck = settleable<number>()
+    let slides: Array<Settleable<RenderedSlide>> = []
     let slideCount: number | null = null
+    let reportedSlides = 0
+    let deckFailed = false
     let embeddedMediaDir: string | null = null
+    let destroyed = false
 
-    function markDead(cause: Error): void {
-      exitCause ??= cause
-      for (const call of pending.values()) call.reject(new SlideRenderError(call.index, exitCause))
-      pending.clear()
+    function removeDir(): void {
+      rmSync(dir, { recursive: true, force: true })
     }
 
-    child.on('message', (response: WorkerResponse) => {
-      const call = pending.get(response.id)
-      if (!call) return
-      pending.delete(response.id)
-      if ('error' in response) call.reject(new Error(response.error))
-      else call.resolve(response.result)
+    function fail(cause: Error): void {
+      deck.settle(new SlideRenderError(0, cause))
+      slides.forEach((slide, index) => slide.settle(new SlideRenderError(index, cause)))
+    }
+
+    function slideAt(index: number): Promise<RenderedSlide> {
+      return slides[index]?.promise ?? Promise.reject(new SlideRenderError(index, new Error('Slide is out of range')))
+    }
+
+    function send(request: WorkerRequest): void {
+      child.send(request)
+    }
+
+    child.on('message', (message: WorkerMessage) => {
+      switch (message.type) {
+        case 'deck':
+          slideCount = message.slideCount
+          slides = Array.from({ length: message.slideCount }, () => settleable<RenderedSlide>())
+          deck.settle(message.slideCount)
+          break
+        case 'deckFailed':
+          deckFailed = true
+          deck.settle(new Error(message.error))
+          break
+        case 'slide':
+          reportedSlides++
+          embeddedMediaDir = message.embeddedMediaDir
+          slides[message.index]?.settle(message)
+          break
+        case 'slideFailed':
+          reportedSlides++
+          slides[message.index]?.settle(new SlideRenderError(message.index, new Error(message.error)))
+          break
+      }
     })
-    child.on('error', markDead)
-    child.on('exit', (code, signal) => markDead(new Error(`Slide render process exited with ${signal ?? code}`)))
-
-    function call<Op extends keyof WorkerResults>(op: Op, index: number, fields = {}): Promise<WorkerResults[Op]> {
-      return new Promise((resolve, reject) => {
-        if (exitCause) return reject(new SlideRenderError(index, exitCause))
-        const id = nextId++
-        pending.set(id, { index, resolve, reject })
-        child.send({ ...fields, id, op, index })
-      })
-    }
+    child.on('error', fail)
+    child.on('close', (code, signal) => {
+      const exit = signal ?? code ?? 'unknown'
+      const unrenderedSlides = slideCount === null ? 'unknown' : slideCount - reportedSlides
+      if (!destroyed && !deckFailed && unrenderedSlides !== 0) {
+        logger.warn(`Slide render process exited with ${exit} before finishing the deck`, { exit, unrenderedSlides })
+      }
+      fail(new Error(`Slide render process exited with ${exit}`))
+      if (destroyed) removeDir()
+    })
 
     return {
       async initialize(fileBuffer: Buffer): Promise<void> {
-        ;({ slideCount } = await call('initialize', 0, { fileType, buffer: fileBuffer }))
+        send({ fileType, buffer: fileBuffer, outputDir: dir })
+        await deck.promise
       },
 
       async renderSlide(index: number): Promise<SlideImage> {
+        const { hash, width, height } = await slideAt(index)
         try {
-          const image = await call('renderSlide', index)
-          return { ...image, png: Buffer.from(image.png) }
+          return { hash, width, height, png: await readFile(path.join(dir, `${index}.png`)) }
         } catch (err) {
-          throw err instanceof SlideRenderError ? err : new SlideRenderError(index, err)
+          throw new SlideRenderError(index, err)
         }
       },
 
       async getSlideVideos(index: number): Promise<SlideVideoInfo[]> {
-        const reply = await call('getSlideVideos', index)
-        embeddedMediaDir = reply.embeddedMediaDir
-        return reply.videos
+        return (await slideAt(index)).videos
       },
 
       getEmbeddedMediaDir(): string | null {
@@ -94,9 +137,9 @@ export function createSlideRendererComponent(options: { workerPath?: string } = 
       },
 
       destroy(): void {
-        if (child.connected) child.send({ op: 'destroy' })
-        setTimeout(() => child.kill('SIGKILL'), DESTROY_GRACE_MS).unref()
-        if (embeddedMediaDir) rmSync(embeddedMediaDir, { recursive: true, force: true })
+        destroyed = true
+        child.kill('SIGKILL')
+        removeDir()
       }
     }
   }

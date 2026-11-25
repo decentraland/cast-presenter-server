@@ -109,6 +109,7 @@ function createRenderer(): IRenderer {
         }
 
         const imageData = ctx.getImageData(0, 0, width, height)
+        page.cleanup()
         return { buffer: Buffer.from(imageData.data.buffer), width, height }
       } catch (err) {
         throw new SlideRenderError(index, err)
