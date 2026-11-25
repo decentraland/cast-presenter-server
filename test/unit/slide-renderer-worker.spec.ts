@@ -40,7 +40,7 @@ describe('when the deck has more slides than the render process accepts', () => 
 
 describe('when the document cannot be loaded', () => {
   beforeEach(async () => {
-    await renderDeck({ fileType: 'pdf', buffer: Buffer.from('not a pdf'), outputDir }, send)
+    await renderDeck({ fileType: 'pptx', buffer: Buffer.from('not a pptx'), outputDir }, send)
   })
 
   it('should report that the deck failed to load', () => {
