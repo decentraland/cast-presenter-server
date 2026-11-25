@@ -46,7 +46,6 @@
   },
   "dependencies": {
     "@dcl/core-commons": "^0.10.1",
-    "@dcl/features-component": "1.0.3",
     "@dcl/fetch-component": "^1.1.1",
     "@dcl/http-requests-logger-component": "^1.0.0",
     "@dcl/http-server": "^2.1.0",
@@ -55,8 +54,7 @@
     "@dcl/protocol": "1.0.0-23951495761.commit-bf007b9",
     "@dcl/traced-fetch-component": "^1.0.8",
     "@dcl/tracer-component": "^1.0.0",
-    "@livekit/rtc-node": "1.1.0",
-    "@napi-rs/canvas": "1.0.9",
+    "@napi-rs/canvas": "1.2.1",
     "@well-known-components/env-config-provider": "^1.2.0",
     "@well-known-components/interfaces": "^1.5.1",
     "@well-known-components/logger": "^3.1.3",

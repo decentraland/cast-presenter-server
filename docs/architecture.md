@@ -1,7 +1,8 @@
 # Architecture
 
-Cast Presenter Server renders presentation slides as a live video
-stream and publishes them to a LiveKit room. This document covers
+Cast Presenter Server renders presentation slides as PNG images and
+publishes the presentation to a LiveKit room through a per-session
+sidecar. This document covers
 the system architecture, data channel protocol, session lifecycle,
 and security model.
 
@@ -28,11 +29,11 @@ sequenceDiagram
     PS->>LK: 6. connect with bot-token
     LK-->>PS: 7. connection established (token valid)
     PS->>PS: 8. parse PDF, render first slide
-    PS->>LK: 9. publish video track
+    PS->>LK: 9. publish state and video tracks (sidecar)
 
     Note over LK: Room participants see the presentation
 
-    LK-->>Scene: video track (slide frames)
+    PS-->>Scene: slide PNGs over HTTP
     Scene->>LK: data channel commands
     LK-->>PS: data channel commands
     PS->>LK: state broadcasts
@@ -54,12 +55,11 @@ flowchart LR
     C1 --> D["Validate file\nextension + magic bytes"]
     C2 --> D
 
-    D --> E["Connect to\nLiveKit"]
-    E --> F["Parse PDF"]
+    D --> E["Connect to\nLiveKit (sidecar)"]
+    E --> F["Parse document"]
     F --> G["Render\nfirst slide"]
-    G --> H["Publish\nvideo track"]
-    H --> I["Pre-download\nembedded videos"]
-    I --> J(["201 Created"]):::finish
+    G --> H["Publish\nstate"]
+    H --> J(["201 Created"]):::finish
 
     classDef start fill:#4a9eff,color:#fff,stroke:none
     classDef finish fill:#34d399,color:#fff,stroke:none
@@ -73,8 +73,8 @@ flowchart LR
     A(["Session active"]) --> B{"Command received"}
 
     B -- navigate --> C["Render target slide\n+ broadcast state"]
-    B -- "video:play" --> D["Composite video\nwith ffmpeg\n+ broadcast state"]
-    B -- "video:pause" --> E["Pause ffmpeg\n+ broadcast state"]
+    B -- "video:play" --> D["Start playback\n+ broadcast state"]
+    B -- "video:pause" --> E["Pause playback\n+ broadcast state"]
     B -- get-state --> F["Broadcast\ncurrent state"]
     B -- stop --> G["Disconnect\n+ cleanup"]
 
@@ -106,21 +106,35 @@ handlers.
 Adapters wrap external systems and provide clean interfaces to the
 presentation manager.
 
-- **PDFRenderer:** Parses PDF/PPTX files using pdfjs-dist, renders
-  slides to RGBA buffers using @napi-rs/canvas, and extracts video
-  annotations with geometry information. pdfjs 6 decodes CCITT fax,
+- **SlideRenderer:** Runs one child process per session that parses
+  the PDF/PPTX file and renders slides to PNG images (see
+  [Slide renderer process](#slide-renderer-process)). Inside the child,
+  the PDF adapter uses pdfjs-dist and @napi-rs/canvas to render slides
+  and extract video annotations with geometry information. pdfjs 6 decodes CCITT fax,
   JBIG2 and JPEG2000 images with WebAssembly, so `getDocument` gets
   `wasmUrl` (the package's `wasm/` directory) and
   `standardFontDataUrl`; without `wasmUrl` those images are skipped
   and scanned pages render blank. `destroy()` does not await the
   loading task's async teardown, because callers are already in stop
   or error cleanup and ignore the outcome.
-- **LiveKitPublisher:** Connects to a LiveKit room, publishes a
-  video track from raw RGBA frames, handles data channel message
-  routing, and manages bot metadata.
-- **VideoCompositor:** Downloads videos (with SSRF protection),
-  transcodes them with ffmpeg, and composites video frames onto
-  slide backgrounds for real-time overlay playback.
+- **SidecarPublisher:** Spawns the per-session Go sidecar that owns the
+  LiveKit connection, and routes data channel messages and bot metadata
+  through it (see [Sidecar IPC](#sidecar-ipc)).
+
+### Slide renderer process
+
+Each session forks one child process (`src/adapters/slide-renderer/`,
+entry `worker.ts`) that loads the document, renders slides and encodes
+the PNGs. It is the only place `@napi-rs/canvas` and `pdfjs-dist` are
+loaded, so the server process loads no native rendering or LiveKit
+code. The server and the child exchange request and response messages
+over IPC.
+
+If the child exits, that session's pending and later render calls fail
+with `SlideRenderError`, which the create endpoint maps to 422. The
+child is not respawned and renders have no timeout. Other sessions and
+the server are unaffected. Stopping a session shuts its child down and
+removes its extracted media directory.
 
 ### Slide fonts
 
@@ -142,29 +156,26 @@ draws some symbols such as ❏ as ⊠.
 
 Each presentation runs as an in-memory session identified by a UUID.
 
-1. **Create:** The server connects to LiveKit first (validating the
-   token), then parses the PDF, renders the first slide, and starts
-   publishing a video track.
-2. **Pre-download:** In the background, all video URLs across all
-   slides are downloaded and optionally pre-transcoded.
-3. **Navigate:** Stops any active video, renders the target slide,
-   forces a high-quality keyframe, and broadcasts updated state.
-4. **Play video:** Loads or streams the video, composites it onto
-   the slide canvas using ffmpeg, and pushes frames to LiveKit.
-5. **Pause/Resume:** Sends SIGSTOP/SIGCONT to the ffmpeg process.
-6. **Stop:** Aborts in-flight downloads first, so none of them races
-   the temporary-directory cleanup or writes into a deleted directory.
-   Then it disconnects from LiveKit, destroys the PDF renderer,
-   cleans up the temporary directory, and removes the session.
-7. **Idle cleanup:** A periodic check (every 60 seconds) terminates
+1. **Create:** The server connects to LiveKit through the sidecar
+   first (validating the token), then forks the slide renderer, parses
+   the document, renders the first slide, and broadcasts the state.
+2. **Navigate:** Stops any active video, renders the target slide,
+   and broadcasts updated state.
+3. **Play video:** Starts the sidecar playback of a baked embedded
+   video, or tracks the state of a client-played one.
+4. **Pause/Resume:** Pauses or resumes the sidecar playback, or moves
+   the position anchor of a client-played video.
+5. **Stop:** Aborts in-flight bakes first, so none of them races the
+   temporary-directory cleanup. Then it shuts down the sidecar and the
+   slide renderer, cleans up the temporary directory, and removes the
+   session.
+6. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 
-## Client composition (v2)
+## Client composition
 
-With client composition on for a session (see the
-`dapps-cast-client-composition` feature flag below), clients composite
-the presentation themselves. The bot publishes the parts and never
-composites a frame:
+Clients composite the presentation themselves. The bot publishes the
+parts and never composites a frame:
 
 - **Slides** are PNGs served at
   `GET /presentations/:id/slides/:hash.png` and announced in the
@@ -177,7 +188,7 @@ composites a frame:
   the sender's LiveKit identity and broadcasts state, and the last
   claim wins.
 - **Embedded video** is published by the Go sidecar `cast-sidecar`
-  (`SIDECAR_BINARY_PATH`, default `/usr/local/bin/cast-sidecar`), one
+  (`SIDECAR_BINARY_PATH`, default `/usr/local/bin/cast-sidecar` in the Docker image), one
   process per session, which owns the session's only LiveKit
   connection. It publishes `presentation-video` (SCREENSHARE, H.264
   constrained baseline level 4.0) and `presentation-audio`
@@ -221,7 +232,7 @@ events on stdout, logs on stderr (redacted, logged at debug).
   such an event and applies it when the ack is handled, and it ignores
   events whose `playId` belongs to a replaced playback.
 - Unsolicited events: `dataReceived` (the server decodes the packet
-  and applies the same presenter check as the rtc-node path),
+  and applies the presenter check),
   `roomMetadata` (the presenters list), `participantCount` (feeds the
   idle reaper), `playbackEnded`, `error { code: 'playback-failed' }`
   and `disconnected`. Room events that arrive before `ready` are
@@ -242,7 +253,7 @@ already extracted: native size capped to 1920×1080 (1080×1920
 portrait), 30 fps H.264 constrained baseline in Annex-B, and Opus in
 Ogg, by the process-wide `media-encoder`. It runs one bake at a time;
 play requests go ahead of prefetches, and a play for a queued prefetch
-promotes it. Each v2 session prefetches its embedded videos one at a
+promotes it. Each session prefetches its embedded videos one at a
 time right after creation. The bake output counts against the 2 GB
 session quota. See `docs/video-playback-lifecycle.md` for the
 playback state machine.
@@ -301,8 +312,8 @@ width and height, plus a `size` of `small` or `large`. So `(0, 0)`,
 layout per session, so when several presenters update it the last
 update wins.
 
-`presentation:presenter:claim` is v2-only (it is ignored with the flag
-off): it sets `presenterIdentity` to the sender's identity.
+`presentation:presenter:claim` sets `presenterIdentity` to the sender's
+identity.
 
 ### State broadcast (bot to all participants)
 
@@ -332,29 +343,19 @@ The state is also stored in the bot's LiveKit participant metadata
 so late joiners can read it immediately without waiting for a
 broadcast.
 
-Client composition is the `dapps-cast-client-composition` feature
-flag, served by the Decentraland feature-flags service through
-`@dcl/features-component`. Each session reads it once when it starts
-and keeps that mode until it ends, so turning the flag off or on only
-affects new sessions. `FF_DAPPS_CAST_CLIENT_COMPOSITION=1` forces it on
-without the service, and any other value forces it off. A session also
-needs a `PUBLIC_BASE_URL`: `https://` with no credentials, query or
-fragment, or `http://` on localhost. The server refuses to start with
-an invalid one, and while it is unset sessions fall back to server
-composition.
+`PUBLIC_BASE_URL` is required: `https://` with no credentials, query or
+fragment, or `http://` on localhost. The server refuses to start when
+it is unset or invalid.
 
-With client composition on, both channels also carry these fields for
-clients that composite the presentation themselves:
+Both channels also carry these fields for clients that composite the
+presentation:
 
 - `slide: { url, width, height }`: the current slide as a PNG at
   `<PUBLIC_BASE_URL>/presentations/:id/slides/:hash.png`, where
-  `:hash` is the first 16 hex characters of the PNG's SHA-256. Its
-  presence marks the v2 protocol, so it is never dropped: if the first
-  slide fails to encode, creation fails, and if a later slide fails,
-  the navigation is rejected, the previous frame is pushed back onto
-  the LiveKit track and the state is broadcast again. On navigation the
-  LiveKit frame is pushed before the encode, so v1 viewers see the new
-  slide without waiting for it. Each session caches the last 8
+  `:hash` is the first 16 hex characters of the PNG's SHA-256. It is
+  never dropped: if the first slide fails to render or encode,
+  creation fails, and if a later slide fails, the navigation is
+  rejected and the state is broadcast again. Each session caches the last 8
   slides in memory; an evicted hash, or any hash after the session
   stops, returns 404.
 - `presenterIdentity`: the identity of the participant who started
@@ -411,8 +412,6 @@ Example while a client video plays:
 }
 ```
 
-With the flag off, none of these fields are emitted.
-
 ### Authorization
 
 Commands are accepted only from participants whose identity appears in
@@ -434,7 +433,8 @@ the bot by this prefix to display presentation controls.
 
 The server doesn't have the LiveKit API secret. Authentication is
 implicit: if the LiveKit connection succeeds, the token is valid
-(issued by comms-gatekeeper, verified by the LiveKit SFU). If
+(issued by comms-gatekeeper, verified by the LiveKit SFU). The server
+validates credentials by connecting through the sidecar. If the
 connection fails, the request is rejected before any file processing.
 
 ### MITM protection
@@ -455,22 +455,28 @@ proxy to protect tokens in transit.
 
 ### SSRF protection
 
-Video URLs extracted from PDF annotations are validated before
-download:
+The server validates every outbound request it makes for a
+caller-supplied URL:
 
-- Protocol must be `https://`.
-- Domain must be in the allowlist: `drive.google.com`,
-  `drive.usercontent.google.com`, `docs.google.com`,
-  `youtube.com`, `youtu.be`, `vimeo.com`.
-- DNS resolution (both A and AAAA records) is checked to block
-  private IP ranges: IPv4 loopback (127/8), RFC 1918 (10/8,
+- **Presentation file downloads:** The URL must use `https://`. The
+  host's DNS records (both A and AAAA) are resolved and checked
+  against private IP ranges: IPv4 loopback (127/8), RFC 1918 (10/8,
   172.16/12, 192.168/16), link-local (169.254/16), multicast
   (224/4), broadcast; and IPv6 loopback (::1), unique local
   (fc00::/7), link-local (fe80::/10), mapped-IPv4 (::ffff:x.x.x.x).
+  The connection uses the validated address, and each redirect (5
+  maximum) is validated the same way.
+- **Slide video links:** A link is treated as a client-played video
+  only when its domain is in the allowlist:
+  `drive.google.com`, `drive.usercontent.google.com`,
+  `docs.google.com`, `youtube.com`, `youtu.be`, `vimeo.com`. The
+  server doesn't download these videos.
 
 ### Download limits
 
-- Maximum video download size: 500 MB.
+Presentation file downloads have the following limits:
+
+- Maximum file size: 100 MB.
 - Download timeout: 60 seconds.
 
 ### Drive proxy allowlist
@@ -514,8 +520,7 @@ they must require authentication. Options include:
 ### Container hardening
 
 The Docker image is based on `node:24-trixie-slim` (Debian). Alpine
-Linux is not supported because `@livekit/rtc-node` only ships
-glibc-compatible native binaries — there is no musl build available.
+Linux is not supported.
 
 The image runs as a non-root user (`appuser:1001`) and uses Tini as
 PID 1 for proper signal handling.

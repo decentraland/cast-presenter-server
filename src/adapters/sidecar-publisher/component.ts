@@ -241,14 +241,6 @@ function createPublisher(
       await connected
     },
 
-    startPublishing: async () => undefined,
-    pushFrame: () => undefined,
-    startHeartbeat: () => undefined,
-    stopHeartbeat: () => undefined,
-    startAudioPublishing: async () => undefined,
-    pushAudioFrame: () => undefined,
-    stopAudioPublishing: async () => undefined,
-
     setDataHandler(handler: (data: Record<string, unknown>, senderIdentity: string) => void): void {
       dataHandler = handler
     },

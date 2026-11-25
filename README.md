@@ -1,17 +1,17 @@
 # Cast Presenter Server
 
 Real-time presentation streaming server for Decentraland. It accepts
-PDF and PPTX uploads, renders slides as video frames, and publishes
-them to a LiveKit room. Participants in the room see the presentation
-as a live video track and can control it through data channel commands.
+PDF and PPTX uploads, renders slides as PNG images, and a per-session
+sidecar publishes the presentation to a LiveKit room. Clients draw the
+slides and can control the presentation through data channel commands.
 
 ## Features
 
-
-- **Slide streaming:** Renders PDF/PPTX slides server-side and
-  publishes them as an H.264 video track via LiveKit.
-- **Embedded video playback:** Detects video annotations in PDFs and
-  composites them onto the slide using ffmpeg.
+- **Slide rendering:** Renders PDF/PPTX slides to PNG images in a
+  per-session child process and serves them to clients.
+- **Embedded video playback:** Bakes videos embedded in PPTX files with
+  ffmpeg and publishes them through the sidecar; clients play
+  YouTube, Google Drive and Vimeo links themselves.
 - **Data channel control:** Participants with the right role can
   navigate slides, play/pause videos, and stop the presentation
   through LiveKit data channels.
@@ -27,14 +27,16 @@ This service interacts with the following:
 - **[comms-gatekeeper](https://github.com/decentraland/comms-gatekeeper):**
   Issues LiveKit bot tokens that this server uses to join rooms.
   Also manages presenter role promotion (planned).
-- **LiveKit:** WebRTC SFU that this server connects to as a
-  publishing participant.
+- **LiveKit:** WebRTC SFU that the per-session Go sidecar connects to
+  as a publishing participant.
 - **Google Drive:** Public files are proxied through the
   `/api/drive-video` endpoint for embedded video playback.
 
 External runtime dependencies:
 
-- **ffmpeg:** Required for video transcoding and slide compositing.
+- **ffmpeg:** Required for video transcoding.
+- **cast-sidecar:** Go binary that talks to LiveKit; see the
+  Local runs note in [AGENTS.md](AGENTS.md#gotchas) for how to build it.
 - **Node.js 24:** Runtime environment.
 
 ## API documentation
@@ -59,8 +61,7 @@ installed:
 - **Yarn:** Version 1.22.x or higher
 - **ffmpeg:** Required for video processing
 - **Docker:** For containerized deployment (optional). The image uses
-  `node:24-trixie-slim` (Debian) because `@livekit/rtc-node` does not
-  publish musl binaries for Alpine Linux.
+  `node:24-trixie-slim` (Debian).
 
 ### Installation
 
@@ -88,7 +89,8 @@ yarn build
 The service uses environment variables for configuration. Create a
 `.env` file in the root directory using `.env.default` as a reference.
 All available variables and their defaults are documented in
-`.env.default`.
+`.env.default`. `PUBLIC_BASE_URL` is required, and `SIDECAR_BINARY_PATH`
+must point to a built `cast-sidecar` binary.
 
 ### Running the service
 

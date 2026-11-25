@@ -1,4 +1,4 @@
-/** Presentation data-channel codec and presenter parsing shared by the rtc-node and sidecar publishers. */
+/** Presentation data-channel codec and presenter parsing used by the sidecar publisher. */
 import { Packet } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 
 const PROTOCOL_VERSION = 100

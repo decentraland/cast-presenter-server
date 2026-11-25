@@ -173,10 +173,8 @@ paths:
       tags: [Presentations]
       summary: Fetch a slide image
       description: |
-        Returns the PNG of a recently shown slide. Slides are cached
-        only for sessions with client composition on, so for other
-        sessions every request returns 404. Clients read the URL from `slide.url`
-        in the presentation state. Each session keeps the last 8 slides.
+        Returns the PNG of a recently shown slide. Clients read the URL
+        from `slide.url` in the presentation state. Each session keeps the last 8 slides.
         Unauthenticated: the content hash is the capability, so the
         response is `private` and shared caches never store it.
       parameters:
@@ -344,9 +342,7 @@ components:
         slide:
           type: object
           description: >
-            Present only when client composition is on for the session,
-            and its presence marks the v2 protocol. The current slide image and
-            its render size in pixels.
+            The current slide image and its render size in pixels.
           properties:
             url:
               type: string
@@ -360,20 +356,20 @@ components:
           type: string
           nullable: true
           description: >
-            Present only when client composition is on. Identity
+            Identity
             of the participant who started the presentation, or null.
         playingVideoIndex:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Index
+            Index
             into `slideVideos` while `videoState` is `loading`,
             `playing` or `paused`; otherwise null.
         videoPositionMs:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Position
+            Position
             in milliseconds of the playing or paused `client` video at
             `videoPositionAt`; otherwise null. Clients target
             `videoPositionMs + (now - videoPositionAt)` while playing and
@@ -382,7 +378,7 @@ components:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Server
+            Server
             epoch milliseconds at which the playing or paused `client`
             video was at `videoPositionMs`; otherwise null. Changes only
             on play, resume and pause.
@@ -429,7 +425,7 @@ components:
           type: string
           enum: [client, stream]
           description: >
-            Present only when client composition is on. `client`
+            `client`
             for YouTube, Google Drive and Vimeo `.m3u8` links that clients
             play from `url`; `stream` for embedded PPTX videos the sidecar
             publishes on `presentation-video` and `presentation-audio`,

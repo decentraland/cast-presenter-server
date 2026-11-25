@@ -1,5 +1,10 @@
 import type { IBaseComponent } from '@well-known-components/interfaces'
-import type { SlideVideoInfo } from '../video-compositor/types'
+
+/** Video annotation geometry from a slide. */
+export interface SlideVideoInfo {
+  url: string
+  geometry: { x: number; y: number; width: number; height: number }
+}
 
 /** RGBA frame buffer with dimensions. */
 export interface RenderResult {

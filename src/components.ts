@@ -1,6 +1,5 @@
 import { createDotEnvConfigComponent } from '@well-known-components/env-config-provider'
 import { createLogComponent } from '@well-known-components/logger'
-import { ApplicationName, createFeaturesComponent } from '@dcl/features-component'
 import { Verbosity, instrumentHttpServerWithRequestLogger } from '@dcl/http-requests-logger-component'
 import {
   createServerComponent,
@@ -13,12 +12,9 @@ import { createTracedFetcherComponent } from '@dcl/traced-fetch-component'
 import { createTracerComponent } from '@dcl/tracer-component'
 import { createFileProviderComponent } from './adapters/file-provider'
 import { createGoogleDriveComponent } from './adapters/google-drive'
-import { createLiveKitPublisherComponent } from './adapters/livekit-publisher'
 import { createMediaEncoderComponent } from './adapters/media-encoder'
-import { createPdfRendererComponent } from './adapters/pdf-renderer'
-import { createPptxRendererComponent } from './adapters/pptx-renderer'
 import { createSidecarPublisherComponent } from './adapters/sidecar-publisher'
-import { createVideoCompositorComponent } from './adapters/video-compositor'
+import { createSlideRendererComponent } from './adapters/slide-renderer'
 import { createVideoDurationComponent } from './adapters/video-duration'
 import { createNetworkValidatorComponent } from './logic/network-validator'
 import { createPresentationManager } from './logic/presentation-manager'
@@ -32,11 +28,6 @@ export async function initComponents(): Promise<AppComponents> {
   const tracer = await createTracerComponent()
   const fetcher = await createTracedFetcherComponent({ tracer })
   const logs = await createLogComponent({ metrics, tracer })
-  const features = await createFeaturesComponent(
-    { config, logs, fetch: fetcher },
-    (await config.getString('PUBLIC_BASE_URL')) ?? '',
-    { apps: [ApplicationName.DAPPS] }
-  )
   const server = await createServerComponent<GlobalContext>(
     { config, logs },
     {
@@ -73,30 +64,21 @@ export async function initComponents(): Promise<AppComponents> {
 
   await instrumentHttpServerWithPromClientRegistry({ metrics, server, config, registry: metrics.registry })
 
-  // Logic components
   const networkValidator = createNetworkValidatorComponent()
 
-  // Adapter components
   const googleDrive = await createGoogleDriveComponent({ config, fetcher })
   const fileProvider = createFileProviderComponent({ logs, networkValidator })
 
-  const liveKitPublisher = createLiveKitPublisherComponent()
-  const pdfRenderer = createPdfRendererComponent()
-  const pptxRenderer = createPptxRendererComponent()
-  const videoCompositor = createVideoCompositorComponent({ networkValidator })
+  const slideRenderer = createSlideRendererComponent()
   const sidecarPublisher = await createSidecarPublisherComponent({ config })
   const mediaEncoder = await createMediaEncoderComponent({ logs })
   const videoDuration = await createVideoDurationComponent({ fetcher, logs })
 
   const presentationManager = await createPresentationManager({
     config,
-    features,
     logs,
     metrics,
-    liveKitPublisher,
-    pdfRenderer,
-    pptxRenderer,
-    videoCompositor,
+    slideRenderer,
     sidecarPublisher,
     mediaEncoder,
     videoDuration
@@ -104,7 +86,6 @@ export async function initComponents(): Promise<AppComponents> {
 
   return {
     fetcher,
-    features,
     config,
     logs,
     server,
@@ -113,10 +94,7 @@ export async function initComponents(): Promise<AppComponents> {
     presentationManager,
     googleDrive,
     fileProvider,
-    liveKitPublisher,
-    pdfRenderer,
-    pptxRenderer,
-    videoCompositor,
+    slideRenderer,
     sidecarPublisher,
     mediaEncoder,
     videoDuration,
