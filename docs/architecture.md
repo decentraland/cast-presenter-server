@@ -92,14 +92,14 @@ The server is built with the well-known-components pattern.
 Each component is created during initialization and injected into
 handlers.
 
-| Component             | Purpose                                             |
-| --------------------- | --------------------------------------------------- |
-| `config`              | Environment variable resolution with fallback chain |
-| `logs`                | Structured JSON logging with tracing                |
-| `server`              | HTTP server with CORS and security headers          |
-| `metrics`             | Prometheus metrics registry                         |
-| `fetcher`             | Traced HTTP client for outbound requests            |
-| `presentationManager` | Core business logic and session management          |
+| Component | Purpose |
+|-----------|---------|
+| `config` | Environment variable resolution with fallback chain |
+| `logs` | Structured JSON logging with tracing |
+| `server` | HTTP server with CORS and security headers |
+| `metrics` | Prometheus metrics registry |
+| `fetcher` | Traced HTTP client for outbound requests |
+| `presentationManager` | Core business logic and session management |
 
 ### Adapters
 
@@ -133,11 +133,18 @@ The server creates one temporary directory per renderer and forks the
 child with `TMPDIR` pointing at it, so the PNGs and any embedded media
 the child extracts land there. Over IPC, the server sends one request
 with the document. The child replies with the slide count, then
-renders the slides in order and sends one message per slide with its
-hash, size, videos and embedded media directory. The PNG bytes stay on
-disk as `<index>.png`. A slide that fails sends an error, and the
-child carries on with the next one. A slide requested before the child
-reaches it waits its turn.
+renders the slides in order and sends one report per slide with its
+image (hash and size), its videos and the embedded media directory.
+The PNG bytes stay on disk as `<index>.png`. A slide's image and its
+videos succeed or fail independently, so a slide whose image fails
+still reports its videos, and the child carries on with the next
+slide. A slide requested before the child reaches it waits its turn.
+
+The child bounds what one deck can write. A deck with more than 500
+slides is rejected before any slide renders, and the create endpoint
+returns 400. A deck may write up to 500 MB of PNGs: once the next
+image would exceed that, it and every later slide image fail with
+`SlideRenderError`, and the slides already written keep working.
 
 If the child exits before reporting a slide, that slide and every
 later unreported one fail with `SlideRenderError`, which the create
@@ -526,7 +533,6 @@ the data channel the single control plane.
 **Re-adding HTTP control in the future:** If HTTP endpoints are
 needed again (for example, for a webapp without LiveKit access),
 they must require authentication. Options include:
-
 - A session token returned at creation time (only the creator has
   it), sent as a `Bearer` header on control requests.
 - Signed-fetch using the caller's wallet identity, checked against

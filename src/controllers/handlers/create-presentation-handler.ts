@@ -1,7 +1,7 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { DownloadError, FileTooLargeError, InvalidUrlError, MissingFileError } from '../../adapters/file-provider'
-import { SlideRenderError } from '../../adapters/renderer'
+import { SlideRenderError, TooManySlidesError } from '../../adapters/renderer'
 import { errorMessage } from '../../logic/error-message'
 import { getFileTypeFromName, sanitizeFilename, validateMagicBytes } from '../../logic/file-validator'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError } from '../../logic/presentation-manager'
@@ -153,7 +153,12 @@ export async function createPresentationHandler(
 
     return { status: 201, body: info }
   } catch (error) {
-    if (error instanceof ValidationError || error instanceof InvalidUrlError || error instanceof MissingFileError) {
+    if (
+      error instanceof ValidationError ||
+      error instanceof InvalidUrlError ||
+      error instanceof MissingFileError ||
+      error instanceof TooManySlidesError
+    ) {
       return { status: 400, body: { error: error.message } }
     }
     if (error instanceof DownloadError) {

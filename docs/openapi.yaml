@@ -135,7 +135,8 @@ paths:
         "400":
           description: >
             Invalid content type, missing fields, invalid LiveKit URL,
-            bad file magic bytes, or unsupported file type.
+            bad file magic bytes, unsupported file type, or a presentation
+            with more than 500 slides.
           content:
             application/json:
               schema:

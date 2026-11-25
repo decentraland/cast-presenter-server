@@ -1,9 +1,9 @@
 import { type ChildProcess, fork } from 'child_process'
 import { once } from 'events'
-import { existsSync, readFileSync } from 'fs'
+import fs, { existsSync, readFileSync } from 'fs'
 import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
-import { SlideRenderError } from '../../src/adapters/renderer/errors'
+import { SlideRenderError, TooManySlidesError } from '../../src/adapters/renderer/errors'
 import { createSlideRendererComponent } from '../../src/adapters/slide-renderer'
 import { buildPptx, ellipseSlide, embeddedVideoSlide } from '../helpers/build-pptx'
 import { createLoggerMock } from '../mocks/context'
@@ -19,7 +19,7 @@ jest.mock('child_process', () => {
 
 jest.setTimeout(60_000)
 
-const SCRIPTED_WORKER = path.join(__dirname, '../fixtures/slide-renderer/aborting-worker.ts')
+const SCRIPTED_WORKER = path.join(__dirname, '../fixtures/slide-renderer/scripted-worker.ts')
 const PDF_FIXTURE = path.join(__dirname, '../fixtures/pdf/ccitt-black.pdf')
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -37,6 +37,7 @@ interface RenderProcess {
   renderer: ISlideRenderer
   child: ChildProcess
   closed: Promise<unknown>
+  renderDir: string
 }
 
 function startRenderer(fileType: FileType, workerPath?: string): RenderProcess {
@@ -44,7 +45,8 @@ function startRenderer(fileType: FileType, workerPath?: string): RenderProcess {
     fileType
   )
   const child: ChildProcess = jest.mocked(fork).mock.results[0].value
-  return { renderer, child, closed: once(child, 'close') }
+  const renderDir = String(jest.mocked(fork).mock.calls[0][2]?.env?.TMPDIR)
+  return { renderer, child, closed: once(child, 'close'), renderDir }
 }
 
 function isPng(image: SlideImage): boolean {
@@ -104,7 +106,7 @@ describe('when a deck finishes rendering through the render process', () => {
   })
 })
 
-describe('when the render process aborts after reporting the first slide', () => {
+describe('when the render process is killed after reporting the first slide', () => {
   let renderProcess: RenderProcess
   let firstImage: SlideImage
   let secondError: unknown
@@ -112,7 +114,7 @@ describe('when the render process aborts after reporting the first slide', () =>
   beforeEach(async () => {
     renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
     const { renderer } = renderProcess
-    await renderer.initialize(Buffer.from('abort-after-first'))
+    await renderer.initialize(Buffer.from('kill-after-first'))
     firstImage = await renderer.renderSlide(0)
     secondError = await renderer.renderSlide(1).catch((error: unknown) => error)
     await renderProcess.closed
@@ -131,7 +133,7 @@ describe('when the render process aborts after reporting the first slide', () =>
   })
 
   it('should warn once with the exit signal and the number of unrendered slides', () => {
-    expect(logger.warn.mock.calls).toEqual([[expect.any(String), { exit: 'SIGABRT', unrenderedSlides: 1 }]])
+    expect(logger.warn.mock.calls).toEqual([[expect.any(String), { exit: 'SIGKILL', unrenderedSlides: 1 }]])
   })
 
   describe('and the unreported slide videos are requested afterwards', () => {
@@ -159,16 +161,18 @@ describe('when the render process aborts after reporting the first slide', () =>
   })
 })
 
-describe('when the first slide fails to render', () => {
+describe('when the first slide image fails to render', () => {
   let renderProcess: RenderProcess
   let firstError: unknown
+  let firstVideos: SlideVideoInfo[]
   let secondImage: SlideImage
 
   beforeEach(async () => {
     renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
     const { renderer } = renderProcess
-    await renderer.initialize(Buffer.from('fail-first'))
+    await renderer.initialize(Buffer.from('fail-first-image'))
     firstError = await renderer.renderSlide(0).catch((error: unknown) => error)
+    firstVideos = await renderer.getSlideVideos(0)
     secondImage = await renderer.renderSlide(1)
     await renderProcess.closed
   })
@@ -179,6 +183,10 @@ describe('when the first slide fails to render', () => {
 
   it('should reject the failed slide with a SlideRenderError', () => {
     expect(firstError).toBeInstanceOf(SlideRenderError)
+  })
+
+  it('should still report the videos of the failed slide', () => {
+    expect(firstVideos.map((video) => video.url)).toEqual(['https://example.com/video.mp4'])
   })
 
   it('should still render the following slide', () => {
@@ -221,6 +229,112 @@ describe('when the renderer is destroyed while the deck is rendering', () => {
   })
 })
 
+describe('when the document cannot be loaded', () => {
+  let renderProcess: RenderProcess
+  let initializeError: unknown
+
+  beforeEach(async () => {
+    renderProcess = startRenderer('pdf')
+    initializeError = await renderProcess.renderer.initialize(Buffer.from('not a pdf')).catch((error: unknown) => error)
+    await renderProcess.closed
+  })
+
+  afterEach(() => {
+    renderProcess.renderer.destroy()
+  })
+
+  it('should reject the initialization', () => {
+    expect(initializeError).toBeInstanceOf(Error)
+  })
+
+  it('should not warn about the render process exit', () => {
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('when the render process dies before reporting the slide count', () => {
+  let renderProcess: RenderProcess
+  let initializeError: unknown
+
+  beforeEach(async () => {
+    renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
+    initializeError = await renderProcess.renderer
+      .initialize(Buffer.from('die-before-deck'))
+      .catch((error: unknown) => error)
+    await renderProcess.closed
+  })
+
+  afterEach(() => {
+    renderProcess.renderer.destroy()
+  })
+
+  it('should reject the initialization with a SlideRenderError', () => {
+    expect(initializeError).toBeInstanceOf(SlideRenderError)
+  })
+
+  it('should warn that an unknown number of slides was left unrendered', () => {
+    expect(logger.warn.mock.calls).toEqual([[expect.any(String), { exit: 'SIGKILL', unrenderedSlides: 'unknown' }]])
+  })
+})
+
+describe('when the deck has more slides than the render process accepts', () => {
+  let renderProcess: RenderProcess
+  let initializeError: unknown
+
+  beforeEach(async () => {
+    renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
+    initializeError = await renderProcess.renderer
+      .initialize(Buffer.from('too-many-slides'))
+      .catch((error: unknown) => error)
+    await renderProcess.closed
+  })
+
+  afterEach(() => {
+    renderProcess.renderer.destroy()
+  })
+
+  it('should reject the initialization with a TooManySlidesError', () => {
+    expect(initializeError).toEqual(new TooManySlidesError(501, 500))
+  })
+
+  it('should not warn about the render process exit', () => {
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('when the render directory cannot be removed', () => {
+  let renderProcess: RenderProcess
+  let rmSync: jest.SpyInstance
+
+  beforeEach(async () => {
+    renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
+    await renderProcess.renderer.initialize(Buffer.from('extract-then-hang'))
+    await renderProcess.renderer.renderSlide(0)
+    rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(() => {
+      throw Object.assign(new Error('Directory busy'), { code: 'EBUSY' })
+    })
+  })
+
+  afterEach(() => {
+    rmSync.mockRestore()
+    fs.rmSync(renderProcess.renderDir, { recursive: true, force: true })
+  })
+
+  describe('and the renderer is destroyed while the deck is rendering', () => {
+    beforeEach(async () => {
+      renderProcess.renderer.destroy()
+      await renderProcess.closed
+    })
+
+    it('should warn on destroy and again once the process has closed', () => {
+      expect(logger.warn.mock.calls).toEqual([
+        [expect.stringContaining('Directory busy'), { dir: renderProcess.renderDir }],
+        [expect.stringContaining('Directory busy'), { dir: renderProcess.renderDir }]
+      ])
+    })
+  })
+})
+
 describe('when rendering a PDF through the render process', () => {
   let renderProcess: RenderProcess
   let image: SlideImage
@@ -241,6 +355,16 @@ describe('when rendering a PDF through the render process', () => {
 
   it('should return the slide as a PNG buffer', () => {
     expect(Buffer.isBuffer(image.png) && isPng(image)).toBe(true)
+  })
+
+  describe('and the renderer is destroyed', () => {
+    beforeEach(() => {
+      renderProcess.renderer.destroy()
+    })
+
+    it('should remove the render directory', () => {
+      expect(existsSync(renderProcess.renderDir)).toBe(false)
+    })
   })
 })
 

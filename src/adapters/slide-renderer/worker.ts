@@ -6,7 +6,13 @@ import { createPdfRendererComponent } from '../pdf-renderer'
 import { createPptxRendererComponent } from '../pptx-renderer'
 import { SlideRenderError } from '../renderer/errors'
 import type { FileType } from '../../logic/file-validator'
-import type { IRenderer, IRendererComponent, SlideVideoInfo } from '../renderer/types'
+import type { IRendererComponent, SlideVideoInfo } from '../renderer/types'
+
+/** Largest deck the render process accepts. */
+export const MAX_SLIDES = 500
+
+/** Total PNG bytes one deck may write. */
+export const MAX_DECK_PNG_BYTES = 500 * 1024 * 1024
 
 /** The single request the server sends its render process. */
 export interface WorkerRequest {
@@ -15,63 +21,98 @@ export interface WorkerRequest {
   outputDir: string
 }
 
-/** A slide written to `<outputDir>/<index>.png`. */
-export interface RenderedSlide {
-  type: 'slide'
-  index: number
+interface Failure {
+  error: string
+}
+
+/** Image written to `<outputDir>/<index>.png`. */
+export interface SlideImageInfo {
   hash: string
   width: number
   height: number
-  videos: SlideVideoInfo[]
+}
+
+/** The outcome of one slide; its image and its videos succeed or fail independently. */
+export interface SlideReport {
+  type: 'slide'
+  index: number
+  image: SlideImageInfo | Failure
+  videos: SlideVideoInfo[] | Failure
   embeddedMediaDir: string | null
 }
 
-/** Messages the render process streams back: the slide count, then one message per slide in order. */
+/** Messages the render process streams back: the slide count, then one report per slide in order. */
 export type WorkerMessage =
   | { type: 'deck'; slideCount: number }
   | { type: 'deckFailed'; error: string }
-  | RenderedSlide
-  | { type: 'slideFailed'; index: number; error: string }
+  | { type: 'tooManySlides'; slideCount: number; maxSlides: number }
+  | SlideReport
 
 const RENDERER_FACTORIES: Record<FileType, () => IRendererComponent> = {
   pdf: createPdfRendererComponent,
   pptx: createPptxRendererComponent
 }
 
-function send(message: WorkerMessage): Promise<void> {
+function failure(error: unknown): Failure {
+  return { error: errorMessage(error instanceof SlideRenderError ? error.cause : error) }
+}
+
+/**
+ * Loads a deck and writes its slides as PNGs, reporting each step through `send`.
+ *
+ * @param request - The document and the directory to write PNGs into
+ * @param send - Delivers one message to the server
+ * @param maxPngBytes - PNG bytes the deck may write before the remaining slide images fail
+ * @throws When `send` fails after the slide count was reported
+ */
+export async function renderDeck(
+  { fileType, buffer, outputDir }: WorkerRequest,
+  send: (message: WorkerMessage) => Promise<void>,
+  maxPngBytes = MAX_DECK_PNG_BYTES
+): Promise<void> {
+  const renderer = RENDERER_FACTORIES[fileType]().createRenderer()
+  let slideCount: number
+  try {
+    await renderer.initialize(Buffer.from(buffer))
+    slideCount = renderer.getSlideCount()
+  } catch (error) {
+    return send({ type: 'deckFailed', error: errorMessage(error) })
+  }
+  if (slideCount > MAX_SLIDES) return send({ type: 'tooManySlides', slideCount, maxSlides: MAX_SLIDES })
+  await send({ type: 'deck', slideCount })
+
+  const overBudget = new Error(`Deck exceeds ${maxPngBytes} bytes of slide images`)
+  let pngBytes = 0
+  let budgetExceeded = false
+
+  async function writeImage(index: number): Promise<SlideImageInfo> {
+    if (budgetExceeded) throw overBudget
+    const { buffer: rgba, width, height } = await renderer.renderSlide(index)
+    const { png, hash } = await encodeSlidePng(rgba, width, height)
+    budgetExceeded = pngBytes + png.length > maxPngBytes
+    if (budgetExceeded) throw overBudget
+    pngBytes += png.length
+    await writeFile(path.join(outputDir, `${index}.png`), png)
+    return { hash, width, height }
+  }
+
+  for (let index = 0; index < slideCount; index++) {
+    const image = await writeImage(index).catch(failure)
+    const videos = await renderer.getSlideVideos(index).catch(failure)
+    await send({ type: 'slide', index, image, videos, embeddedMediaDir: renderer.getEmbeddedMediaDir() })
+  }
+}
+
+function sendToServer(message: WorkerMessage): Promise<void> {
   return new Promise((resolve, reject) =>
     process.send?.(message, undefined, undefined, (error: Error | null) => (error ? reject(error) : resolve()))
   )
 }
 
-async function renderSlide(renderer: IRenderer, index: number, outputDir: string): Promise<RenderedSlide> {
-  const { buffer, width, height } = await renderer.renderSlide(index)
-  const { png, hash } = await encodeSlidePng(buffer, width, height)
-  await writeFile(path.join(outputDir, `${index}.png`), png)
-  const videos = await renderer.getSlideVideos(index)
-  return { type: 'slide', index, hash, width, height, videos, embeddedMediaDir: renderer.getEmbeddedMediaDir() }
+if (require.main === module) {
+  process.once('message', (request: WorkerRequest) => {
+    renderDeck(request, sendToServer)
+      .catch((error: unknown) => process.stderr.write(`Slide render process failed: ${errorMessage(error)}\n`))
+      .finally(() => process.exit())
+  })
 }
-
-async function renderDeck({ fileType, buffer, outputDir }: WorkerRequest): Promise<void> {
-  const renderer = RENDERER_FACTORIES[fileType]().createRenderer()
-  await renderer.initialize(Buffer.from(buffer))
-  const slideCount = renderer.getSlideCount()
-  await send({ type: 'deck', slideCount })
-  for (let index = 0; index < slideCount; index++) {
-    await send(
-      await renderSlide(renderer, index, outputDir).catch(
-        (error: unknown): WorkerMessage => ({
-          type: 'slideFailed',
-          index,
-          error: errorMessage(error instanceof SlideRenderError ? error.cause : error)
-        })
-      )
-    )
-  }
-}
-
-process.once('message', (request: WorkerRequest) => {
-  renderDeck(request)
-    .catch((error: unknown) => send({ type: 'deckFailed', error: errorMessage(error) }))
-    .finally(() => process.exit())
-})
