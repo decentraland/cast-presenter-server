@@ -3,6 +3,7 @@ import { LivekitConnectError } from '../../src/adapters/sidecar-publisher/errors
 import { DEFAULT_OVERLAY_LAYOUT } from '../../src/logic/overlay-layout'
 import {
   InvalidLivekitCredentialsError,
+  MaxConcurrentPresentationsError,
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
@@ -190,10 +191,161 @@ describe('when pre-validating LiveKit credentials', () => {
       expect(publisher.disconnect).toHaveBeenCalled()
     })
   })
+
+  describe('and as many validations as MAX_CONCURRENT_PRESENTATIONS are still connecting', () => {
+    let manager: IPresentationManager
+    let firstConnect: ReturnType<typeof createDeferred<void>>
+    let secondConnect: ReturnType<typeof createDeferred<void>>
+    let firstValidation: Promise<unknown>
+    let secondValidation: Promise<unknown>
+
+    function validate(): Promise<unknown> {
+      return manager.validateCredentials('wss://lk.example.com', 'token').catch((err: unknown) => err)
+    }
+
+    beforeEach(async () => {
+      firstConnect = createDeferred<void>()
+      secondConnect = createDeferred<void>()
+      publisher = createMockPublisher()
+      publisher.connect.mockReturnValueOnce(firstConnect.promise).mockReturnValueOnce(secondConnect.promise)
+      components = createMockComponents({ publisher })
+      components.config.getString.mockImplementation(async (key: string) =>
+        key === 'MAX_CONCURRENT_PRESENTATIONS' ? '2' : key === 'PUBLIC_BASE_URL' ? PUBLIC_BASE_URL : undefined
+      )
+      manager = await createManager(components)
+      firstValidation = validate()
+      secondValidation = validate()
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      firstConnect.resolve()
+      secondConnect.resolve()
+      await Promise.all([firstValidation, secondValidation])
+    })
+
+    describe('and another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        outcome = await validate()
+      })
+
+      it('should reject it with MaxConcurrentPresentationsError', () => {
+        expect(outcome).toBeInstanceOf(MaxConcurrentPresentationsError)
+      })
+
+      it('should not spawn another sidecar for it', () => {
+        expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledTimes(2)
+      })
+    })
+
+    describe('and one of them is accepted before another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        firstConnect.resolve()
+        await firstValidation
+        outcome = await validate()
+      })
+
+      it('should accept the new validation', () => {
+        expect(outcome).toBeUndefined()
+      })
+    })
+
+    describe('and one of them is rejected before another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        firstConnect.reject(new LivekitConnectError('LiveKit connect failed: token rejected'))
+        await firstValidation
+        outcome = await validate()
+      })
+
+      it('should accept the new validation', () => {
+        expect(outcome).toBeUndefined()
+      })
+    })
+  })
+
+  describe('and MAX_CONCURRENT_PRESENTATIONS is 0 with many validations still connecting', () => {
+    let connect: ReturnType<typeof createDeferred<void>>
+    let pending: Promise<unknown[]>
+
+    beforeEach(async () => {
+      connect = createDeferred<void>()
+      publisher = createMockPublisher()
+      publisher.connect.mockReturnValue(connect.promise)
+      components = createMockComponents({ publisher })
+      components.config.getString.mockImplementation(async (key: string) =>
+        key === 'MAX_CONCURRENT_PRESENTATIONS' ? '0' : key === 'PUBLIC_BASE_URL' ? PUBLIC_BASE_URL : undefined
+      )
+      const manager = await createManager(components)
+      pending = Promise.all(
+        Array.from({ length: 12 }, () =>
+          manager.validateCredentials('wss://lk.example.com', 'token').catch((err: unknown) => err)
+        )
+      )
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      connect.resolve()
+      await pending
+    })
+
+    it('should spawn a sidecar for every validation', () => {
+      expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledTimes(12)
+    })
+  })
 })
 
 describe('when creating a presentation', () => {
   let components: ReturnType<typeof createMockComponents>
+
+  describe('and the first slide render fails and destroying the renderer throws', () => {
+    let publisher: jest.Mocked<ISidecarPublisher>
+    let manager: IPresentationManager
+    let outcome: unknown
+
+    beforeEach(async () => {
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      const renderer = createMockRenderer()
+      renderer.renderSlide.mockRejectedValue(new Error('render failed'))
+      renderer.destroy.mockImplementation(() => {
+        throw new Error('destroy failed')
+      })
+      components.slideRenderer.createRenderer.mockReturnValue(renderer)
+      manager = await createManager(components)
+    })
+
+    describe('and the sidecar disconnects', () => {
+      beforeEach(async () => {
+        outcome = await createPdfSession(manager).catch((err: unknown) => err)
+      })
+
+      it('should still disconnect the sidecar', () => {
+        expect(publisher.disconnect).toHaveBeenCalled()
+      })
+
+      it('should reject with the render error', () => {
+        expect(outcome).toEqual(new Error('render failed'))
+      })
+    })
+
+    describe('and disconnecting the sidecar throws too', () => {
+      beforeEach(async () => {
+        publisher.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+        outcome = await createPdfSession(manager).catch((err: unknown) => err)
+      })
+
+      it('should reject with the render error', () => {
+        expect(outcome).toEqual(new Error('render failed'))
+      })
+    })
+  })
 
   describe('and the PDF has zero pages', () => {
     beforeEach(() => {

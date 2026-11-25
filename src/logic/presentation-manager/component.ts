@@ -214,6 +214,7 @@ export async function createPresentationManager(
 
   const sessions = new Map<string, InternalSession>()
   let inFlightCreations = 0
+  let inFlightValidations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
 
   async function cleanupIdleSessions(): Promise<void> {
@@ -235,14 +236,20 @@ export async function createPresentationManager(
   }
 
   async function validateCredentials(livekitUrl: string, livekitToken: string): Promise<void> {
-    const publisher = sidecarPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
+    if (inFlightValidations >= maxConcurrent) {
+      throw new MaxConcurrentPresentationsError(maxConcurrent)
+    }
+    inFlightValidations++
+    let publisher: ISidecarPublisher | null = null
     try {
+      publisher = sidecarPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
       await publisher.connect(livekitUrl, livekitToken)
     } catch (err) {
       if (err instanceof LivekitConnectError) throw new InvalidLivekitCredentialsError(errorMessage(err))
       throw err
     } finally {
-      await publisher.disconnect().catch(() => undefined)
+      await publisher?.disconnect().catch(() => undefined)
+      inFlightValidations--
     }
   }
 
@@ -449,9 +456,17 @@ export async function createPresentationManager(
         removeTempDir(tempDir)
       }
       if (renderer) {
-        renderer.destroy()
+        try {
+          renderer.destroy()
+        } catch (destroyErr) {
+          logger.warn(`Failed to destroy renderer: ${errorMessage(destroyErr)}`)
+        }
       }
-      await sidecar.disconnect()
+      try {
+        await sidecar.disconnect()
+      } catch (disconnectErr) {
+        logger.warn(`Failed to disconnect publisher: ${errorMessage(disconnectErr)}`)
+      }
       throw err
     } finally {
       inFlightCreations--

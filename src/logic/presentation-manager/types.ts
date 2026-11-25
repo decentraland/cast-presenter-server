@@ -74,6 +74,7 @@ export interface IPresentationManager extends IBaseComponent {
    * running expensive work (e.g. downloading a user-supplied URL).
    *
    * @throws {InvalidLivekitCredentialsError} When the token is rejected by the room
+   * @throws {MaxConcurrentPresentationsError} When too many credential checks are already in flight
    */
   validateCredentials(livekitUrl: string, livekitToken: string): Promise<void>
 
