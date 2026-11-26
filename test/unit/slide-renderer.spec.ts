@@ -5,10 +5,11 @@ import * as path from 'path'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { SlideRenderError, TooManySlidesError } from '../../src/adapters/renderer/errors'
 import { createSlideRendererComponent } from '../../src/adapters/slide-renderer'
+import { MAX_SERVER_PNG_BYTES } from '../../src/adapters/slide-renderer/component'
 import { buildPptx, ellipseSlide, embeddedVideoSlide } from '../helpers/build-pptx'
 import { createLoggerMock } from '../mocks/context'
 import type { SlideVideoInfo } from '../../src/adapters/renderer/types'
-import type { ISlideRenderer } from '../../src/adapters/slide-renderer/types'
+import type { ISlideRenderer, ISlideRendererComponent } from '../../src/adapters/slide-renderer/types'
 import type { FileType } from '../../src/logic/file-validator'
 import type { SlideImage } from '../../src/logic/slide-image'
 
@@ -21,6 +22,7 @@ jest.setTimeout(60_000)
 
 const SCRIPTED_WORKER = path.join(__dirname, '../fixtures/slide-renderer/scripted-worker.ts')
 const PDF_FIXTURE = path.join(__dirname, '../fixtures/pdf/ccitt-black.pdf')
+const QUARTER_OF_SERVER_BUDGET = MAX_SERVER_PNG_BYTES / 4
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 let logger: jest.Mocked<ILoggerComponent.ILogger>
@@ -40,13 +42,31 @@ interface RenderProcess {
   renderDir: string
 }
 
+function startComponentRenderer(component: ISlideRendererComponent, fileType: FileType): RenderProcess {
+  const renderer = component.createRenderer(fileType)
+  const { calls, results } = jest.mocked(fork).mock
+  const child: ChildProcess = results[results.length - 1].value
+  const renderDir = String(calls[calls.length - 1][2]?.env?.TMPDIR)
+  return { renderer, child, closed: once(child, 'close'), renderDir }
+}
+
 function startRenderer(fileType: FileType, workerPath?: string): RenderProcess {
-  const renderer = createSlideRendererComponent({ logs: { getLogger: () => logger } }, { workerPath }).createRenderer(
+  return startComponentRenderer(
+    createSlideRendererComponent({ logs: { getLogger: () => logger } }, { workerPath }),
     fileType
   )
-  const child: ChildProcess = jest.mocked(fork).mock.results[0].value
-  const renderDir = String(jest.mocked(fork).mock.calls[0][2]?.env?.TMPDIR)
-  return { renderer, child, closed: once(child, 'close'), renderDir }
+}
+
+function createScriptedComponent(): ISlideRendererComponent {
+  return createSlideRendererComponent({ logs: { getLogger: () => logger } }, { workerPath: SCRIPTED_WORKER })
+}
+
+function imageBytesScenario(slideCount: number, ending: 'exit' | 'hang'): Buffer {
+  return Buffer.from(`image-bytes:${slideCount}:${QUARTER_OF_SERVER_BUDGET}:${ending}`)
+}
+
+function renderSlides(renderer: ISlideRenderer, slideCount: number): Promise<Array<PromiseSettledResult<SlideImage>>> {
+  return Promise.allSettled(Array.from({ length: slideCount }, (_, index) => renderer.renderSlide(index)))
 }
 
 function isPng(image: SlideImage): boolean {
@@ -225,6 +245,110 @@ describe('when the deck exceeds its slide image budget', () => {
   })
 })
 
+describe('when a slide report pushes the server-wide slide image budget over its limit', () => {
+  let component: ISlideRendererComponent
+  let finished: RenderProcess
+  let crossing: RenderProcess
+  let reportedImages: SlideImage[]
+  let laterError: unknown
+
+  beforeEach(async () => {
+    component = createScriptedComponent()
+    finished = startComponentRenderer(component, 'pptx')
+    await finished.renderer.initialize(imageBytesScenario(2, 'exit'))
+    await finished.closed
+    crossing = startComponentRenderer(component, 'pptx')
+    await crossing.renderer.initialize(imageBytesScenario(4, 'hang'))
+    reportedImages = await Promise.all([0, 1, 2].map((index) => crossing.renderer.renderSlide(index)))
+    laterError = await crossing.renderer.renderSlide(3).catch((error: unknown) => error)
+    await crossing.closed
+  })
+
+  afterEach(() => {
+    finished.renderer.destroy()
+    crossing.renderer.destroy()
+  })
+
+  it('should warn once that the server-wide budget was exceeded with the slide index and the slide count', () => {
+    expect(logger.warn.mock.calls).toEqual([
+      [expect.stringContaining('server-wide slide image budget'), { index: 2, slideCount: 4 }]
+    ])
+  })
+
+  it('should kill the render process whose report crossed the limit', () => {
+    expect(crossing.child.signalCode).toBe('SIGKILL')
+  })
+
+  it('should keep serving the reported slides including the one that crossed the limit', () => {
+    expect(reportedImages.map((image) => image.png.toString())).toEqual(['png-0', 'png-1', 'png-2'])
+  })
+
+  it('should reject the unreported slide with a SlideRenderError naming the server-wide budget', () => {
+    expect(laterError).toEqual(
+      expect.objectContaining({
+        name: 'SlideRenderError',
+        message: expect.stringContaining("server's slide image budget was exceeded")
+      })
+    )
+  })
+
+  it('should not warn that the render process exited before finishing the deck', () => {
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('before finishing the deck'),
+      expect.anything()
+    )
+  })
+
+  describe('and both renderers are destroyed', () => {
+    let next: RenderProcess
+    let results: Array<PromiseSettledResult<SlideImage>>
+
+    beforeEach(async () => {
+      finished.renderer.destroy()
+      crossing.renderer.destroy()
+      next = startComponentRenderer(component, 'pptx')
+      await next.renderer.initialize(imageBytesScenario(4, 'exit'))
+      results = await renderSlides(next.renderer, 4)
+      await next.closed
+    })
+
+    afterEach(() => {
+      next.renderer.destroy()
+    })
+
+    it('should let a new renderer serve every slide up to the limit', () => {
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled'])
+    })
+  })
+})
+
+describe('when a renderer holding slide images is destroyed twice', () => {
+  let component: ISlideRendererComponent
+  let next: RenderProcess
+
+  beforeEach(async () => {
+    component = createScriptedComponent()
+    const destroyed = startComponentRenderer(component, 'pptx')
+    await destroyed.renderer.initialize(imageBytesScenario(2, 'exit'))
+    await destroyed.closed
+    destroyed.renderer.destroy()
+    destroyed.renderer.destroy()
+    next = startComponentRenderer(component, 'pptx')
+    await next.renderer.initialize(imageBytesScenario(5, 'hang'))
+    await renderSlides(next.renderer, 5)
+  })
+
+  afterEach(() => {
+    next.renderer.destroy()
+  })
+
+  it('should release its slide image bytes only once', () => {
+    expect(logger.warn.mock.calls).toEqual([
+      [expect.stringContaining('server-wide slide image budget'), { index: 4, slideCount: 5 }]
+    ])
+  })
+})
+
 describe('when the renderer is destroyed while the deck is rendering', () => {
   let renderProcess: RenderProcess
   let embeddedMediaDir: string | null
@@ -354,7 +478,7 @@ describe('when the render directory cannot be removed', () => {
     })
 
     it('should warn on destroy and again once the process has closed', () => {
-      expect(logger.warn.mock.calls).toEqual([
+      expect(logger.warn.mock.calls.filter(([, context]) => context?.dir === renderProcess.renderDir)).toEqual([
         [expect.stringContaining('Directory busy'), { dir: renderProcess.renderDir }],
         [expect.stringContaining('Directory busy'), { dir: renderProcess.renderDir }]
       ])

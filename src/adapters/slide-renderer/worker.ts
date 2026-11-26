@@ -30,6 +30,7 @@ export interface SlideImageInfo {
   hash: string
   width: number
   height: number
+  bytes: number
 }
 
 /** The outcome of one slide; its image and its videos succeed or fail independently. */
@@ -99,7 +100,7 @@ export async function renderDeck(
     }
     pngBytes += png.length
     await writeFile(path.join(outputDir, `${index}.png`), png)
-    return { hash, width, height }
+    return { hash, width, height, bytes: png.length }
   }
 
   for (let index = 0; index < slideCount; index++) {

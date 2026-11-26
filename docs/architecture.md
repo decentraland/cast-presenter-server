@@ -146,7 +146,12 @@ returns 400. A deck may write up to 2 GiB of PNGs: once the next
 image would exceed that, it and every later slide image fail with a
 `SlideRenderError` that names the deck's image budget, and the slides
 already written keep working. The renderer logs one warning with the
-index of the first slide that didn't fit and the slide count.
+index of the first slide that didn't fit and the slide count. All
+renderers on the server share a 4 GiB PNG budget, counted from the
+byte size the child reports for each written image and released when
+a renderer is destroyed; the renderer whose report crosses it logs one
+warning, kills its child, and fails its unreported slides with a
+`SlideRenderError` that names the server's budget.
 
 If the child exits before reporting a slide, that slide and every
 later unreported one fail with `SlideRenderError`, which the create

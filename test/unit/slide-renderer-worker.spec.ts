@@ -48,6 +48,23 @@ describe('when the document cannot be loaded', () => {
   })
 })
 
+describe('when a slide image is written', () => {
+  let slideReport: WorkerMessage | undefined
+
+  beforeEach(async () => {
+    await renderDeck({ fileType: 'pptx', buffer: await buildPptx([ellipseSlide('0')]), outputDir }, send)
+    slideReport = messages.find((message) => message.type === 'slide')
+  })
+
+  it('should report the byte size of the written PNG on the slide image', () => {
+    expect(slideReport).toEqual(
+      expect.objectContaining({
+        image: expect.objectContaining({ bytes: statSync(path.join(outputDir, '0.png')).size })
+      })
+    )
+  })
+})
+
 describe('when the slide images exceed the deck budget', () => {
   let slideReports: WorkerMessage[]
 
