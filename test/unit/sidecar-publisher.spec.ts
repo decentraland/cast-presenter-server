@@ -4,6 +4,7 @@ import { PassThrough } from 'stream'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import { decodePresentationPacket, encodePresentationPacket } from '../../src/adapters/livekit-publisher/comms'
 import { createSidecarPublisherComponent } from '../../src/adapters/sidecar-publisher/component'
+import { LivekitConnectError } from '../../src/adapters/sidecar-publisher/errors'
 import { createLoggerMock } from '../mocks/context'
 import type { ISidecarPublisher } from '../../src/adapters/sidecar-publisher/types'
 import type { ChildProcess } from 'child_process'
@@ -128,12 +129,56 @@ describe('when using the sidecar publisher', () => {
       )
     })
 
-    it('should reject with a LiveKit connect error', () => {
+    it('should reject with a LiveKit connect error message', () => {
       expect(error.message).toMatch(/^LiveKit connect failed/)
+    })
+
+    it('should not reject with a LivekitConnectError', () => {
+      expect(error).not.toBeInstanceOf(LivekitConnectError)
     })
 
     it('should redact the token from the message', () => {
       expect(error.message).not.toContain('abc')
+    })
+  })
+
+  describe('and the sidecar answers connect-failed before ready', () => {
+    let error: Error
+
+    beforeEach(async () => {
+      const connecting = publisher.connect(LIVEKIT_URL, TOKEN)
+      await flush()
+      emit({ type: 'error', code: 'connect-failed', message: 'unauthorized access_token=abc' })
+      error = await connecting.then(
+        () => new Error('connect resolved'),
+        (err: Error) => err
+      )
+    })
+
+    it('should reject with a LivekitConnectError', () => {
+      expect(error).toBeInstanceOf(LivekitConnectError)
+    })
+
+    it('should redact the token from the message', () => {
+      expect(error.message).toBe('LiveKit connect failed: unauthorized access_token=REDACTED')
+    })
+  })
+
+  describe('and the process exits before ready without reporting an error', () => {
+    let error: Error
+
+    beforeEach(async () => {
+      const outcome = publisher.connect(LIVEKIT_URL, TOKEN).then(
+        () => new Error('connect resolved'),
+        (err: Error) => err
+      )
+      await flush()
+      fake.emit('close', 1, null)
+      error = await outcome
+    })
+
+    it('should not reject with a LivekitConnectError', () => {
+      expect(error).not.toBeInstanceOf(LivekitConnectError)
     })
   })
 
@@ -155,6 +200,10 @@ describe('when using the sidecar publisher', () => {
 
     it('should reject with the connect error the sidecar reported', () => {
       expect(error.message).toBe('LiveKit connect failed: dial: no route to host')
+    })
+
+    it('should reject with a LivekitConnectError', () => {
+      expect(error).toBeInstanceOf(LivekitConnectError)
     })
   })
 

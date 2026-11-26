@@ -5,14 +5,11 @@ import type {
   IMetricsComponent
 } from '@well-known-components/interfaces'
 import type { IFetchComponent, IHttpServerComponent } from '@dcl/core-commons'
-import type { IFeaturesComponent } from '@dcl/features-component'
 import type { IFileProviderComponent } from './adapters/file-provider'
 import type { IGoogleDriveComponent } from './adapters/google-drive'
-import type { ILiveKitPublisherComponent } from './adapters/livekit-publisher'
 import type { IMediaEncoder } from './adapters/media-encoder'
-import type { IRendererComponent } from './adapters/pdf-renderer'
 import type { ISidecarPublisherComponent } from './adapters/sidecar-publisher'
-import type { IVideoCompositorComponent } from './adapters/video-compositor'
+import type { ISlideRendererComponent } from './adapters/slide-renderer'
 import type { IVideoDurationComponent } from './adapters/video-duration'
 import type { INetworkValidatorComponent } from './logic/network-validator'
 import type { IPresentationManager } from './logic/presentation-manager'
@@ -22,21 +19,16 @@ export interface GlobalContext {
   components: BaseComponents
 }
 
-// components used in every environment
 export interface BaseComponents {
   config: IConfigComponent
   logs: ILoggerComponent
   server: IHttpServerComponent<GlobalContext>
   metrics: IMetricsComponent<keyof typeof metricDeclarations>
   fetcher: IFetchComponent
-  features: IFeaturesComponent
   presentationManager: IPresentationManager
   googleDrive: IGoogleDriveComponent
   fileProvider: IFileProviderComponent
-  liveKitPublisher: ILiveKitPublisherComponent
-  pdfRenderer: IRendererComponent
-  pptxRenderer: IRendererComponent
-  videoCompositor: IVideoCompositorComponent
+  slideRenderer: ISlideRendererComponent
   sidecarPublisher: ISidecarPublisherComponent
   mediaEncoder: IMediaEncoder
   videoDuration: IVideoDurationComponent

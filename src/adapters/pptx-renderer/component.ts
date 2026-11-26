@@ -11,8 +11,7 @@ import type { Geometry } from './parser/models/Geometry'
 import type { Shape } from './parser/models/Shape'
 import type { Slide } from './parser/models/Slide'
 import type { Fill, Stroke, TextParagraph, TextRun } from './parser/models/types'
-import type { IRenderer, IRendererComponent, RenderResult } from '../renderer/types'
-import type { SlideVideoInfo } from '../video-compositor/types'
+import type { IRenderer, IRendererComponent, RenderResult, SlideVideoInfo } from '../renderer/types'
 
 const EMOJI_FONT_FAMILY = GlobalFonts.has('Apple Color Emoji')
   ? 'Apple Color Emoji'
@@ -725,12 +724,6 @@ function createRenderer(): IRenderer {
         let url = ''
 
         if (shape.externalUrl) {
-          // Defence-in-depth: the video-compositor runs full SSRF validation
-          // (HTTPS + domain allowlist + private-IP block) on download, but a
-          // crafted PPTX can embed hyperlinks with dangerous schemes that we
-          // shouldn't even surface to callers or log. Accept only http/https
-          // here; everything else (file:, data:, javascript:, ftp:, gopher:,
-          // etc.) gets dropped silently.
           if (!/^https?:\/\//i.test(shape.externalUrl)) continue
           url = shape.externalUrl
         } else if (shape.mediaRef) {

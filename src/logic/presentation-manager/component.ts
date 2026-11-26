@@ -3,20 +3,16 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { START_COMPONENT, STOP_COMPONENT } from '@well-known-components/interfaces'
-import { ApplicationName } from '@dcl/features-component'
 import { InvalidLivekitCredentialsError, MaxConcurrentPresentationsError, PresentationNotFoundError } from './errors'
+import { LivekitConnectError } from '../../adapters/sidecar-publisher/errors'
 import { classifyClientVideo } from '../client-video'
 import { errorMessage } from '../error-message'
-import { FILE_TYPES } from '../file-validator'
 import { DEFAULT_OVERLAY_LAYOUT, parseOverlayUpdate } from '../overlay-layout'
 import { removeQuietly } from '../remove-quietly'
-import { encodeSlidePng } from '../slide-image'
 import type { IPresentationManager, PresentationInfo, PresentationSession, PresentationState } from './types'
-import type { ILiveKitPublisher } from '../../adapters/livekit-publisher/types'
 import type { BakePriority, BakeResult } from '../../adapters/media-encoder/types'
-import type { IRenderer } from '../../adapters/renderer/types'
 import type { ISidecarPublisher } from '../../adapters/sidecar-publisher/types'
-import type { CompositorErrorReason, IVideoCompositor } from '../../adapters/video-compositor/types'
+import type { ISlideRenderer } from '../../adapters/slide-renderer/types'
 import type { AppComponents } from '../../types'
 import type { ClientVideo } from '../client-video'
 import type { FileType } from '../file-validator'
@@ -29,11 +25,7 @@ const DEFAULT_MAX_CONCURRENT = 10
 const OVERLAY_BROADCAST_INTERVAL_MS = 250
 const SLIDE_IMAGE_CACHE_SIZE = 8
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
-const CLIENT_COMPOSITION_FEATURE = 'cast-client-composition'
-// Total disk a single session may consume across all its downloaded videos.
-// Per-file cap (MAX_VIDEO_DOWNLOAD_SIZE = 1 GB) is enforced inside the compositor.
-// This bound protects tempDir capacity when a deck references many videos.
-export const SESSION_DISK_QUOTA_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
+export const SESSION_DISK_QUOTA_BYTES = 2 * 1024 * 1024 * 1024
 const MAX_PRE_DOWNLOADS = 10
 
 class SessionDiskQuotaExceededError extends Error {
@@ -56,10 +48,7 @@ interface SidecarOutcome {
 }
 
 interface InternalSession extends PresentationSession {
-  renderer: IRenderer
-  publisher: ILiveKitPublisher
-  compositor: IVideoCompositor | null
-  cachedVideoPaths: Map<string, string>
+  renderer: ISlideRenderer
   navigating: boolean
   tempDir: string
   lastActivityAt: number
@@ -68,13 +57,10 @@ interface InternalSession extends PresentationSession {
   stoppingPromise: Promise<void> | null
   videoErrorReason: string | null
   videoErrorCode: VideoErrorCode | null
-  preDownloadTimer: ReturnType<typeof setTimeout> | null
   overlay: OverlayLayout
   overlayBroadcastTimer: ReturnType<typeof setTimeout> | null
   videoEndTimer: ReturnType<typeof setTimeout> | null
   abortController: AbortController
-  // Cumulative bytes written to tempDir across all downloads; enforced against
-  // SESSION_DISK_QUOTA_BYTES to bound disk usage per session.
   bytesDownloaded: number
   slideImages: Map<string, SlideImage>
   currentSlideImage: SlideImage | null
@@ -83,17 +69,11 @@ interface InternalSession extends PresentationSession {
   sidecarPlayId: number
   earlySidecarOutcome: SidecarOutcome | null
   presenterIdentity: string | null
-  sidecar: ISidecarPublisher | null
+  sidecar: ISidecarPublisher
   bakeJobs: Map<string, BakeJob>
-  clientComposition: boolean
 }
 
-/**
- * Codes for failures detected by the presentation-manager itself (download,
- * permissions, quota, etc.). Combined below with the compositor's own
- * `CompositorErrorReason` to form the union broadcast in
- * `presentation:error.code`.
- */
+/** Codes for failures detected by the presentation-manager itself; with `CompositorErrorReason` they form `presentation:error.code`. */
 type ManagerVideoErrorCode =
   | 'video-quota-exceeded'
   | 'video-permission-denied'
@@ -105,6 +85,9 @@ type ManagerVideoErrorCode =
   | 'video-invalid-format'
   | 'video-playback-failed'
 
+/** Reasons a video can stop mid-stream. */
+type CompositorErrorReason = 'video-playback-interrupted' | 'video-stream-error' | 'audio-processing-failed'
+
 export type VideoErrorCode = ManagerVideoErrorCode | CompositorErrorReason
 
 export interface VideoErrorInfo {
@@ -112,7 +95,7 @@ export interface VideoErrorInfo {
   message: string
 }
 
-/** User-facing messages for failures the compositor reports mid-stream. */
+/** User-facing messages for mid-stream video failures. */
 const COMPOSITOR_ERROR_MESSAGES: Record<CompositorErrorReason, string> = {
   'video-playback-interrupted': 'Video playback was interrupted — the stream ended unexpectedly',
   'video-stream-error': 'Video playback failed — a stream error stopped the video',
@@ -200,62 +183,30 @@ function rememberSlideImage(session: InternalSession, image: SlideImage): void {
  * Creates the presentation manager logic component.
  *
  * Orchestrates the full presentation lifecycle:
- * 1. Connects to LiveKit (fail-fast auth validation)
- * 2. Initializes PDF renderer and renders first slide
- * 3. Publishes video track and starts heartbeat
- * 4. Handles navigation, video playback, and session cleanup
+ * 1. Connects the session's sidecar to LiveKit (fail-fast auth validation)
+ * 2. Loads the deck in an out-of-process slide renderer and renders the first slide
+ * 3. Handles navigation, video playback, and session cleanup
  *
  * Uses START_COMPONENT/STOP_COMPONENT for idle session cleanup lifecycle.
  *
- * @param components - Required: config, features, logs, metrics, liveKitPublisher, pdfRenderer, pptxRenderer,
- *   videoCompositor, sidecarPublisher, mediaEncoder, videoDuration
+ * @param components - Required: config, logs, metrics, slideRenderer, sidecarPublisher, mediaEncoder, videoDuration
  * @returns IPresentationManager implementation
+ * @throws {Error} When PUBLIC_BASE_URL is unset or not a servable https:// URL
  */
 export async function createPresentationManager(
   components: Pick<
     AppComponents,
-    | 'config'
-    | 'features'
-    | 'logs'
-    | 'metrics'
-    | 'liveKitPublisher'
-    | 'pdfRenderer'
-    | 'pptxRenderer'
-    | 'videoCompositor'
-    | 'sidecarPublisher'
-    | 'mediaEncoder'
-    | 'videoDuration'
+    'config' | 'logs' | 'metrics' | 'slideRenderer' | 'sidecarPublisher' | 'mediaEncoder' | 'videoDuration'
   >
 ): Promise<IPresentationManager> {
-  const {
-    config,
-    features,
-    logs,
-    metrics,
-    liveKitPublisher,
-    pdfRenderer,
-    pptxRenderer,
-    videoCompositor,
-    sidecarPublisher,
-    mediaEncoder,
-    videoDuration
-  } = components
+  const { config, logs, metrics, slideRenderer, sidecarPublisher, mediaEncoder, videoDuration } = components
   const logger = logs.getLogger('presentation-manager')
 
-  // Data-driven renderer dispatch. To add a new format: extend FILE_TYPES,
-  // add the adapter component to this map — the compiler forces coverage.
-  const renderers: Record<FileType, typeof pdfRenderer> = {
-    [FILE_TYPES.PDF]: pdfRenderer,
-    [FILE_TYPES.PPTX]: pptxRenderer
-  }
-
-  // Resolve config at component creation (0 = unlimited per .env.default docs)
   const maxConcurrentRaw = await config.getString('MAX_CONCURRENT_PRESENTATIONS')
   const parsed = maxConcurrentRaw !== undefined ? parseInt(maxConcurrentRaw, 10) : NaN
   const maxConcurrent = Number.isNaN(parsed) || parsed < 0 ? DEFAULT_MAX_CONCURRENT : parsed === 0 ? Infinity : parsed
-  const configuredBaseUrl = await config.getString('PUBLIC_BASE_URL')
-  const publicBaseUrl = configuredBaseUrl ? servableBaseUrl(configuredBaseUrl) : null
-  if (configuredBaseUrl && publicBaseUrl === null) {
+  const publicBaseUrl = servableBaseUrl((await config.getString('PUBLIC_BASE_URL')) ?? '')
+  if (publicBaseUrl === null) {
     throw new Error(
       'PUBLIC_BASE_URL must be an https:// URL (http:// only for localhost) with no credentials, query or fragment'
     )
@@ -263,21 +214,13 @@ export async function createPresentationManager(
 
   const sessions = new Map<string, InternalSession>()
   let inFlightCreations = 0
+  let inFlightValidations = 0
   let idleCheckInterval: ReturnType<typeof setInterval> | null = null
-
-  async function isClientCompositionEnabled(): Promise<boolean> {
-    if (!(await features.getIsFeatureEnabled(ApplicationName.DAPPS, CLIENT_COMPOSITION_FEATURE))) return false
-    if (publicBaseUrl === null) {
-      logger.error('Client composition is enabled but PUBLIC_BASE_URL is unset; composing on the server')
-      return false
-    }
-    return true
-  }
 
   async function cleanupIdleSessions(): Promise<void> {
     const now = Date.now()
     for (const [id, session] of [...sessions.entries()]) {
-      const participantCount = session.publisher.getRemoteParticipantCount()
+      const participantCount = session.sidecar.getRemoteParticipantCount()
       if (participantCount > 0) {
         session.lastActivityAt = now
       } else if (now - session.lastActivityAt >= DEFAULT_IDLE_TIMEOUT_MS) {
@@ -293,18 +236,20 @@ export async function createPresentationManager(
   }
 
   async function validateCredentials(livekitUrl: string, livekitToken: string): Promise<void> {
-    // Throw-away publisher connects and disconnects immediately. Used to
-    // pre-flight bogus tokens before expensive work (e.g. fetching a
-    // user-supplied URL that could be 100 MB).
-    const publisher = liveKitPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
+    if (inFlightValidations >= maxConcurrent) {
+      throw new MaxConcurrentPresentationsError(maxConcurrent)
+    }
+    inFlightValidations++
+    let publisher: ISidecarPublisher | null = null
     try {
+      publisher = sidecarPublisher.createPublisher('validate', logs.getLogger('livekit-validate'))
       await publisher.connect(livekitUrl, livekitToken)
     } catch (err) {
-      throw new InvalidLivekitCredentialsError(errorMessage(err))
+      if (err instanceof LivekitConnectError) throw new InvalidLivekitCredentialsError(errorMessage(err))
+      throw err
     } finally {
-      await publisher.disconnect().catch(() => {
-        /* best-effort cleanup */
-      })
+      await publisher?.disconnect().catch(() => undefined)
+      inFlightValidations--
     }
   }
 
@@ -320,7 +265,7 @@ export async function createPresentationManager(
   async function broadcastState(session: InternalSession): Promise<void> {
     const state = getStateFromSession(session)
     try {
-      await session.publisher.publishData({
+      await session.sidecar.publishData({
         type: 'presentation:state',
         ...state
       })
@@ -328,7 +273,7 @@ export async function createPresentationManager(
       logger.warn(`Failed to broadcast state: ${errorMessage(err)}`)
     }
     try {
-      await session.publisher.updateMetadataState(state)
+      await session.sidecar.updateMetadataState(state)
     } catch (err) {
       logger.warn(`Failed to update metadata: ${errorMessage(err)}`)
     }
@@ -347,7 +292,7 @@ export async function createPresentationManager(
     context?: { videoIndex?: number; videoUrl?: string }
   ): Promise<void> {
     try {
-      await session.publisher.publishData({
+      await session.sidecar.publishData({
         type: 'presentation:error',
         code,
         message,
@@ -367,7 +312,6 @@ export async function createPresentationManager(
     fileName?: string,
     presenterIdentity?: string | null
   ): Promise<PresentationInfo> {
-    const clientComposition = await isClientCompositionEnabled()
     if (sessions.size + inFlightCreations >= maxConcurrent) {
       throw new MaxConcurrentPresentationsError(maxConcurrent)
     }
@@ -376,27 +320,23 @@ export async function createPresentationManager(
     const id = randomUUID()
     logger.info(`Creating presentation ${id}`, { fileType, fileSize: fileBuffer.length })
 
-    const publisherLogger = logs.getLogger(`livekit-publisher:${id}`)
-    const sidecar = clientComposition ? sidecarPublisher.createPublisher(id, publisherLogger) : null
-    const publisher: ILiveKitPublisher = sidecar ?? liveKitPublisher.createPublisher(id, publisherLogger)
-    const unhandledSidecarFatal = sidecar ? registerSidecarEvents(id, sidecar) : null
+    const sidecar = sidecarPublisher.createPublisher(id, logs.getLogger(`livekit-publisher:${id}`))
+    const unhandledSidecarFatal = registerSidecarEvents(id, sidecar)
 
-    let renderer: IRenderer | null = null
+    let renderer: ISlideRenderer | null = null
     let tempDir: string | null = null
 
     try {
-      // Connect to LiveKit FIRST — validates the token (fail-fast auth)
-      await publisher.connect(livekitUrl, livekitToken)
+      await sidecar.connect(livekitUrl, livekitToken)
 
-      // Initialize renderer for the detected format
-      renderer = renderers[fileType].createRenderer()
+      renderer = slideRenderer.createRenderer(fileType)
       await renderer.initialize(fileBuffer)
       const slideCount = renderer.getSlideCount()
       if (slideCount === 0) {
         throw new Error('PDF contains no pages')
       }
 
-      publisher.setDataHandler(async (message: Record<string, unknown>, senderIdentity: string) => {
+      sidecar.setDataHandler(async (message: Record<string, unknown>, senderIdentity: string) => {
         const session = sessions.get(id)
         if (!session) return
         try {
@@ -404,9 +344,6 @@ export async function createPresentationManager(
             case 'presentation:navigate': {
               const action = message.action
               if (action !== 'next' && action !== 'prev' && action !== 'goto') break
-              // Number.isInteger rejects NaN, Infinity, floats and non-numbers.
-              // Without this, NaN slips past `< 0` and `>= slideCount` checks
-              // (both are false for NaN) and propagates as a silently broken index.
               const slideIndex =
                 Number.isInteger(message.slideIndex) && (message.slideIndex as number) >= 0
                   ? (message.slideIndex as number)
@@ -436,7 +373,6 @@ export async function createPresentationManager(
               break
             }
             case 'presentation:presenter:claim':
-              if (!session.clientComposition) break
               session.presenterIdentity = senderIdentity
               await broadcastState(session)
               break
@@ -449,18 +385,9 @@ export async function createPresentationManager(
         }
       })
 
-      const { buffer, width, height } = await renderer.renderSlide(0)
-      const firstSlideImage = clientComposition ? await encodeSlidePng(buffer, width, height) : null
-
-      if (!sidecar) await publisher.startPublishing(width, height)
-
-      publisher.pushFrame(buffer, width, height)
-      publisher.startHeartbeat(buffer, width, height)
-
-      // Get video annotations for first slide
+      const firstSlideImage = await renderer.renderSlide(0)
       const slideVideos = await renderer.getSlideVideos(0)
 
-      // Create shared temp dir for the entire session
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `cast-presenter-${id}-`))
 
       const presentationName = fileName?.replace(/\.[^.]+$/, '') || 'Presentation'
@@ -473,15 +400,9 @@ export async function createPresentationManager(
         slideCount,
         currentSlide: 0,
         createdAt: new Date(),
-        lastFrameBuffer: buffer,
-        lastFrameWidth: width,
-        lastFrameHeight: height,
         slideVideos,
         videoState: 'idle',
         renderer,
-        publisher,
-        compositor: null,
-        cachedVideoPaths: new Map(),
         tempDir,
         navigating: false,
         videoPlaybackStartedAt: 0,
@@ -490,7 +411,6 @@ export async function createPresentationManager(
         stoppingPromise: null,
         videoErrorReason: null,
         videoErrorCode: null,
-        preDownloadTimer: null,
         overlay: { ...DEFAULT_OVERLAY_LAYOUT },
         overlayBroadcastTimer: null,
         videoEndTimer: null,
@@ -504,37 +424,27 @@ export async function createPresentationManager(
         earlySidecarOutcome: null,
         presenterIdentity: presenterIdentity ?? null,
         sidecar,
-        bakeJobs: new Map(),
-        clientComposition
+        bakeJobs: new Map()
       }
 
-      const fatalReason = unhandledSidecarFatal?.()
+      const fatalReason = unhandledSidecarFatal()
       if (fatalReason) throw new Error(`Sidecar failed before the session started: ${fatalReason}`)
 
       sessions.set(id, session)
-      if (firstSlideImage) rememberSlideImage(session, firstSlideImage)
+      rememberSlideImage(session, firstSlideImage)
       metrics.increment('session_created_total', { status: 'success' })
       metrics.increment('active_sessions')
       await broadcastState(session)
 
       logger.info(`Presentation ${id} created with ${slideCount} slides`, {
-        width,
-        height,
+        width: firstSlideImage.width,
+        height: firstSlideImage.height,
         slideVideos: slideVideos.length
       })
 
-      if (sidecar) {
-        prefetchBakes(session).catch((err) => {
-          logger.warn(`Prefetch bakes failed for ${id}: ${errorMessage(err)}`)
-        })
-      } else {
-        session.preDownloadTimer = setTimeout(() => {
-          session.preDownloadTimer = null
-          preDownloadVideos(session).catch((err) => {
-            logger.warn(`Background video pre-download failed for ${id}: ${errorMessage(err)}`)
-          })
-        }, 3000)
-      }
+      prefetchBakes(session).catch((err) => {
+        logger.warn(`Prefetch bakes failed for ${id}: ${errorMessage(err)}`)
+      })
 
       return { id, fileName: presentationName, slideCount, currentSlide: 0, fileType }
     } catch (err) {
@@ -542,17 +452,32 @@ export async function createPresentationManager(
       if (err instanceof Error && err.message.includes('LiveKit')) {
         metrics.increment('livekit_connection_errors_total')
       }
-      // Clean up acquired resources in reverse order on failure
       if (tempDir) {
-        videoCompositor.destroyTempDir(tempDir)
+        removeTempDir(tempDir)
       }
       if (renderer) {
-        renderer.destroy()
+        try {
+          renderer.destroy()
+        } catch (destroyErr) {
+          logger.warn(`Failed to destroy renderer: ${errorMessage(destroyErr)}`)
+        }
       }
-      await publisher.disconnect()
+      try {
+        await sidecar.disconnect()
+      } catch (disconnectErr) {
+        logger.warn(`Failed to disconnect publisher: ${errorMessage(disconnectErr)}`)
+      }
       throw err
     } finally {
       inFlightCreations--
+    }
+  }
+
+  function removeTempDir(dir: string): void {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true })
+    } catch (err) {
+      logger.warn(`Failed to remove temp dir: ${errorMessage(err)}`)
     }
   }
 
@@ -563,66 +488,6 @@ export async function createPresentationManager(
       for (const video of await session.renderer.getSlideVideos(i)) urls.add(video.url)
     }
     return urls
-  }
-
-  async function preDownloadVideos(session: InternalSession): Promise<void> {
-    const downloader = videoCompositor.createCompositor(logger, session.tempDir)
-    const { signal } = session.abortController
-
-    try {
-      const videoTargets = await deckVideoUrls(session)
-      if (signal.aborted) return
-
-      logger.info(`Pre-download queue: ${videoTargets.size} videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
-
-      let downloaded = 0
-      for (const url of videoTargets) {
-        if (downloaded >= MAX_PRE_DOWNLOADS) {
-          logger.info(
-            `Pre-download limit reached (${MAX_PRE_DOWNLOADS}), remaining videos will be downloaded on demand`
-          )
-          break
-        }
-        if (signal.aborted || !sessions.has(session.id)) {
-          logger.info('Session ended, aborting pre-download queue')
-          break
-        }
-        if (session.cachedVideoPaths.has(url)) continue
-        if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir())) continue
-        if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
-          logger.info(
-            `Pre-download stopped: session disk quota reached (${session.bytesDownloaded}/${SESSION_DISK_QUOTA_BYTES} bytes)`
-          )
-          break
-        }
-        try {
-          logger.info(`Pre-downloading video: ${url}`)
-          const { path: rawPath, bytes } = await downloader.downloadVideo(url, signal)
-          // Enforce quota post-download: per-file cap already bounds one download,
-          // and aborting a live HTTPS stream at an exact byte count is awkward.
-          if (session.bytesDownloaded + bytes > SESSION_DISK_QUOTA_BYTES) {
-            removeQuietly(rawPath, logger)
-            logger.warn(
-              `Pre-download dropped ${url}: would exceed session quota (${session.bytesDownloaded + bytes}/${SESSION_DISK_QUOTA_BYTES} bytes)`
-            )
-            break
-          }
-          session.cachedVideoPaths.set(url, rawPath)
-          session.bytesDownloaded += bytes
-          logger.info(`Pre-downloaded video: ${url}`)
-          downloaded++
-        } catch (err) {
-          if (signal.aborted) {
-            logger.info('Pre-download aborted')
-            break
-          }
-          logger.warn(`Failed to pre-download video: ${url} — ${errorMessage(err)}`)
-        }
-      }
-      logger.info(`Pre-download queue complete. Cached: ${session.cachedVideoPaths.size} videos`)
-    } finally {
-      downloader.cleanup()
-    }
   }
 
   function registerSidecarEvents(id: string, sidecar: ISidecarPublisher): () => string | null {
@@ -986,45 +851,26 @@ export async function createPresentationManager(
     session.navigating = true
 
     try {
-      if (session.compositor) {
-        await session.publisher.stopAudioPublishing()
-        session.compositor.cleanup()
-        session.compositor = null
-      }
-      if (session.sidecar) {
-        session.playGeneration++
-        clearVideoEndTimer(session)
-        cancelPendingBake(session)
-        if (isVideoActive(session) && !activeClientVideo(session)) {
-          await session.sidecar.stopVideo().catch((err) => {
-            logger.warn(`Sidecar stop on navigate failed: ${errorMessage(err)}`)
-          })
-        }
+      session.playGeneration++
+      clearVideoEndTimer(session)
+      cancelPendingBake(session)
+      if (isVideoActive(session) && !activeClientVideo(session)) {
+        await session.sidecar.stopVideo().catch((err) => {
+          logger.warn(`Sidecar stop on navigate failed: ${errorMessage(err)}`)
+        })
       }
       session.videoState = 'idle'
       session.activeVideoIndex = -1
       session.videoElapsedBeforePause = 0
 
       try {
-        const { buffer, width, height } = await session.renderer.renderSlide(targetSlide)
-
-        session.publisher.pushFrame(buffer, width, height)
-        session.publisher.startHeartbeat(buffer, width, height)
-
-        const slideImage = session.clientComposition ? await encodeSlidePng(buffer, width, height) : null
+        const slideImage = await session.renderer.renderSlide(targetSlide)
         const slideVideos = await session.renderer.getSlideVideos(targetSlide)
 
-        if (slideImage) rememberSlideImage(session, slideImage)
+        rememberSlideImage(session, slideImage)
         session.currentSlide = targetSlide
-        session.lastFrameBuffer = buffer
-        session.lastFrameWidth = width
-        session.lastFrameHeight = height
         session.slideVideos = slideVideos
       } catch (err) {
-        if (session.lastFrameBuffer) {
-          session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-          session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-        }
         await broadcastState(session)
         throw err
       }
@@ -1055,241 +901,20 @@ export async function createPresentationManager(
       throw new Error(`Invalid video index: ${videoIndex}`)
     }
 
-    if (session.sidecar) {
-      const { url } = session.slideVideos[videoIndex]
-      const clientVideo = classifyClientVideo(url)
-      if (clientVideo) return playClientVideo(session, session.sidecar, videoIndex, clientVideo)
-      if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir()) === null) {
-        if (session.videoState === 'paused' && activeClientVideo(session) === null) {
-          session.playGeneration++
-          await session.sidecar.stopVideo().catch((err) => {
-            logger.warn(`Sidecar stop before an unsupported video failed: ${errorMessage(err)}`)
-          })
-        }
-        await failVideo(session, videoIndex, 'video-invalid-format', UNSUPPORTED_VIDEO_MESSAGE)
-        return
+    const { url } = session.slideVideos[videoIndex]
+    const clientVideo = classifyClientVideo(url)
+    if (clientVideo) return playClientVideo(session, session.sidecar, videoIndex, clientVideo)
+    if (mediaEncoder.resolveEmbeddedVideo(url, session.renderer.getEmbeddedMediaDir()) === null) {
+      if (session.videoState === 'paused' && activeClientVideo(session) === null) {
+        session.playGeneration++
+        await session.sidecar.stopVideo().catch((err) => {
+          logger.warn(`Sidecar stop before an unsupported video failed: ${errorMessage(err)}`)
+        })
       }
-      return playSidecarVideo(session, session.sidecar, videoIndex)
-    }
-
-    const videoInfo = session.slideVideos[videoIndex]
-
-    // Resume from pause: kill old compositor, restart with seek offset
-    const seekSeconds =
-      session.videoState === 'paused' && session.activeVideoIndex === videoIndex
-        ? session.videoElapsedBeforePause / 1000
-        : 0
-
-    const requestedSlide = session.currentSlide
-    session.videoState = 'loading'
-    session.activeVideoIndex = videoIndex
-    session.videoErrorReason = null
-    session.videoErrorCode = null
-    await broadcastState(session)
-
-    if (session.compositor) {
-      session.compositor.cleanup()
-      session.compositor = null
-    }
-
-    const compositorLogger = logs.getLogger(`video-compositor:${session.id}`)
-    const compositor = videoCompositor.createCompositor(compositorLogger, session.tempDir)
-
-    const embeddedPath = mediaEncoder.resolveEmbeddedVideo(videoInfo.url, session.renderer.getEmbeddedMediaDir())?.path
-    let videoPath = embeddedPath ?? session.cachedVideoPaths.get(videoInfo.url)
-    if (!videoPath || (!embeddedPath && !fs.existsSync(videoPath))) {
-      if (session.bytesDownloaded >= SESSION_DISK_QUOTA_BYTES) {
-        compositor.cleanup()
-        const info = classifyVideoError(new SessionDiskQuotaExceededError(session.bytesDownloaded, 0))
-        await failVideo(session, videoIndex, info.code, info.message, videoInfo.url)
-        logger.warn(`Video play blocked for ${session.id}: session disk quota reached`)
-        return
-      }
-      try {
-        const result = await compositor.downloadVideo(videoInfo.url, session.abortController.signal)
-        if (session.bytesDownloaded + result.bytes > SESSION_DISK_QUOTA_BYTES) {
-          removeQuietly(result.path, logger)
-          throw new SessionDiskQuotaExceededError(session.bytesDownloaded, result.bytes)
-        }
-        videoPath = result.path
-        session.cachedVideoPaths.set(videoInfo.url, videoPath)
-        session.bytesDownloaded += result.bytes
-        logger.info(`Downloaded video for presentation ${session.id}`, { path: videoPath, bytes: result.bytes })
-      } catch (err) {
-        compositor.cleanup()
-        if (session.abortController.signal.aborted) return
-        const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
-        await failVideo(session, videoIndex, info.code, info.message, videoInfo.url)
-        logger.warn(`Video download failed for ${session.id}: ${errorMessage(err)}`)
-        return
-      }
-    } else {
-      logger.info(`Playing cached video for presentation ${session.id}`, { path: videoPath })
-    }
-
-    // Re-check after download — navigation or stopVideoSession may have interleaved.
-    // stopVideoSession sets videoState='idle'; don't overwrite that transition.
-    if (session.navigating || session.currentSlide !== requestedSlide || session.videoState !== 'loading') {
-      compositor.cleanup()
-      if (session.videoState === 'loading') session.videoState = 'idle'
-      await broadcastState(session)
+      await failVideo(session, videoIndex, 'video-invalid-format', UNSUPPORTED_VIDEO_MESSAGE)
       return
     }
-
-    session.compositor = compositor
-
-    if (!session.lastFrameBuffer) {
-      compositor.cleanup()
-      session.videoState = 'idle'
-      await broadcastState(session)
-      return
-    }
-
-    // Start audio publishing — skip if resuming from pause (track is still published)
-    if (seekSeconds === 0) {
-      try {
-        await session.publisher.startAudioPublishing(48000, 2)
-      } catch (err) {
-        logger.warn(`Failed to start audio publishing for ${session.id}: ${errorMessage(err)}`)
-      }
-    }
-
-    // Re-check after audio setup — navigation or stopVideoSession may have interleaved.
-    // stopVideoSession sets videoState='idle'; don't overwrite that transition.
-    if (session.navigating || session.currentSlide !== requestedSlide || session.videoState !== 'loading') {
-      compositor.cleanup()
-      session.compositor = null
-      if (session.videoState === 'loading') session.videoState = 'idle'
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-      await broadcastState(session)
-      return
-    }
-
-    // Chunk audio into strict 10ms frames (480 samples × 2ch × 2 bytes = 1920 bytes)
-    // Prevents overfilling AudioSource's internal buffer which causes tail latency on pause.
-    // Residual holds the sub-frame leftover between data events; each event appends
-    // the new chunk, drains whole frames, and keeps the tail. Simpler than ring
-    // accounting — avoids the write-past-capacity drift that a fixed ring hit when
-    // FFmpeg bursts a chunk larger than the buffer's free space.
-    const AUDIO_FRAME_BYTES = 1920
-    let audioResidual: Buffer = Buffer.alloc(0)
-
-    const onAudioData = (pcmChunk: Buffer) => {
-      // Avoid copying when no residual is held — the common steady-state case.
-      // Buffer.concat produces a fresh buffer; the no-residual branch reuses
-      // pcmChunk directly. The subarray() result below would alias pcmChunk
-      // in that branch, so when we keep a residual that came from pcmChunk,
-      // copy it to detach from the underlying stdout buffer (Node delivers a
-      // fresh chunk per 'data' event today, but don't depend on that).
-      const concatenated = audioResidual.length === 0 ? null : Buffer.concat([audioResidual, pcmChunk])
-      const source = concatenated ?? pcmChunk
-      let offset = 0
-      while (source.length - offset >= AUDIO_FRAME_BYTES) {
-        // Buffer.alloc gives a dedicated ArrayBuffer with 2-byte alignment
-        // (Buffer pool may have odd byteOffset which breaks Int16Array).
-        const frame = Buffer.alloc(AUDIO_FRAME_BYTES)
-        source.copy(frame, 0, offset, offset + AUDIO_FRAME_BYTES)
-        const int16 = new Int16Array(frame.buffer, 0, AUDIO_FRAME_BYTES / 2)
-        session.publisher.pushAudioFrame(int16, 48000, 2, 480)
-        offset += AUDIO_FRAME_BYTES
-      }
-      if (offset === source.length) {
-        audioResidual = Buffer.alloc(0)
-      } else if (concatenated) {
-        // Safe to subarray — `concatenated` is owned by us.
-        audioResidual = concatenated.subarray(offset)
-      } else {
-        // Detach from pcmChunk so retaining the residual doesn't pin the
-        // underlying stdout backing buffer.
-        audioResidual = Buffer.from(pcmChunk.subarray(offset))
-      }
-    }
-
-    // Set playback start BEFORE spawning FFmpeg so the startup latency is
-    // counted symmetrically on both initial play and resume-from-pause.
-    // This prevents the elapsed time from overestimating by the spawn delay.
-    session.videoPlaybackStartedAt = Date.now()
-    if (seekSeconds === 0) session.videoElapsedBeforePause = 0
-
-    try {
-      await compositor.startPlayback(
-        videoPath,
-        videoInfo,
-        session.lastFrameBuffer,
-        session.lastFrameWidth,
-        session.lastFrameHeight,
-        session.publisher,
-        onAudioData,
-        seekSeconds > 0 ? seekSeconds : undefined
-      )
-    } catch (err) {
-      compositor.cleanup()
-      session.compositor = null
-      session.videoState = 'error'
-      const info = classifyVideoError(err instanceof Error ? err : new Error(String(err)))
-      session.videoErrorCode = info.code
-      session.videoErrorReason = info.message
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-      await broadcastError(session, info.code, info.message, { videoIndex, videoUrl: videoInfo.url })
-      await broadcastState(session)
-      throw err
-    }
-
-    // Re-check after startPlayback — stopVideoSession may have cleaned up the compositor
-    // while the promise was resolving. The compositor's close handler is gated by
-    // `!cleanedUp && isPlaying`, so the onEnd latch doesn't cover this path.
-    // cleanup() here also kills FFmpegs that startPlayback spawned after an
-    // external cleanup ran during its internal fs.writeFile yield.
-    if (session.compositor !== compositor) {
-      compositor.cleanup()
-      return
-    }
-
-    session.videoState = 'playing'
-
-    logger.info(`Video seek: ${seekSeconds.toFixed(2)}s, elapsed tracked: ${session.videoElapsedBeforePause}ms`)
-
-    const endedCompositor = compositor
-    compositor.onEnd(async () => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
-      session.videoState = 'idle'
-      session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-      metrics.increment('video_playback_total', { action: 'end' })
-      broadcastState(session).catch(() => {
-        /* noop */
-      })
-      logger.info(`Video ended naturally for presentation ${session.id}`)
-    })
-
-    compositor.onError(async (reason) => {
-      if (session.compositor !== endedCompositor) return // stale callback from a replaced compositor
-      const message = COMPOSITOR_ERROR_MESSAGES[reason]
-      session.videoState = 'error'
-      session.videoErrorCode = reason
-      session.videoErrorReason = message
-      // Full teardown — clears latches/listeners and unlinks the slide temp file.
-      // The compositor's internal stopPlayback already killed FFmpeg, but cleanup
-      // is the documented session-side counterpart that releases the rest.
-      endedCompositor.cleanup()
-      session.compositor = null
-      await session.publisher.stopAudioPublishing().catch(() => {
-        /* noop */
-      })
-      await broadcastError(session, reason, message, { videoIndex, videoUrl: videoInfo.url })
-      await broadcastState(session)
-      logger.warn(`Video playback interrupted for presentation ${session.id}: ${reason}`)
-    })
-
-    metrics.increment('video_playback_total', { action: 'play' })
-    await broadcastState(session)
-    logger.info(`Video playback started for presentation ${session.id}`, { videoIndex })
+    return playSidecarVideo(session, session.sidecar, videoIndex)
   }
 
   async function stopVideoSession(session: InternalSession): Promise<void> {
@@ -1297,30 +922,17 @@ export async function createPresentationManager(
     if (session.videoState === 'idle') return
 
     const { sidecar } = session
-    if (sidecar) {
-      const clientPlayback = activeClientVideo(session) !== null
-      session.playGeneration++
-      clearVideoEndTimer(session)
-      if (!clientPlayback) {
-        cancelPendingBake(session)
-        if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.stopVideo()))) return
-      }
-    } else {
-      await session.publisher.stopAudioPublishing()
-      if (session.compositor) {
-        session.compositor.cleanup()
-        session.compositor = null
-      }
+    const clientPlayback = activeClientVideo(session) !== null
+    session.playGeneration++
+    clearVideoEndTimer(session)
+    if (!clientPlayback) {
+      cancelPendingBake(session)
+      if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.stopVideo()))) return
     }
 
     session.videoState = 'idle'
     session.activeVideoIndex = -1
     session.videoElapsedBeforePause = 0
-
-    if (session.lastFrameBuffer) {
-      session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-      session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-    }
 
     metrics.increment('video_playback_total', { action: 'stop' })
     await broadcastState(session)
@@ -1329,49 +941,20 @@ export async function createPresentationManager(
 
   async function pauseVideoSession(session: InternalSession): Promise<void> {
     if (session.navigating) return
+    if (session.videoState !== 'playing') return
     const { sidecar } = session
-    if (sidecar) {
+    if (activeClientVideo(session)) {
+      clearVideoEndTimer(session)
+      session.videoElapsedBeforePause = clientPositionMs(session)
+      session.videoPlaybackStartedAt = Date.now()
+    } else {
+      if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.pause()))) return
       if (session.videoState !== 'playing') return
-      if (activeClientVideo(session)) {
-        clearVideoEndTimer(session)
-        session.videoElapsedBeforePause = clientPositionMs(session)
-        session.videoPlaybackStartedAt = Date.now()
-      } else {
-        if (!(await runSidecarCommand(session, session.activeVideoIndex, () => sidecar.pause()))) return
-        if (session.videoState !== 'playing') return
-      }
-      session.videoState = 'paused'
-      metrics.increment('video_playback_total', { action: 'pause' })
-      await broadcastState(session)
-      logger.info(`Video paused for presentation ${session.id}`)
-      return
     }
-    if (session.compositor && session.videoState === 'playing') {
-      // Record elapsed time, then kill processes — resume will restart with -ss seek.
-      // Keep the LiveKit audio track published during pause — only the FFmpeg audio
-      // process is killed. On resume, the new FFmpeg feeds into the existing audioSource.
-      session.videoElapsedBeforePause += Date.now() - session.videoPlaybackStartedAt
-      // Capture the last video frame before killing FFmpeg so we can freeze on it
-      const lastFrame = session.compositor.getLastFrame()
-      session.compositor.cleanup()
-      session.compositor = null
-
-      // Keep pushing the last video frame so viewers see a frozen video, not the slide placeholder
-      if (lastFrame) {
-        session.publisher.pushFrame(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-        session.publisher.startHeartbeat(lastFrame.buffer, lastFrame.width, lastFrame.height, lastFrame.bufferType)
-      } else if (session.lastFrameBuffer) {
-        session.publisher.pushFrame(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-        session.publisher.startHeartbeat(session.lastFrameBuffer, session.lastFrameWidth, session.lastFrameHeight)
-      }
-
-      session.videoState = 'paused'
-      metrics.increment('video_playback_total', { action: 'pause' })
-      await broadcastState(session)
-      logger.info(`Video paused for presentation ${session.id}`, {
-        elapsedMs: session.videoElapsedBeforePause
-      })
-    }
+    session.videoState = 'paused'
+    metrics.increment('video_playback_total', { action: 'pause' })
+    await broadcastState(session)
+    logger.info(`Video paused for presentation ${session.id}`)
   }
 
   async function stopSession(session: InternalSession): Promise<void> {
@@ -1380,10 +963,6 @@ export async function createPresentationManager(
     sessions.delete(session.id)
     metrics.decrement('active_sessions')
 
-    if (session.preDownloadTimer) {
-      clearTimeout(session.preDownloadTimer)
-      session.preDownloadTimer = null
-    }
     if (session.overlayBroadcastTimer) {
       clearTimeout(session.overlayBroadcastTimer)
       session.overlayBroadcastTimer = null
@@ -1396,19 +975,14 @@ export async function createPresentationManager(
     session.stoppingPromise = (async () => {
       logger.info(`Stopping presentation ${session.id}`)
 
-      if (session.compositor) {
-        session.compositor.cleanup()
-        session.compositor = null
-      }
-
       try {
-        await session.publisher.publishData({ type: 'presentation:stopped', id: session.id })
+        await session.sidecar.publishData({ type: 'presentation:stopped', id: session.id })
       } catch (err) {
         logger.warn(`Failed to broadcast stop event: ${errorMessage(err)}`)
       }
 
       try {
-        await session.publisher.disconnect()
+        await session.sidecar.disconnect()
       } catch (err) {
         logger.warn(`Failed to disconnect publisher: ${errorMessage(err)}`)
       }
@@ -1417,11 +991,7 @@ export async function createPresentationManager(
       } catch (err) {
         logger.warn(`Failed to destroy renderer: ${errorMessage(err)}`)
       }
-      try {
-        videoCompositor.destroyTempDir(session.tempDir)
-      } catch (err) {
-        logger.warn(`Failed to remove temp dir: ${errorMessage(err)}`)
-      }
+      removeTempDir(session.tempDir)
 
       logger.info(`Presentation ${session.id} stopped and cleaned up`)
     })()
@@ -1436,14 +1006,13 @@ export async function createPresentationManager(
       slideCount: session.slideCount,
       currentSlide: session.currentSlide,
       fileType: session.fileType,
-      slideVideos: session.slideVideos,
       videoState: session.videoState,
       overlay: session.overlay,
       ...(session.videoState === 'error' && session.videoErrorReason
         ? { videoErrorReason: session.videoErrorReason }
         : {}),
       ...(session.videoState === 'error' && session.videoErrorCode ? { videoErrorCode: session.videoErrorCode } : {}),
-      ...(session.clientComposition ? v2Fields(session) : {})
+      ...v2Fields(session)
     }
   }
 

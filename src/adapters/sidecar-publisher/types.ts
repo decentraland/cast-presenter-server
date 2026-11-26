@@ -7,7 +7,7 @@ export interface PlaybackFiles {
   audioPath: string | null
 }
 
-/** Session publisher backed by the Go sidecar; inherited frame, heartbeat and audio methods are no-ops. */
+/** Session publisher backed by the Go sidecar. */
 export interface ISidecarPublisher extends ILiveKitPublisher {
   /**
    * Starts paced playback of baked files from the start, replacing any current playback.

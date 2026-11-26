@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { setTimeout as delay } from 'timers/promises'
 import type { ILoggerComponent } from '@well-known-components/interfaces'
+import { LivekitConnectError } from './errors'
 import { errorMessage } from '../../logic/error-message'
 import {
   decodePresentationPacket,
@@ -112,8 +113,8 @@ function createPublisher(
     else command.resolve()
   }
 
-  function connectError(reason: string): Error {
-    return new Error(`LiveKit connect failed: ${redact(reason)}`)
+  function connectError(reason: string, ErrorType: new (message: string) => Error = Error): Error {
+    return new ErrorType(`LiveKit connect failed: ${redact(reason)}`)
   }
 
   function fireFatal(reason: string): void {
@@ -165,7 +166,8 @@ function createPublisher(
         return
       case 'error':
         if (!ready) {
-          settle(INIT_ID, connectError(event.message ?? event.code ?? 'unknown error'))
+          const ErrorType = event.code === 'connect-failed' ? LivekitConnectError : Error
+          settle(INIT_ID, connectError(event.message ?? event.code ?? 'unknown error', ErrorType))
         } else if (event.code === 'playback-failed') {
           playbackFailedCallback?.(redact(event.message ?? 'playback failed'), event.playId ?? 0)
         } else {
@@ -240,14 +242,6 @@ function createPublisher(
       write({ type: 'init', url, token, presentationId })
       await connected
     },
-
-    startPublishing: async () => undefined,
-    pushFrame: () => undefined,
-    startHeartbeat: () => undefined,
-    stopHeartbeat: () => undefined,
-    startAudioPublishing: async () => undefined,
-    pushAudioFrame: () => undefined,
-    stopAudioPublishing: async () => undefined,
 
     setDataHandler(handler: (data: Record<string, unknown>, senderIdentity: string) => void): void {
       dataHandler = handler

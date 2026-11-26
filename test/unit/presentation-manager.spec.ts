@@ -1,31 +1,23 @@
 import fs from 'fs'
+import { LivekitConnectError } from '../../src/adapters/sidecar-publisher/errors'
 import { DEFAULT_OVERLAY_LAYOUT } from '../../src/logic/overlay-layout'
 import {
   InvalidLivekitCredentialsError,
+  MaxConcurrentPresentationsError,
   PresentationNotFoundError,
   createPresentationManager
 } from '../../src/logic/presentation-manager'
 import { SESSION_DISK_QUOTA_BYTES } from '../../src/logic/presentation-manager/component'
-import { encodeSlidePng } from '../../src/logic/slide-image'
-import type { ILiveKitPublisher } from '../../src/adapters/livekit-publisher/types'
-import type { IRenderer } from '../../src/adapters/renderer/types'
 import type { ISidecarPublisher } from '../../src/adapters/sidecar-publisher/types'
-import type { IVideoCompositor } from '../../src/adapters/video-compositor/types'
+import type { ISlideRenderer } from '../../src/adapters/slide-renderer/types'
 import type { OverlayLayout } from '../../src/logic/overlay-layout'
 import type { IPresentationManager } from '../../src/logic/presentation-manager'
 
-jest.mock('../../src/logic/slide-image')
+const PUBLIC_BASE_URL = 'https://cast.example.com'
 
 function createMockPublisher(): jest.Mocked<ISidecarPublisher> {
   return {
     connect: jest.fn().mockResolvedValue(undefined),
-    startPublishing: jest.fn().mockResolvedValue(undefined),
-    pushFrame: jest.fn(),
-    startHeartbeat: jest.fn(),
-    stopHeartbeat: jest.fn(),
-    startAudioPublishing: jest.fn().mockResolvedValue(undefined),
-    pushAudioFrame: jest.fn(),
-    stopAudioPublishing: jest.fn().mockResolvedValue(undefined),
     setDataHandler: jest.fn(),
     updateMetadataState: jest.fn().mockResolvedValue(undefined),
     publishData: jest.fn().mockResolvedValue(undefined),
@@ -41,10 +33,10 @@ function createMockPublisher(): jest.Mocked<ISidecarPublisher> {
   }
 }
 
-function createMockRenderer(): jest.Mocked<IRenderer> {
+function createMockRenderer(): jest.Mocked<ISlideRenderer> {
   return {
     initialize: jest.fn().mockResolvedValue(undefined),
-    renderSlide: jest.fn().mockResolvedValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080 }),
+    renderSlide: jest.fn().mockResolvedValue({ hash: 'h1', png: Buffer.from('png1'), width: 1920, height: 1080 }),
     getSlideVideos: jest.fn().mockResolvedValue([]),
     getEmbeddedMediaDir: jest.fn().mockReturnValue(null),
     getSlideCount: jest.fn().mockReturnValue(3),
@@ -52,31 +44,14 @@ function createMockRenderer(): jest.Mocked<IRenderer> {
   }
 }
 
-function createMockCompositor(): jest.Mocked<IVideoCompositor> {
-  return {
-    downloadVideo: jest.fn().mockResolvedValue({ path: '/tmp/video.mp4', bytes: 1024 }),
-    startPlayback: jest.fn().mockResolvedValue(undefined),
-    onEnd: jest.fn(),
-    onError: jest.fn(),
-    getIsPlaying: jest.fn().mockReturnValue(false),
-    getLastFrame: jest.fn().mockReturnValue({ buffer: Buffer.alloc(100), width: 1920, height: 1080, bufferType: 5 }),
-    cleanup: jest.fn()
-  }
-}
-
-function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPublisher> }) {
+function createMockComponents(overrides?: { publisher?: jest.Mocked<ISidecarPublisher> }) {
   const publisher = overrides?.publisher ?? createMockPublisher()
   return {
     config: {
-      getString: jest.fn().mockResolvedValue(undefined),
+      getString: jest.fn(async (key: string) => (key === 'PUBLIC_BASE_URL' ? PUBLIC_BASE_URL : undefined)),
       getNumber: jest.fn().mockResolvedValue(undefined),
       requireString: jest.fn().mockResolvedValue(''),
       requireNumber: jest.fn().mockResolvedValue(0)
-    },
-    features: {
-      getIsFeatureEnabled: jest.fn().mockResolvedValue(false),
-      getEnvFeature: jest.fn().mockResolvedValue(undefined),
-      getFeatureVariant: jest.fn().mockResolvedValue(null)
     },
     logs: {
       getLogger: jest.fn().mockReturnValue({
@@ -86,9 +61,6 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
         debug: jest.fn(),
         log: jest.fn()
       })
-    },
-    liveKitPublisher: {
-      createPublisher: jest.fn().mockReturnValue(publisher)
     },
     sidecarPublisher: {
       createPublisher: jest.fn().mockReturnValue(publisher)
@@ -101,15 +73,8 @@ function createMockComponents(overrides?: { publisher?: jest.Mocked<ILiveKitPubl
     videoDuration: {
       getDurationMs: jest.fn().mockResolvedValue(null)
     },
-    pdfRenderer: {
+    slideRenderer: {
       createRenderer: jest.fn().mockReturnValue(createMockRenderer())
-    },
-    pptxRenderer: {
-      createRenderer: jest.fn().mockReturnValue(createMockRenderer())
-    },
-    videoCompositor: {
-      createCompositor: jest.fn().mockReturnValue(createMockCompositor()),
-      destroyTempDir: jest.fn()
     },
     metrics: {
       increment: jest.fn(),
@@ -159,12 +124,18 @@ async function createManagerWithSession(components: ReturnType<typeof createMock
 
 describe('when pre-validating LiveKit credentials', () => {
   let components: ReturnType<typeof createMockComponents>
-  let publisher: jest.Mocked<ILiveKitPublisher>
+  let publisher: jest.Mocked<ISidecarPublisher>
 
   describe('and the connect succeeds', () => {
     beforeEach(() => {
       publisher = createMockPublisher()
       components = createMockComponents({ publisher })
+    })
+
+    it('should create the throw-away publisher through the sidecar factory', async () => {
+      const manager = await createManager(components)
+      await manager.validateCredentials('wss://lk.example.com', 'good-token')
+      expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledWith('validate', expect.anything())
     })
 
     it('should resolve and disconnect the throw-away publisher', async () => {
@@ -175,19 +146,157 @@ describe('when pre-validating LiveKit credentials', () => {
     })
   })
 
-  describe('and the connect rejects', () => {
-    beforeEach(() => {
+  describe('and the connect rejects with a LiveKit connect error', () => {
+    let outcome: unknown
+
+    beforeEach(async () => {
       publisher = createMockPublisher()
-      publisher.connect.mockRejectedValue(new Error('token rejected'))
+      publisher.connect.mockRejectedValue(new LivekitConnectError('LiveKit connect failed: token rejected'))
       components = createMockComponents({ publisher })
+      const manager = await createManager(components)
+      outcome = await manager.validateCredentials('wss://lk.example.com', 'bad-token').catch((err: unknown) => err)
     })
 
-    it('should throw InvalidLivekitCredentialsError and still disconnect', async () => {
-      const manager = await createManager(components)
-      await expect(manager.validateCredentials('wss://lk.example.com', 'bad-token')).rejects.toBeInstanceOf(
-        InvalidLivekitCredentialsError
-      )
+    it('should reject the credentials through the sidecar factory publisher', () => {
+      expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledWith('validate', expect.anything())
+    })
+
+    it('should throw InvalidLivekitCredentialsError', () => {
+      expect(outcome).toBeInstanceOf(InvalidLivekitCredentialsError)
+    })
+
+    it('should still disconnect the throw-away publisher', () => {
       expect(publisher.disconnect).toHaveBeenCalled()
+    })
+  })
+
+  describe('and the connect fails for a reason other than the LiveKit connection', () => {
+    let failure: Error
+    let outcome: unknown
+
+    beforeEach(async () => {
+      failure = new Error('LiveKit connect failed: Sidecar exited (code=1, signal=null)')
+      publisher = createMockPublisher()
+      publisher.connect.mockRejectedValue(failure)
+      components = createMockComponents({ publisher })
+      const manager = await createManager(components)
+      outcome = await manager.validateCredentials('wss://lk.example.com', 'good-token').catch((err: unknown) => err)
+    })
+
+    it('should rethrow the original error', () => {
+      expect(outcome).toBe(failure)
+    })
+
+    it('should still disconnect the throw-away publisher', () => {
+      expect(publisher.disconnect).toHaveBeenCalled()
+    })
+  })
+
+  describe('and as many validations as MAX_CONCURRENT_PRESENTATIONS are still connecting', () => {
+    let manager: IPresentationManager
+    let firstConnect: ReturnType<typeof createDeferred<void>>
+    let secondConnect: ReturnType<typeof createDeferred<void>>
+    let firstValidation: Promise<unknown>
+    let secondValidation: Promise<unknown>
+
+    function validate(): Promise<unknown> {
+      return manager.validateCredentials('wss://lk.example.com', 'token').catch((err: unknown) => err)
+    }
+
+    beforeEach(async () => {
+      firstConnect = createDeferred<void>()
+      secondConnect = createDeferred<void>()
+      publisher = createMockPublisher()
+      publisher.connect.mockReturnValueOnce(firstConnect.promise).mockReturnValueOnce(secondConnect.promise)
+      components = createMockComponents({ publisher })
+      components.config.getString.mockImplementation(async (key: string) =>
+        key === 'MAX_CONCURRENT_PRESENTATIONS' ? '2' : key === 'PUBLIC_BASE_URL' ? PUBLIC_BASE_URL : undefined
+      )
+      manager = await createManager(components)
+      firstValidation = validate()
+      secondValidation = validate()
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      firstConnect.resolve()
+      secondConnect.resolve()
+      await Promise.all([firstValidation, secondValidation])
+    })
+
+    describe('and another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        outcome = await validate()
+      })
+
+      it('should reject it with MaxConcurrentPresentationsError', () => {
+        expect(outcome).toBeInstanceOf(MaxConcurrentPresentationsError)
+      })
+
+      it('should not spawn another sidecar for it', () => {
+        expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledTimes(2)
+      })
+    })
+
+    describe('and one of them is accepted before another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        firstConnect.resolve()
+        await firstValidation
+        outcome = await validate()
+      })
+
+      it('should accept the new validation', () => {
+        expect(outcome).toBeUndefined()
+      })
+    })
+
+    describe('and one of them is rejected before another validation starts', () => {
+      let outcome: unknown
+
+      beforeEach(async () => {
+        firstConnect.reject(new LivekitConnectError('LiveKit connect failed: token rejected'))
+        await firstValidation
+        outcome = await validate()
+      })
+
+      it('should accept the new validation', () => {
+        expect(outcome).toBeUndefined()
+      })
+    })
+  })
+
+  describe('and MAX_CONCURRENT_PRESENTATIONS is 0 with many validations still connecting', () => {
+    let connect: ReturnType<typeof createDeferred<void>>
+    let pending: Promise<unknown[]>
+
+    beforeEach(async () => {
+      connect = createDeferred<void>()
+      publisher = createMockPublisher()
+      publisher.connect.mockReturnValue(connect.promise)
+      components = createMockComponents({ publisher })
+      components.config.getString.mockImplementation(async (key: string) =>
+        key === 'MAX_CONCURRENT_PRESENTATIONS' ? '0' : key === 'PUBLIC_BASE_URL' ? PUBLIC_BASE_URL : undefined
+      )
+      const manager = await createManager(components)
+      pending = Promise.all(
+        Array.from({ length: 12 }, () =>
+          manager.validateCredentials('wss://lk.example.com', 'token').catch((err: unknown) => err)
+        )
+      )
+      await flushMicrotasks()
+    })
+
+    afterEach(async () => {
+      connect.resolve()
+      await pending
+    })
+
+    it('should spawn a sidecar for every validation', () => {
+      expect(components.sidecarPublisher.createPublisher).toHaveBeenCalledTimes(12)
     })
   })
 })
@@ -195,12 +304,55 @@ describe('when pre-validating LiveKit credentials', () => {
 describe('when creating a presentation', () => {
   let components: ReturnType<typeof createMockComponents>
 
+  describe('and the first slide render fails and destroying the renderer throws', () => {
+    let publisher: jest.Mocked<ISidecarPublisher>
+    let manager: IPresentationManager
+    let outcome: unknown
+
+    beforeEach(async () => {
+      publisher = createMockPublisher()
+      components = createMockComponents({ publisher })
+      const renderer = createMockRenderer()
+      renderer.renderSlide.mockRejectedValue(new Error('render failed'))
+      renderer.destroy.mockImplementation(() => {
+        throw new Error('destroy failed')
+      })
+      components.slideRenderer.createRenderer.mockReturnValue(renderer)
+      manager = await createManager(components)
+    })
+
+    describe('and the sidecar disconnects', () => {
+      beforeEach(async () => {
+        outcome = await createPdfSession(manager).catch((err: unknown) => err)
+      })
+
+      it('should still disconnect the sidecar', () => {
+        expect(publisher.disconnect).toHaveBeenCalled()
+      })
+
+      it('should reject with the render error', () => {
+        expect(outcome).toEqual(new Error('render failed'))
+      })
+    })
+
+    describe('and disconnecting the sidecar throws too', () => {
+      beforeEach(async () => {
+        publisher.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+        outcome = await createPdfSession(manager).catch((err: unknown) => err)
+      })
+
+      it('should reject with the render error', () => {
+        expect(outcome).toEqual(new Error('render failed'))
+      })
+    })
+  })
+
   describe('and the PDF has zero pages', () => {
     beforeEach(() => {
       components = createMockComponents()
       const renderer = createMockRenderer()
       renderer.getSlideCount.mockReturnValue(0)
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+      components.slideRenderer.createRenderer.mockReturnValue(renderer)
     })
 
     it('should throw an error about no pages', async () => {
@@ -212,7 +364,7 @@ describe('when creating a presentation', () => {
   })
 
   describe('and publisher.connect() throws', () => {
-    let publisher: jest.Mocked<ILiveKitPublisher>
+    let publisher: jest.Mocked<ISidecarPublisher>
 
     beforeEach(() => {
       publisher = createMockPublisher()
@@ -255,7 +407,7 @@ describe('when creating a presentation', () => {
 
 describe('when handling data channel messages', () => {
   let components: ReturnType<typeof createMockComponents>
-  let publisher: jest.Mocked<ILiveKitPublisher>
+  let publisher: jest.Mocked<ISidecarPublisher>
   let dataHandler: (message: Record<string, unknown>) => Promise<void>
 
   beforeEach(async () => {
@@ -266,7 +418,7 @@ describe('when handling data channel messages', () => {
     renderer.getSlideVideos.mockResolvedValue([
       { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
     ])
-    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    components.slideRenderer.createRenderer.mockReturnValue(renderer)
 
     await createManagerWithSession(components)
     dataHandler = publisher.setDataHandler.mock.calls[0][0] as (message: Record<string, unknown>) => Promise<void>
@@ -339,7 +491,7 @@ describe('when handling data channel messages', () => {
 
 describe('when a presenter sends presentation:overlay:update', () => {
   const OVERLAY_UPDATE = 'presentation:overlay:update'
-  let publisher: jest.Mocked<ILiveKitPublisher>
+  let publisher: jest.Mocked<ISidecarPublisher>
   let manager: IPresentationManager
   let sessionId: string
   let dataHandler: (message: Record<string, unknown>) => Promise<void>
@@ -493,1032 +645,39 @@ describe('when a presenter sends presentation:overlay:update', () => {
   })
 })
 
-describe('when managing video playback in a presentation', () => {
+describe('when stopping video playback', () => {
   let manager: IPresentationManager
-  let presentationId: string
   let components: ReturnType<typeof createMockComponents>
-  let publisher: jest.Mocked<ILiveKitPublisher>
-  let compositor: jest.Mocked<IVideoCompositor>
+  let publisher: jest.Mocked<ISidecarPublisher>
 
-  describe('when stopping video playback', () => {
-    describe('and a video is currently playing', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        publisher.publishData.mockClear()
-        publisher.pushFrame.mockClear()
-        publisher.startHeartbeat.mockClear()
-
-        await manager.stopVideo(presentationId)
-      })
-
-      it('should clean up the compositor', () => {
-        expect(compositor.cleanup).toHaveBeenCalled()
-      })
-
-      it('should restore the static slide frame', () => {
-        expect(publisher.pushFrame).toHaveBeenCalled()
-      })
-
-      it('should restart the heartbeat with the slide frame', () => {
-        expect(publisher.startHeartbeat).toHaveBeenCalled()
-      })
-
-      it('should broadcast state with videoState idle', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'idle'
-          })
-        )
-      })
-    })
-
-    describe('and a video is currently paused', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        await manager.pauseVideo(presentationId)
-        publisher.publishData.mockClear()
-
-        await manager.stopVideo(presentationId)
-      })
-
-      it('should have cleaned up the compositor during pause', () => {
-        expect(compositor.cleanup).toHaveBeenCalled()
-      })
-
-      it('should broadcast state with videoState idle', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'idle'
-          })
-        )
-      })
-    })
-
-    describe('and no video is playing', () => {
-      beforeEach(async () => {
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        publisher.publishData.mockClear()
-        await manager.stopVideo(presentationId)
-      })
-
-      it('should not broadcast any state update', () => {
-        expect(publisher.publishData).not.toHaveBeenCalled()
-      })
-    })
-
-    describe('and the presentation does not exist', () => {
-      beforeEach(async () => {
-        components = createMockComponents()
-        manager = await createManager(components)
-      })
-
-      it('should throw PresentationNotFoundError', async () => {
-        await expect(manager.stopVideo('non-existent-id')).rejects.toThrow(PresentationNotFoundError)
-      })
-    })
-  })
-
-  describe('when pausing video playback', () => {
-    describe('and a video is currently playing', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        publisher.pushFrame.mockClear()
-        publisher.startHeartbeat.mockClear()
-        compositor.getLastFrame.mockClear()
-        compositor.cleanup.mockClear()
-
-        await manager.pauseVideo(presentationId)
-      })
-
-      it('should push the last video frame immediately to avoid any gap', () => {
-        expect(publisher.pushFrame).toHaveBeenCalledWith(
-          expect.any(Buffer),
-          expect.any(Number),
-          expect.any(Number),
-          5 // VIDEO_BUFFER_TYPE_I420
-        )
-      })
-
-      it('should start a heartbeat with the last video frame', () => {
-        expect(publisher.startHeartbeat).toHaveBeenCalledWith(
-          expect.any(Buffer),
-          expect.any(Number),
-          expect.any(Number),
-          5 // VIDEO_BUFFER_TYPE_I420
-        )
-      })
-
-      it('should get the last frame before cleanup', () => {
-        expect(compositor.getLastFrame).toHaveBeenCalled()
-        const getFrameOrder = compositor.getLastFrame.mock.invocationCallOrder[0]
-        const cleanupOrder = compositor.cleanup.mock.invocationCallOrder[0]
-        expect(getFrameOrder).toBeLessThan(cleanupOrder)
-      })
-
-      it('should broadcast state with videoState paused', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'paused'
-          })
-        )
-      })
-    })
-  })
-
-  describe('when resuming a paused video', () => {
-    let dateSpy: jest.SpyInstance
-
+  describe('and no video is playing', () => {
     beforeEach(async () => {
-      compositor = createMockCompositor()
       publisher = createMockPublisher()
       components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
       const result = await createManagerWithSession(components)
       manager = result.manager
-      presentationId = result.info.id
-
-      // Simulate 5 seconds of playback before pausing
-      let now = 1000
-      dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => now)
-      await manager.playVideo(presentationId, 0)
-      now = 6000
-      await manager.pauseVideo(presentationId)
-      publisher.startAudioPublishing.mockClear()
-      compositor.startPlayback.mockClear()
-
-      await manager.playVideo(presentationId, 0)
-    })
-
-    afterEach(() => {
-      dateSpy.mockRestore()
-    })
-
-    it('should not re-create the audio track (it stays published during pause)', () => {
-      expect(publisher.startAudioPublishing).not.toHaveBeenCalled()
-    })
-
-    it('should pass a non-zero seekSeconds to startPlayback', () => {
-      const seekArg = compositor.startPlayback.mock.calls[0][7]
-      expect(seekArg).toBeGreaterThan(0)
-    })
-
-    it('should broadcast state with videoState playing', () => {
-      expect(publisher.publishData).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'presentation:state',
-          videoState: 'playing'
-        })
-      )
-    })
-  })
-
-  describe('when playing a video after a full stop', () => {
-    beforeEach(async () => {
-      compositor = createMockCompositor()
-      publisher = createMockPublisher()
-      components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-      const result = await createManagerWithSession(components)
-      manager = result.manager
-      presentationId = result.info.id
-
-      await manager.playVideo(presentationId, 0)
-      await manager.stopVideo(presentationId)
-      publisher.startAudioPublishing.mockClear()
-      compositor.startPlayback.mockClear()
-
-      await manager.playVideo(presentationId, 0)
-    })
-
-    it('should create a fresh audio track', () => {
-      expect(publisher.startAudioPublishing).toHaveBeenCalledWith(48000, 2)
-    })
-
-    it('should start playback without seekSeconds', () => {
-      const seekArg = compositor.startPlayback.mock.calls[0][7]
-      expect(seekArg).toBeUndefined()
-    })
-  })
-
-  describe('when playing a video embedded in the PPTX', () => {
-    const embeddedPath = '/tmp/cast-pptx-video-abc/media1.mp4'
-
-    beforeEach(async () => {
-      compositor = createMockCompositor()
-      publisher = createMockPublisher()
-      components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-      components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((url: string) =>
-        url === embeddedPath ? { path: embeddedPath, bytes: 5 } : null
-      )
-
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: embeddedPath, geometry: { x: 100, y: 100, width: 640, height: 480 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-      const result = await createManagerWithSession(components)
-      manager = result.manager
-      presentationId = result.info.id
-      compositor.downloadVideo.mockClear()
-
-      await manager.playVideo(presentationId, 0)
-    })
-
-    it('should play the extracted file without downloading it', () => {
-      expect({
-        downloaded: compositor.downloadVideo.mock.calls.length,
-        playedPath: compositor.startPlayback.mock.calls[0]?.[0]
-      }).toEqual({ downloaded: 0, playedPath: embeddedPath })
-    })
-  })
-
-  describe('when managing audio during video playback', () => {
-    describe('when playing a video', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should start audio publishing at 48kHz stereo', () => {
-        expect(publisher.startAudioPublishing).toHaveBeenCalledWith(48000, 2)
-      })
-
-      it('should call startAudioPublishing before startPlayback', () => {
-        const audioOrder = publisher.startAudioPublishing.mock.invocationCallOrder[0]
-        const playbackOrder = compositor.startPlayback.mock.invocationCallOrder[0]
-        expect(audioOrder).toBeLessThan(playbackOrder)
-      })
-
-      it('should pass onAudioData callback to compositor startPlayback', () => {
-        expect(compositor.startPlayback).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({ url: 'https://example.com/video.mp4' }),
-          expect.any(Buffer),
-          expect.any(Number),
-          expect.any(Number),
-          publisher,
-          expect.any(Function),
-          undefined
-        )
-      })
-    })
-
-    describe('when startAudioPublishing fails', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        publisher.startAudioPublishing.mockRejectedValueOnce(new Error('Audio publish failed'))
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should still start video playback', () => {
-        expect(compositor.startPlayback).toHaveBeenCalled()
-      })
-    })
-
-    describe('when stopping a playing video', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        publisher.stopAudioPublishing.mockClear()
-
-        await manager.stopVideo(presentationId)
-      })
-
-      it('should stop audio publishing', () => {
-        expect(publisher.stopAudioPublishing).toHaveBeenCalled()
-      })
-
-      it('should stop audio before cleaning up compositor', () => {
-        const audioOrder = publisher.stopAudioPublishing.mock.invocationCallOrder[0]
-        const cleanupOrder =
-          compositor.cleanup.mock.invocationCallOrder[compositor.cleanup.mock.invocationCallOrder.length - 1]
-        expect(audioOrder).toBeLessThan(cleanupOrder)
-      })
-    })
-
-    describe('when navigating away from a playing video', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        publisher.stopAudioPublishing.mockClear()
-
-        await manager.navigate(presentationId, 'next')
-      })
-
-      it('should stop audio publishing', () => {
-        expect(publisher.stopAudioPublishing).toHaveBeenCalled()
-      })
-    })
-
-    describe('when a video ends naturally', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-        publisher.stopAudioPublishing.mockClear()
-
-        // Simulate video ending by invoking the onEnd callback
-        const onEndCallback = compositor.onEnd.mock.calls[0][0]
-        await onEndCallback()
-      })
-
-      it('should stop audio publishing', () => {
-        expect(publisher.stopAudioPublishing).toHaveBeenCalled()
-      })
-    })
-  })
-
-  describe('when a video download fails', () => {
-    describe('and the server returns HTTP 403', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        compositor.downloadVideo.mockRejectedValue(new Error('HTTP 403 downloading https://example.com/video.mp4'))
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast videoState error', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'error',
-            videoErrorReason: expect.stringContaining('not authorized')
-          })
-        )
-      })
-
-      it('should clean up the compositor', () => {
-        expect(compositor.cleanup).toHaveBeenCalled()
-      })
-    })
-
-    describe('and the download times out', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        compositor.downloadVideo.mockRejectedValue(new Error('Download timed out after 120s'))
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast videoState error with timeout reason', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'error',
-            videoErrorReason: expect.stringContaining('timed out')
-          })
-        )
-      })
-    })
-
-    describe('and the video is not found (404)', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        compositor.downloadVideo.mockRejectedValue(new Error('HTTP 404 downloading https://example.com/video.mp4'))
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast videoState error with not found reason', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'error',
-            videoErrorReason: expect.stringContaining('not found')
-          })
-        )
-      })
-    })
-
-    describe('and the error is cleared on retry', () => {
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        compositor.downloadVideo
-          .mockRejectedValueOnce(new Error('HTTP 403 downloading https://example.com/video.mp4'))
-          .mockResolvedValue({ path: '/tmp/video.mp4', bytes: 1024 })
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-
-        const renderer = createMockRenderer()
-        renderer.getSlideVideos.mockResolvedValue([
-          { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-        ])
-        components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        // First play fails
-        await manager.playVideo(presentationId, 0)
-
-        publisher.publishData.mockClear()
-
-        // Second play succeeds (downloadVideo mock resets to default success)
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast loading state without error reason on retry', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'loading'
-          })
-        )
-        const loadingCall = publisher.publishData.mock.calls.find(
-          (call) => (call[0] as Record<string, unknown>).videoState === 'loading'
-        )
-        expect(loadingCall).toBeDefined()
-        if (loadingCall) {
-          expect((loadingCall[0] as Record<string, unknown>).videoErrorReason).toBeUndefined()
-        }
-      })
-    })
-  })
-
-  describe('when stopVideo races with an in-flight playVideo', () => {
-    function setupRenderer(components: ReturnType<typeof createMockComponents>) {
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/video.mp4', geometry: { x: 100, y: 100, width: 640, height: 480 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-    }
-
-    function lastBroadcastVideoState(pub: jest.Mocked<ILiveKitPublisher>): string | undefined {
-      const stateCalls = pub.publishData.mock.calls.filter(
-        (call) => (call[0] as Record<string, unknown>).type === 'presentation:state'
-      )
-      const last = stateCalls[stateCalls.length - 1]
-      return last ? ((last[0] as Record<string, unknown>).videoState as string | undefined) : undefined
-    }
-
-    describe('and stopVideo is called while the download is pending', () => {
-      let downloadDeferred: ReturnType<typeof createDeferred<{ path: string; bytes: number }>>
-      let playPromise: Promise<void>
-
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        downloadDeferred = createDeferred<{ path: string; bytes: number }>()
-        compositor.downloadVideo.mockReturnValue(downloadDeferred.promise)
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-        setupRenderer(components)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        playPromise = manager.playVideo(presentationId, 0)
-        await flushMicrotasks() // let playVideoSession reach the download await
-
-        await manager.stopVideo(presentationId)
-
-        downloadDeferred.resolve({ path: '/tmp/video.mp4', bytes: 1024 })
-        await playPromise
-      })
-
-      it('should not call startPlayback', () => {
-        expect(compositor.startPlayback).not.toHaveBeenCalled()
-      })
-
-      it('should not register onEnd', () => {
-        expect(compositor.onEnd).not.toHaveBeenCalled()
-      })
-
-      it('should leave videoState idle (not revert to playing)', () => {
-        expect(lastBroadcastVideoState(publisher)).toBe('idle')
-      })
-    })
-
-    describe('and stopVideo is called while audio publishing is pending', () => {
-      let audioDeferred: ReturnType<typeof createDeferred<void>>
-      let playPromise: Promise<void>
-
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        audioDeferred = createDeferred<void>()
-        publisher = createMockPublisher()
-        publisher.startAudioPublishing.mockReturnValue(audioDeferred.promise)
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-        setupRenderer(components)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        playPromise = manager.playVideo(presentationId, 0)
-        await flushMicrotasks() // let playVideoSession reach the startAudioPublishing await
-
-        await manager.stopVideo(presentationId)
-
-        audioDeferred.resolve()
-        await playPromise
-      })
-
-      it('should not call startPlayback', () => {
-        expect(compositor.startPlayback).not.toHaveBeenCalled()
-      })
-
-      it('should leave videoState idle', () => {
-        expect(lastBroadcastVideoState(publisher)).toBe('idle')
-      })
-    })
-
-    describe('and stopVideo is called while startPlayback is pending', () => {
-      let startDeferred: ReturnType<typeof createDeferred<void>>
-      let playPromise: Promise<void>
-
-      beforeEach(async () => {
-        compositor = createMockCompositor()
-        startDeferred = createDeferred<void>()
-        compositor.startPlayback.mockReturnValue(startDeferred.promise)
-        publisher = createMockPublisher()
-        components = createMockComponents({ publisher })
-        components.videoCompositor.createCompositor.mockReturnValue(compositor)
-        setupRenderer(components)
-
-        const result = await createManagerWithSession(components)
-        manager = result.manager
-        presentationId = result.info.id
-
-        playPromise = manager.playVideo(presentationId, 0)
-        await flushMicrotasks() // let playVideoSession reach the startPlayback await
-
-        await manager.stopVideo(presentationId)
-
-        startDeferred.resolve()
-        await playPromise
-      })
-
-      it('should leave videoState idle (the post-startPlayback guard trips)', () => {
-        expect(lastBroadcastVideoState(publisher)).toBe('idle')
-      })
-
-      it('should not register onEnd (play returned before reaching that line)', () => {
-        expect(compositor.onEnd).not.toHaveBeenCalled()
-      })
-
-      it('should not increment the play metric', () => {
-        expect(components.metrics.increment).not.toHaveBeenCalledWith('video_playback_total', { action: 'play' })
-      })
-
-      // Without this the FFmpegs spawned inside startPlayback after stopVideo's
-      // cleanup are orphaned — the compositor's close handler is gated on
-      // `!cleanedUp && isPlaying` and wouldn't kill them either.
-      it('should cleanup the orphaned compositor once the post-startPlayback guard trips', () => {
-        expect(compositor.cleanup).toHaveBeenCalledTimes(2)
-      })
-    })
-  })
-
-  describe('when a user-initiated video play fails', () => {
-    let compositor: jest.Mocked<IVideoCompositor>
-    let publisher: jest.Mocked<ILiveKitPublisher>
-    let components: ReturnType<typeof createMockComponents>
-    let manager: IPresentationManager
-    let presentationId: string
-
-    function setup(overrides: { downloadError?: Error; startPlaybackError?: Error } = {}) {
-      compositor = createMockCompositor()
-      if (overrides.downloadError) compositor.downloadVideo.mockRejectedValue(overrides.downloadError)
-      if (overrides.startPlaybackError) compositor.startPlayback.mockRejectedValue(overrides.startPlaybackError)
-      publisher = createMockPublisher()
-      components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-      return createManagerWithSession(components).then((r) => {
-        manager = r.manager
-        presentationId = r.info.id
-      })
-    }
-
-    describe('and the download fails with HTTP 403', () => {
-      beforeEach(async () => {
-        await setup({ downloadError: new Error('HTTP 403 downloading https://example.com/v.mp4') })
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast a transient presentation:error with code video-permission-denied', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:error',
-            code: 'video-permission-denied',
-            message: expect.stringContaining('not authorized'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
-          })
-        )
-      })
-    })
-
-    describe('and the remux returns invalid data', () => {
-      beforeEach(async () => {
-        await setup({ downloadError: new Error('Remux failed (code 183): Invalid data found when processing input') })
-        await manager.playVideo(presentationId, 0)
-      })
-
-      it('should broadcast code video-invalid-format', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({ type: 'presentation:error', code: 'video-invalid-format' })
-        )
-      })
-    })
-
-    describe('and startPlayback throws mid-setup', () => {
-      beforeEach(async () => {
-        await setup({ startPlaybackError: new Error('spawn ffmpeg ENOENT') })
-        await manager.playVideo(presentationId, 0).catch(() => {
-          /* rethrown by the manager — swallowed in tests */
-        })
-      })
-
-      it('should broadcast a transient presentation:error', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({ type: 'presentation:error', videoIndex: 0 })
-        )
-      })
-    })
-  })
-
-  describe('when the compositor fires onError mid-stream', () => {
-    let compositor: jest.Mocked<IVideoCompositor>
-    let publisher: jest.Mocked<ILiveKitPublisher>
-
-    async function setupAndFire(
-      reason: 'video-playback-interrupted' | 'video-stream-error' | 'audio-processing-failed'
-    ) {
-      compositor = createMockCompositor()
-      publisher = createMockPublisher()
-      const components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-      const result = await createManagerWithSession(components)
-      await result.manager.playVideo(result.info.id, 0)
-
       publisher.publishData.mockClear()
-      publisher.stopAudioPublishing.mockClear()
-      const onErrorCallback = compositor.onError.mock.calls[0][0]
-      await onErrorCallback(reason)
-      await flushMicrotasks()
-    }
-
-    describe('with reason video-playback-interrupted', () => {
-      let compositorRef: jest.Mocked<IVideoCompositor>
-      beforeEach(async () => {
-        await setupAndFire('video-playback-interrupted')
-        compositorRef = compositor
-      })
-
-      it('should broadcast presentation:error with an "interrupted" message', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:error',
-            code: 'video-playback-interrupted',
-            message: expect.stringContaining('interrupted'),
-            videoIndex: 0,
-            videoUrl: 'https://example.com/v.mp4'
-          })
-        )
-      })
-
-      it('should transition session to videoState error and include the structured code', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:state',
-            videoState: 'error',
-            videoErrorCode: 'video-playback-interrupted',
-            videoErrorReason: expect.stringContaining('interrupted')
-          })
-        )
-      })
-
-      it('should tear down the audio track', () => {
-        expect(publisher.stopAudioPublishing).toHaveBeenCalled()
-      })
-
-      it('should call compositor.cleanup() to release latches and the slide temp file', () => {
-        expect(compositorRef.cleanup).toHaveBeenCalled()
-      })
+      await manager.stopVideo(result.info.id)
     })
 
-    describe('with reason video-stream-error', () => {
-      beforeEach(() => setupAndFire('video-stream-error'))
-
-      it('should broadcast a stream-error-specific message', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:error',
-            code: 'video-stream-error',
-            message: expect.stringContaining('stream error')
-          })
-        )
-      })
-    })
-
-    describe('with reason audio-processing-failed', () => {
-      beforeEach(() => setupAndFire('audio-processing-failed'))
-
-      it('should broadcast an audio-specific message', () => {
-        expect(publisher.publishData).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'presentation:error',
-            code: 'audio-processing-failed',
-            message: expect.stringContaining('Audio')
-          })
-        )
-      })
+    it('should not broadcast any state update', () => {
+      expect(publisher.publishData).not.toHaveBeenCalled()
     })
   })
 
-  describe('when the audio handler receives PCM chunks', () => {
-    // Covers the RangeError crash: feeding an oversize chunk to onAudioData
-    // used to drift audioWrite past the buffer and throw inside Buffer.copy.
-    let compositor: jest.Mocked<IVideoCompositor>
-    let publisher: jest.Mocked<ILiveKitPublisher>
-    let onAudioData: (chunk: Buffer) => void
-
+  describe('and the presentation does not exist', () => {
     beforeEach(async () => {
-      compositor = createMockCompositor()
-      publisher = createMockPublisher()
-      const components = createMockComponents({ publisher })
-      components.videoCompositor.createCompositor.mockReturnValue(compositor)
-      const renderer = createMockRenderer()
-      renderer.getSlideVideos.mockResolvedValue([
-        { url: 'https://example.com/v.mp4', geometry: { x: 0, y: 0, width: 100, height: 100 } }
-      ])
-      components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-      const result = await createManagerWithSession(components)
-      await result.manager.playVideo(result.info.id, 0)
-      // The seventh positional arg (index 6) of startPlayback is the onAudioData callback.
-      onAudioData = compositor.startPlayback.mock.calls[0][6] as (chunk: Buffer) => void
+      components = createMockComponents()
+      manager = await createManager(components)
     })
 
-    it('should push nothing for a sub-frame chunk', () => {
-      onAudioData(Buffer.alloc(100))
-      expect(publisher.pushAudioFrame).not.toHaveBeenCalled()
-    })
-
-    it('should push exactly one frame for a 1920-byte chunk', () => {
-      onAudioData(Buffer.alloc(1920))
-      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
-    })
-
-    it('should push one frame and keep the tail for a 1.5-frame chunk', () => {
-      onAudioData(Buffer.alloc(1920 + 500))
-      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
-      // Next small chunk should complete a second frame by combining with the residual
-      publisher.pushAudioFrame.mockClear()
-      onAudioData(Buffer.alloc(1920 - 500))
-      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(1)
-    })
-
-    it('should not throw on a chunk larger than any fixed ring buffer would have been', () => {
-      // Regression: old ring buffer was 40448 bytes; a 60 KB burst from FFmpeg
-      // used to drift audioWrite past the buffer and crash later.
-      expect(() => onAudioData(Buffer.alloc(60 * 1024))).not.toThrow()
-      // 60 KB / 1920 = 32 full frames
-      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(Math.floor((60 * 1024) / 1920))
-    })
-
-    it('should stitch arbitrary chunk boundaries into 1920-byte frames', () => {
-      onAudioData(Buffer.alloc(1000))
-      onAudioData(Buffer.alloc(1000)) // total 2000 → 1 frame, 80 residual
-      onAudioData(Buffer.alloc(50)) // total 130 residual
-      onAudioData(Buffer.alloc(1920 - 130)) // completes frame 2
-      expect(publisher.pushAudioFrame).toHaveBeenCalledTimes(2)
+    it('should throw PresentationNotFoundError', async () => {
+      await expect(manager.stopVideo('non-existent-id')).rejects.toThrow(PresentationNotFoundError)
     })
   })
 })
 
-describe('when the legacy compositor pre-downloads the deck videos', () => {
-  const EMBEDDED_PATH = '/tmp/cast-pptx-video-abc/media1.mp4'
-  const REMOTE_URL = 'https://example.com/clip.mp4'
-  let components: ReturnType<typeof createMockComponents>
-  let compositor: jest.Mocked<IVideoCompositor>
-
-  beforeEach(async () => {
-    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })
-    compositor = createMockCompositor()
-    components = createMockComponents()
-    components.videoCompositor.createCompositor.mockReturnValue(compositor)
-    components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((url: string) =>
-      url === EMBEDDED_PATH ? { path: EMBEDDED_PATH, bytes: 5 } : null
-    )
-    const renderer = createMockRenderer()
-    renderer.getSlideCount.mockReturnValue(1)
-    renderer.getSlideVideos.mockResolvedValue([
-      { url: EMBEDDED_PATH, geometry: { x: 0, y: 0, width: 640, height: 480 } },
-      { url: REMOTE_URL, geometry: { x: 0, y: 0, width: 640, height: 480 } }
-    ])
-    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
-    await createManagerWithSession(components)
-    compositor.downloadVideo.mockClear()
-    jest.advanceTimersByTime(3000)
-    await flushMicrotasks()
-    await flushMicrotasks()
-  })
-
-  afterEach(() => {
-    jest.useRealTimers()
-  })
-
-  it('should download the remote video and leave the file the PPTX renderer already extracted alone', () => {
-    expect(compositor.downloadVideo.mock.calls.map(([url]) => url)).toEqual([REMOTE_URL])
-  })
-})
-
-describe('when client composition is enabled', () => {
-  const PUBLIC_BASE_URL = 'https://cast.example.com'
+describe('when presenting through the sidecar', () => {
   const PRESENTER_IDENTITY = 'stream:p:1'
   const VIDEO_URL = 'https://example.com/video.mp4'
   const EMBEDDED_PATH = '/tmp/cast-pptx-video-a/v.mp4'
@@ -1527,12 +686,11 @@ describe('when client composition is enabled', () => {
   const NOW = 1760270400000
   let components: ReturnType<typeof createMockComponents>
   let sidecar: jest.Mocked<ISidecarPublisher>
-  let compositor: jest.Mocked<IVideoCompositor>
   let configValues: Record<string, string | undefined>
   let manager: IPresentationManager
   let presentationId: string
-  let encodeCount: number
-  let renderer: jest.Mocked<IRenderer>
+  let renderCount: number
+  let renderer: jest.Mocked<ISlideRenderer>
   let rmSync: jest.SpyInstance
 
   function stateBroadcasts(): Array<Record<string, unknown>> {
@@ -1581,49 +739,36 @@ describe('when client composition is enabled', () => {
 
   beforeEach(async () => {
     rmSync = jest.spyOn(fs, 'rmSync').mockImplementation(() => undefined)
-    encodeCount = 0
-    jest.mocked(encodeSlidePng).mockImplementation(async () => {
-      encodeCount++
-      return { hash: `h${encodeCount}`, png: Buffer.from(`png${encodeCount}`), width: 1920, height: 1080 }
-    })
     configValues = { PUBLIC_BASE_URL: `${PUBLIC_BASE_URL}/` }
     sidecar = createMockPublisher()
-    compositor = createMockCompositor()
     components = createMockComponents({ publisher: sidecar })
     components.config.getString.mockImplementation(async (key: string) => configValues[key])
-    components.features.getIsFeatureEnabled.mockResolvedValue(true)
-    components.videoCompositor.createCompositor.mockReturnValue(compositor)
     renderer = createMockRenderer()
+    renderCount = 0
+    renderer.renderSlide.mockImplementation(async () => {
+      renderCount++
+      return { hash: `h${renderCount}`, png: Buffer.from(`png${renderCount}`), width: 1920, height: 1080 }
+    })
     renderer.getSlideCount.mockReturnValue(10)
     renderer.getSlideVideos.mockResolvedValue([
       { url: VIDEO_URL, geometry: { x: 100, y: 100, width: 640, height: 480 } }
     ])
-    components.pdfRenderer.createRenderer.mockReturnValue(renderer)
+    components.slideRenderer.createRenderer.mockReturnValue(renderer)
     embedOnly([VIDEO_URL])
     manager = await createManager(components)
   })
 
   afterEach(() => {
     rmSync.mockRestore()
-    jest.mocked(encodeSlidePng).mockReset()
   })
 
   describe('and PUBLIC_BASE_URL is unset', () => {
-    beforeEach(async () => {
+    beforeEach(() => {
       configValues.PUBLIC_BASE_URL = undefined
-      manager = await createManager(components)
-      await createSession()
     })
 
-    it('should create the session publisher through the rtc-node factory instead of the sidecar one', () => {
-      expect([
-        components.sidecarPublisher.createPublisher.mock.calls.length,
-        components.liveKitPublisher.createPublisher.mock.calls.length
-      ]).toEqual([0, 1])
-    })
-
-    it('should create the session without a slide in the state', () => {
-      expect(stateBroadcasts()[0]).not.toHaveProperty('slide')
+    it('should reject creating the manager with an https requirement', async () => {
+      await expect(createManager(components)).rejects.toThrow('PUBLIC_BASE_URL must be an https:// URL')
     })
   })
 
@@ -1665,33 +810,11 @@ describe('when client composition is enabled', () => {
       }
     })
 
-    it('should create the session publisher through the sidecar factory instead of an rtc-node one', () => {
-      expect([
-        components.sidecarPublisher.createPublisher.mock.calls.length,
-        components.liveKitPublisher.createPublisher.mock.calls.length
-      ]).toEqual([1, 0])
+    it('should create the slide renderer for the PDF file type', () => {
+      expect(components.slideRenderer.createRenderer).toHaveBeenCalledWith('pdf')
     })
 
-    it('should read the dapps cast-client-composition feature flag', () => {
-      expect(components.features.getIsFeatureEnabled).toHaveBeenCalledWith('dapps', 'cast-client-composition')
-    })
-
-    describe('and the flag is turned off before the presenter navigates', () => {
-      beforeEach(async () => {
-        components.features.getIsFeatureEnabled.mockResolvedValue(false)
-        await manager.navigate(presentationId, 'next')
-      })
-
-      it('should keep broadcasting slide urls for the running session', () => {
-        expect(lastSlideUrl()).toBe(`${PUBLIC_BASE_URL}/presentations/${presentationId}/slides/h2.png`)
-      })
-    })
-
-    it('should not publish a composite track', () => {
-      expect(sidecar.startPublishing).not.toHaveBeenCalled()
-    })
-
-    it('should start the prefetch bake right away, without the legacy timer', () => {
+    it('should start the prefetch bake right away', () => {
       expect(components.mediaEncoder.bake).toHaveBeenCalledWith(EMBEDDED_PATH, expect.any(String), {
         priority: 'prefetch',
         signal: expect.any(AbortSignal)
@@ -1740,39 +863,14 @@ describe('when client composition is enabled', () => {
       })
     })
 
-    describe('and the presenter navigates to the next slide with a fresh frame', () => {
-      let pushedFrameBeforeEncode: boolean
-
-      beforeEach(async () => {
-        sidecar.pushFrame.mockClear()
-        jest.mocked(encodeSlidePng).mockClear()
-        await manager.navigate(presentationId, 'next')
-        pushedFrameBeforeEncode =
-          sidecar.pushFrame.mock.invocationCallOrder[0] < jest.mocked(encodeSlidePng).mock.invocationCallOrder[0]
-      })
-
-      it('should push the new frame before encoding the slide image', () => {
-        expect(pushedFrameBeforeEncode).toBe(true)
-      })
-    })
-
-    describe('and encoding the next slide fails', () => {
+    describe('and rendering the next slide fails', () => {
       let navigation: Promise<unknown>
 
       beforeEach(async () => {
-        renderer.renderSlide.mockResolvedValueOnce({ buffer: Buffer.alloc(100, 1), width: 1920, height: 1080 })
-        jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+        renderer.renderSlide.mockRejectedValueOnce(new Error('render failed'))
         sidecar.publishData.mockClear()
         navigation = manager.navigate(presentationId, 'next')
         await navigation.catch(() => undefined)
-      })
-
-      it('should publish the previous frame again', () => {
-        expect(sidecar.pushFrame).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
-      })
-
-      it('should repeat the previous frame in the heartbeat', () => {
-        expect(sidecar.startHeartbeat).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
       })
 
       it('should broadcast the state of the current slide', () => {
@@ -1781,8 +879,8 @@ describe('when client composition is enabled', () => {
         )
       })
 
-      it('should reject the navigation with the encode error', async () => {
-        await expect(navigation).rejects.toThrow('encode failed')
+      it('should reject the navigation with the render error', async () => {
+        await expect(navigation).rejects.toThrow('render failed')
       })
 
       it('should stay on the current slide', () => {
@@ -1798,13 +896,8 @@ describe('when client composition is enabled', () => {
 
     describe('and loading the next slide videos fails', () => {
       beforeEach(async () => {
-        renderer.renderSlide.mockResolvedValueOnce({ buffer: Buffer.alloc(100, 1), width: 1920, height: 1080 })
         renderer.getSlideVideos.mockRejectedValueOnce(new Error('videos failed'))
         await manager.navigate(presentationId, 'next').catch(() => undefined)
-      })
-
-      it('should publish the previous frame again', () => {
-        expect(sidecar.pushFrame).toHaveBeenLastCalledWith(Buffer.alloc(100), 1920, 1080)
       })
 
       it('should keep the previous slide url', () => {
@@ -2013,17 +1106,21 @@ describe('when client composition is enabled', () => {
     })
   })
 
-  describe('and encoding the first slide fails', () => {
+  describe('and rendering the first slide fails', () => {
     let creation: Promise<unknown>
 
     beforeEach(async () => {
-      jest.mocked(encodeSlidePng).mockRejectedValueOnce(new Error('encode failed'))
+      renderer.renderSlide.mockRejectedValueOnce(new Error('render failed'))
       creation = createPdfSession(manager)
       await creation.catch(() => undefined)
     })
 
-    it('should reject creating the presentation with the encode error', async () => {
-      await expect(creation).rejects.toThrow('encode failed')
+    it('should reject creating the presentation with the render error', async () => {
+      await expect(creation).rejects.toThrow('render failed')
+    })
+
+    it('should destroy the slide renderer', () => {
+      expect(renderer.destroy).toHaveBeenCalled()
     })
 
     it('should disconnect the sidecar', () => {
@@ -2069,11 +1166,8 @@ describe('when client composition is enabled', () => {
         await manager.playVideo(presentationId, 0)
       })
 
-      it('should bake the embedded file without downloading anything', () => {
-        expect([components.mediaEncoder.bake.mock.calls[0][0], compositor.downloadVideo.mock.calls.length]).toEqual([
-          EMBEDDED_PATH,
-          0
-        ])
+      it('should bake the embedded file', () => {
+        expect(components.mediaEncoder.bake.mock.calls[0][0]).toBe(EMBEDDED_PATH)
       })
     })
 
@@ -2457,6 +1551,17 @@ describe('when client composition is enabled', () => {
     })
   })
 
+  describe('and the session is stopped', () => {
+    beforeEach(async () => {
+      await createSession()
+      await manager.stopPresentation(presentationId)
+    })
+
+    it('should destroy the session slide renderer', () => {
+      expect(renderer.destroy).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('and the session is stopped with a pending bake', () => {
     beforeEach(async () => {
       bakeUntilAborted()
@@ -2519,12 +1624,8 @@ describe('when client composition is enabled', () => {
         })
       })
 
-      it('should not bake, download or play anything on the sidecar', () => {
-        expect([
-          components.mediaEncoder.bake.mock.calls.length,
-          compositor.downloadVideo.mock.calls.length,
-          sidecar.play.mock.calls.length
-        ]).toEqual([0, 0, 0])
+      it('should not bake or play anything on the sidecar', () => {
+        expect([components.mediaEncoder.bake.mock.calls.length, sidecar.play.mock.calls.length]).toEqual([0, 0])
       })
 
       describe('and the duration is 10 s', () => {
@@ -2988,72 +2089,6 @@ describe('when client composition is enabled', () => {
       expect(lastState()).toEqual(
         expect.objectContaining({ videoState: 'error', videoErrorCode: 'video-invalid-format' })
       )
-    })
-  })
-})
-
-describe('when client composition is disabled', () => {
-  let components: ReturnType<typeof createMockComponents>
-  let publisher: jest.Mocked<ILiveKitPublisher>
-  let manager: IPresentationManager
-
-  beforeEach(async () => {
-    publisher = createMockPublisher()
-    components = createMockComponents({ publisher })
-    manager = await createManager(components)
-    await createPdfSession(manager, 'stream:p:1')
-  })
-
-  afterEach(() => {
-    jest.mocked(encodeSlidePng).mockReset()
-  })
-
-  describe('and a session is created', () => {
-    let state: Record<string, unknown>
-
-    beforeEach(() => {
-      state = publisher.publishData.mock.calls[0][0]
-    })
-
-    it('should not include any client-composition field in the state', () => {
-      expect(
-        ['slide', 'presenterIdentity', 'playingVideoIndex', 'videoPositionMs', 'videoPositionAt'].filter(
-          (key) => key in state
-        )
-      ).toEqual([])
-    })
-
-    it('should not encode a slide image', () => {
-      expect(encodeSlidePng).not.toHaveBeenCalled()
-    })
-  })
-
-  describe('and the bot metadata is set', () => {
-    let metadata: Record<string, unknown>
-
-    beforeEach(() => {
-      metadata = publisher.updateMetadataState.mock.calls[0][0] as unknown as Record<string, unknown>
-    })
-
-    it('should not include any client-composition field', () => {
-      expect(['slide', 'presenterIdentity', 'playingVideoIndex'].filter((key) => key in metadata)).toEqual([])
-    })
-  })
-
-  describe('and a presenter claims the session', () => {
-    beforeEach(async () => {
-      publisher.publishData.mockClear()
-      publisher.updateMetadataState.mockClear()
-      publisher.setDataHandler.mock.calls[0][0]({ type: 'presentation:presenter:claim' }, 'stream:x:1')
-      await flushMicrotasks()
-    })
-
-    it('should not publish any state', () => {
-      expect(publisher.publishData).not.toHaveBeenCalled()
-    })
-
-    it('should not update the bot metadata', () => {
-      expect(publisher.updateMetadataState).not.toHaveBeenCalled()
     })
   })
 })

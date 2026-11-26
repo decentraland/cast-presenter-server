@@ -228,37 +228,6 @@ export async function resolveAndValidateUrl(url: string): Promise<ResolvedUrl> {
 }
 
 /**
- * Validates a video URL against HTTPS, private-IP, and domain-allowlist checks.
- *
- * @param url - The video URL to validate
- * @throws {Error} If the URL is invalid, non-HTTPS, resolves to private IP, or domain not allowed
- */
-export async function validateVideoUrl(url: string): Promise<string> {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error(`Invalid video URL: ${url}`)
-  }
-
-  // Upgrade http → https for allowlisted domains (e.g., PPTX embeds http:// Google Drive links)
-  if (parsed.protocol === 'http:' && ALLOWED_VIDEO_DOMAINS.has(parsed.hostname)) {
-    parsed.protocol = 'https:'
-  }
-
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`Video URL must use HTTPS, got ${parsed.protocol} for ${url}`)
-  }
-
-  if (!ALLOWED_VIDEO_DOMAINS.has(parsed.hostname)) {
-    throw new Error(`Video URL domain not allowed: ${parsed.hostname}`)
-  }
-
-  await resolveDnsAndValidate(parsed.hostname)
-  return parsed.href
-}
-
-/**
  * Creates the network validator component.
  *
  * Provides SSRF protection utilities for validating URLs
@@ -270,7 +239,6 @@ export function createNetworkValidatorComponent(): INetworkValidatorComponent {
   return {
     isPrivateIP,
     validateHttpsUrl,
-    resolveAndValidateUrl,
-    validateVideoUrl
+    resolveAndValidateUrl
   }
 }

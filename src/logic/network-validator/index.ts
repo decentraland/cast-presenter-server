@@ -3,8 +3,7 @@ export {
   createNetworkValidatorComponent,
   isPrivateIP,
   resolveAndValidateUrl,
-  validateHttpsUrl,
-  validateVideoUrl
+  validateHttpsUrl
 } from './component'
 export { pinnedHttpsRequest } from './pinned-https'
 export type { INetworkValidatorComponent, ResolvedUrl } from './types'

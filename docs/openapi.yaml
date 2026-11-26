@@ -140,6 +140,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Invalid LiveKit credentials: LiveKit rejected the connection
+            made to check the token. Returned only for `application/json`
+            requests, before the file is downloaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "413":
           description: Request body exceeds the configured size limit
           content:
@@ -147,7 +156,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "429":
-          description: Maximum concurrent presentations reached
+          description: >
+            Maximum concurrent presentations reached. The
+            `MAX_CONCURRENT_PRESENTATIONS` limit applies separately to
+            presentations being created or running and to in-flight
+            credential checks.
           content:
             application/json:
               schema:
@@ -160,9 +173,14 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           description: >
-            Unhandled server error (e.g., LiveKit connection failure
-            or unexpected exception). The response body contains a
-            generic message; inspect server logs for details.
+            Unhandled server error. Includes any LiveKit connection
+            failure on the `multipart/form-data` path, a LiveKit failure
+            after a successful credential check on the `application/json`
+            path, and a credential check that fails for a reason other
+            than LiveKit rejecting the connection (for example the
+            sidecar failing to start or to publish its tracks). The
+            response body contains a generic message; inspect server logs
+            for details.
           content:
             application/json:
               schema:
@@ -173,10 +191,8 @@ paths:
       tags: [Presentations]
       summary: Fetch a slide image
       description: |
-        Returns the PNG of a recently shown slide. Slides are cached
-        only for sessions with client composition on, so for other
-        sessions every request returns 404. Clients read the URL from `slide.url`
-        in the presentation state. Each session keeps the last 8 slides.
+        Returns the PNG of a recently shown slide. Clients read the URL
+        from `slide.url` in the presentation state. Each session keeps the last 8 slides.
         Unauthenticated: the content hash is the capability, so the
         response is `private` and shared caches never store it.
       parameters:
@@ -344,9 +360,7 @@ components:
         slide:
           type: object
           description: >
-            Present only when client composition is on for the session,
-            and its presence marks the v2 protocol. The current slide image and
-            its render size in pixels.
+            The current slide image and its render size in pixels.
           properties:
             url:
               type: string
@@ -360,20 +374,20 @@ components:
           type: string
           nullable: true
           description: >
-            Present only when client composition is on. Identity
+            Identity
             of the participant who started the presentation, or null.
         playingVideoIndex:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Index
+            Index
             into `slideVideos` while `videoState` is `loading`,
             `playing` or `paused`; otherwise null.
         videoPositionMs:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Position
+            Position
             in milliseconds of the playing or paused `client` video at
             `videoPositionAt`; otherwise null. Clients target
             `videoPositionMs + (now - videoPositionAt)` while playing and
@@ -382,7 +396,7 @@ components:
           type: integer
           nullable: true
           description: >
-            Present only when client composition is on. Server
+            Server
             epoch milliseconds at which the playing or paused `client`
             video was at `videoPositionMs`; otherwise null. Changes only
             on play, resume and pause.
@@ -429,7 +443,7 @@ components:
           type: string
           enum: [client, stream]
           description: >
-            Present only when client composition is on. `client`
+            `client`
             for YouTube, Google Drive and Vimeo `.m3u8` links that clients
             play from `url`; `stream` for embedded PPTX videos the sidecar
             publishes on `presentation-video` and `presentation-audio`,

@@ -28,7 +28,9 @@ async function getFreePort(): Promise<number> {
 }
 
 async function initComponents(): Promise<TestComponents> {
-  process.env.HTTP_SERVER_PORT = String(await getFreePort())
+  const port = await getFreePort()
+  process.env.HTTP_SERVER_PORT = String(port)
+  process.env.PUBLIC_BASE_URL = `http://localhost:${port}`
   const components = await originalInitComponents()
 
   const { config } = components

@@ -3,7 +3,7 @@ import { createCanvas } from '@napi-rs/canvas'
 import { fitRenderSize } from '../../logic/render-size'
 import { SlideRenderError } from '../renderer/errors'
 import type { IRenderer, IRendererComponent, RenderResult } from './types'
-import type { SlideVideoInfo } from '../video-compositor/types'
+import type { SlideVideoInfo } from '../renderer/types'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 
 /**

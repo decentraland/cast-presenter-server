@@ -1,5 +1,5 @@
 import type { IBaseComponent } from '@well-known-components/interfaces'
-import type { SlideVideoInfo } from '../../adapters/video-compositor/types'
+import type { SlideVideoInfo } from '../../adapters/renderer/types'
 import type { FileType } from '../file-validator'
 import type { OverlayLayout } from '../overlay-layout'
 
@@ -12,9 +12,6 @@ export interface PresentationSession {
   slideCount: number
   currentSlide: number
   createdAt: Date
-  lastFrameBuffer: Buffer | null
-  lastFrameWidth: number
-  lastFrameHeight: number
   slideVideos: SlideVideoInfo[]
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 }
@@ -38,7 +35,6 @@ export interface PresentationState {
   slideCount: number
   currentSlide: number
   fileType: FileType
-  /** Slide videos; `source` is present only with client composition enabled. */
   slideVideos: Array<SlideVideoInfo & { source?: VideoSource }>
   videoState: 'idle' | 'loading' | 'playing' | 'paused' | 'error'
   /** Human-readable error message; present only when videoState === 'error'. */
@@ -51,15 +47,15 @@ export interface PresentationState {
   videoErrorCode?: string
   /** Camera-bubble layout; bubble centre as fractions of the slide. */
   overlay: OverlayLayout
-  /** Current slide image and its render size; present only with client composition enabled. */
+  /** Current slide image and its render size. */
   slide?: { url: string; width: number; height: number }
-  /** Identity of the participant whose camera fills the bubble; present only with client composition enabled. */
+  /** Identity of the participant whose camera fills the bubble. */
   presenterIdentity?: string | null
-  /** Index into `slideVideos` while a video is loading, playing or paused; present only with client composition enabled. */
+  /** Index into `slideVideos` while a video is loading, playing or paused. */
   playingVideoIndex?: number | null
-  /** Client-played video position in ms at `videoPositionAt`; present only with client composition enabled. */
+  /** Client-played video position in ms at `videoPositionAt`. */
   videoPositionMs?: number | null
-  /** Server epoch ms at which the client-played video was at `videoPositionMs`; present only with client composition enabled. */
+  /** Server epoch ms at which the client-played video was at `videoPositionMs`. */
   videoPositionAt?: number | null
 }
 
@@ -67,7 +63,7 @@ export interface PresentationState {
  * Manages presentation lifecycle including slide navigation, video playback,
  * and LiveKit stream publishing.
  *
- * Orchestrates pdf-renderer, livekit-publisher, and video-compositor adapters
+ * Orchestrates the slide-renderer, sidecar-publisher and media-encoder adapters
  * to deliver real-time presentation streaming.
  */
 export interface IPresentationManager extends IBaseComponent {
@@ -78,14 +74,15 @@ export interface IPresentationManager extends IBaseComponent {
    * running expensive work (e.g. downloading a user-supplied URL).
    *
    * @throws {InvalidLivekitCredentialsError} When the token is rejected by the room
+   * @throws {MaxConcurrentPresentationsError} When too many credential checks are already in flight
    */
   validateCredentials(livekitUrl: string, livekitToken: string): Promise<void>
 
   /**
    * Creates a new presentation session from a file buffer.
    *
-   * Connects to LiveKit first (fail-fast auth), then renders the PDF,
-   * publishes the first slide, and starts the heartbeat.
+   * Connects to LiveKit first (fail-fast auth), then loads the deck and
+   * renders the first slide.
    *
    * @param fileBuffer - Raw bytes of the PDF or PPTX file
    * @param fileType - Detected file format
