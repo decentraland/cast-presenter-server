@@ -1,7 +1,7 @@
 import type { ILoggerComponent } from '@well-known-components/interfaces'
 import type { IHttpServerComponent } from '@dcl/core-commons'
 import { InvalidUrlError } from '../../src/adapters/file-provider'
-import { SlideRenderError } from '../../src/adapters/renderer'
+import { SlideRenderError, TooManySlidesError } from '../../src/adapters/renderer'
 import { createPresentationHandler } from '../../src/controllers/handlers/create-presentation-handler'
 import { InvalidLivekitCredentialsError } from '../../src/logic/presentation-manager'
 import { createLoggerMock, createMockLogger } from '../mocks/context'
@@ -476,6 +476,21 @@ describe('when handling a create presentation request', () => {
 
       it('should not leak the native error message', () => {
         expect(JSON.stringify(result.body)).not.toContain('skia')
+      })
+    })
+
+    describe('and the presentation has more slides than allowed', () => {
+      beforeEach(async () => {
+        result = await createPresentationHandler(
+          createJsonContext(
+            { url: 'https://example.com/file.pdf', livekitToken: 't', livekitUrl: 'wss://lk.example.com' },
+            { createPresentationError: new TooManySlidesError(501, 500) }
+          )
+        )
+      })
+
+      it('should respond with a 400 and the slide limit', () => {
+        expect(result).toEqual({ status: 400, body: { error: 'Presentation has too many slides (501, max 500)' } })
       })
     })
 

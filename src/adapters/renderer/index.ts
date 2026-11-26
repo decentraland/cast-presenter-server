@@ -1,2 +1,2 @@
 export type { IRenderer, IRendererComponent, RenderResult } from './types'
-export { SlideRenderError } from './errors'
+export { SlideRenderError, TooManySlidesError } from './errors'

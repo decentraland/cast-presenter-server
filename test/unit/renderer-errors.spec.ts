@@ -12,7 +12,8 @@ jest.mock(
         numPages: 1,
         loadingTask: { destroy: async () => undefined },
         getPage: async () => ({
-          getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 300 * scale })
+          getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 300 * scale }),
+          cleanup: () => true
         })
       })
     })

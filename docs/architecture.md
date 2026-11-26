@@ -106,8 +106,8 @@ handlers.
 Adapters wrap external systems and provide clean interfaces to the
 presentation manager.
 
-- **SlideRenderer:** Runs one child process per session that parses
-  the PDF/PPTX file and renders slides to PNG images (see
+- **SlideRenderer:** Forks a short-lived child process per deck that
+  parses the PDF/PPTX file and writes every slide as a PNG image (see
   [Slide renderer process](#slide-renderer-process)). Inside the child,
   the PDF adapter uses pdfjs-dist and @napi-rs/canvas to render slides
   and extract video annotations with geometry information. pdfjs 6 decodes CCITT fax,
@@ -124,17 +124,44 @@ presentation manager.
 ### Slide renderer process
 
 Each session forks one child process (`src/adapters/slide-renderer/`,
-entry `worker.ts`) that loads the document, renders slides and encodes
-the PNGs. It is the only place `@napi-rs/canvas` and `pdfjs-dist` are
-loaded, so the server process loads no native rendering or LiveKit
-code. The server and the child exchange request and response messages
-over IPC.
+entry `worker.ts`) that renders the whole deck and then exits, so a
+live session holds no render process. The child is the only place
+`@napi-rs/canvas` and `pdfjs-dist` are loaded, so the server process
+loads no native rendering or LiveKit code.
 
-If the child exits, that session's pending and later render calls fail
-with `SlideRenderError`, which the create endpoint maps to 422. The
-child is not respawned and renders have no timeout. Other sessions and
-the server are unaffected. Stopping a session shuts its child down and
-removes its extracted media directory.
+The server creates one temporary directory per renderer and forks the
+child with `TMPDIR` pointing at it, so the PNGs and any embedded media
+the child extracts land there. Over IPC, the server sends one request
+with the document. The child replies with the slide count, then
+renders the slides in order and sends one report per slide with its
+image (hash and size), its videos and the embedded media directory.
+The PNG bytes stay on disk as `<index>.png`. A slide's image and its
+videos succeed or fail independently, so a slide whose image fails
+still reports its videos, and the child carries on with the next
+slide. A slide requested before the child reaches it waits its turn.
+
+The child bounds what one deck can write. A deck with more than 500
+slides is rejected before any slide renders, and the create endpoint
+returns 400. A deck may write up to 2 GiB of PNGs: once the next
+image would exceed that, it and every later slide image fail with a
+`SlideRenderError` that names the deck's image budget, and the slides
+already written keep working. The renderer logs one warning with the
+index of the first slide that didn't fit and the slide count. All
+renderers on the server share a 4 GiB PNG budget, counted from the
+byte size the child reports for each written image and released when
+a renderer is destroyed; the renderer whose report crosses it logs one
+warning, kills its child, and fails its unreported slides with a
+`SlideRenderError` that names the server's budget.
+
+If the child exits before reporting a slide, that slide and every
+later unreported one fail with `SlideRenderError`, which the create
+endpoint maps to 422. Slides already reported keep working. The
+renderer logs one warning with the exit code or signal and the number
+of unrendered slides. The child is not respawned and renders have no
+timeout. Other sessions and the server are unaffected. Stopping a
+session kills the child if it is still running and removes the
+renderer's directory, extracted media included. If the server process
+itself exits, the child exits when it next reports a slide.
 
 ### Slide fonts
 
@@ -157,18 +184,18 @@ draws some symbols such as ❏ as ⊠.
 Each presentation runs as an in-memory session identified by a UUID.
 
 1. **Create:** The server connects to LiveKit through the sidecar
-   first (validating the token), then forks the slide renderer, parses
-   the document, renders the first slide, and broadcasts the state.
-2. **Navigate:** Stops any active video, renders the target slide,
-   and broadcasts updated state.
+   first (validating the token), then forks the slide renderer, waits
+   for the slide count and the first slide, and broadcasts the state.
+2. **Navigate:** Stops any active video, loads the target slide's PNG
+   once the renderer has written it, and broadcasts updated state.
 3. **Play video:** Starts the sidecar playback of a baked embedded
    video, or tracks the state of a client-played one.
 4. **Pause/Resume:** Pauses or resumes the sidecar playback, or moves
    the position anchor of a client-played video.
 5. **Stop:** Aborts in-flight bakes first, so none of them races the
-   temporary-directory cleanup. Then it shuts down the sidecar and the
-   slide renderer, cleans up the temporary directory, and removes the
-   session.
+   temporary-directory cleanup. Then it shuts down the sidecar, removes
+   the slide renderer's directory, cleans up the temporary directory,
+   and removes the session.
 6. **Idle cleanup:** A periodic check (every 60 seconds) terminates
    sessions with no remote participants for 5 minutes.
 

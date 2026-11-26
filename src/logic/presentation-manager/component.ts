@@ -485,7 +485,11 @@ export async function createPresentationManager(
     const urls = new Set<string>()
     for (let i = 0; i < session.slideCount; i++) {
       if (session.abortController.signal.aborted) break
-      for (const video of await session.renderer.getSlideVideos(i)) urls.add(video.url)
+      try {
+        for (const video of await session.renderer.getSlideVideos(i)) urls.add(video.url)
+      } catch (err) {
+        logger.warn(`Skipping slide ${i} videos for prefetch: ${errorMessage(err)}`)
+      }
     }
     return urls
   }
@@ -600,10 +604,9 @@ export async function createPresentationManager(
 
   async function prefetchBakes(session: InternalSession): Promise<void> {
     const { signal } = session.abortController
+    const deckUrls = await deckVideoUrls(session)
     const embeddedDir = session.renderer.getEmbeddedMediaDir()
-    const urls = [...(await deckVideoUrls(session))].filter(
-      (url) => mediaEncoder.resolveEmbeddedVideo(url, embeddedDir) !== null
-    )
+    const urls = [...deckUrls].filter((url) => mediaEncoder.resolveEmbeddedVideo(url, embeddedDir) !== null)
     if (signal.aborted) return
     logger.info(`Prefetch bake queue: ${urls.length} embedded videos to process (limit: ${MAX_PRE_DOWNLOADS})`)
     for (const url of urls.slice(0, MAX_PRE_DOWNLOADS)) {

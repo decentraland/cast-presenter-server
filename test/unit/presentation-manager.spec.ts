@@ -1975,6 +1975,45 @@ describe('when presenting through the sidecar', () => {
     })
   })
 
+  describe('and the videos of one slide cannot be read before a slide with an embedded video', () => {
+    beforeEach(async () => {
+      renderer.getSlideCount.mockReturnValue(3)
+      renderer.getSlideVideos.mockImplementation(async (slide: number) => {
+        if (slide === 1) throw new Error('Slide videos lookup failed')
+        return slide === 2 ? [{ url: VIDEO_URL, geometry: GEOMETRY }] : []
+      })
+      await createSession()
+    })
+
+    it('should still prefetch the embedded video of the later slide', () => {
+      expect(components.mediaEncoder.bake.mock.calls).toEqual([
+        [EMBEDDED_PATH, expect.any(String), { priority: 'prefetch', signal: expect.any(AbortSignal) }]
+      ])
+    })
+  })
+
+  describe('and the embedded media directory is only known once a later slide has reported its videos', () => {
+    beforeEach(async () => {
+      let reportedSlides = 0
+      renderer.getSlideCount.mockReturnValue(3)
+      renderer.getSlideVideos.mockImplementation(async (slide: number) => {
+        reportedSlides = Math.max(reportedSlides, slide + 1)
+        return slide === 2 ? [{ url: VIDEO_URL, geometry: GEOMETRY }] : []
+      })
+      renderer.getEmbeddedMediaDir.mockImplementation(() => (reportedSlides === 3 ? '/tmp/cast-pptx-video-a' : null))
+      components.mediaEncoder.resolveEmbeddedVideo.mockImplementation((_url: string, dir: string | null) =>
+        dir ? { path: EMBEDDED_PATH, bytes: 0 } : null
+      )
+      await createSession()
+    })
+
+    it('should prefetch the embedded video', () => {
+      expect(components.mediaEncoder.bake.mock.calls).toEqual([
+        [EMBEDDED_PATH, expect.any(String), { priority: 'prefetch', signal: expect.any(AbortSignal) }]
+      ])
+    })
+  })
+
   describe('and the deck has more YouTube videos than the prefetch limit before an embedded video', () => {
     beforeEach(async () => {
       renderer.getSlideCount.mockReturnValue(11)

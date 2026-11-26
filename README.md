@@ -8,7 +8,7 @@ slides and can control the presentation through data channel commands.
 ## Features
 
 - **Slide rendering:** Renders PDF/PPTX slides to PNG images in a
-  per-session child process and serves them to clients.
+  short-lived child process per deck and serves them to clients.
 - **Embedded video playback:** Bakes videos embedded in PPTX files with
   ffmpeg and publishes them through the sidecar; clients play
   YouTube, Google Drive and Vimeo links themselves.

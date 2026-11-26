@@ -10,14 +10,16 @@ jest.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({ getDocument: (...args: unk
 describe('when a PDF is loaded', () => {
   let renderer: ReturnType<ReturnType<typeof createPdfRendererComponent>['createRenderer']>
   let destroyLoadingTask: jest.Mock
+  let cleanupPage: jest.Mock
 
   beforeEach(async () => {
     destroyLoadingTask = jest.fn()
+    cleanupPage = jest.fn()
     getDocument.mockReturnValue({
       promise: Promise.resolve({
         numPages: 1,
         loadingTask: { destroy: destroyLoadingTask },
-        getPage: async () => ({ getViewport: () => ({ width: 0, height: 0 }) })
+        getPage: async () => ({ getViewport: () => ({ width: 0, height: 0 }), cleanup: cleanupPage })
       })
     })
     renderer = createPdfRendererComponent().createRenderer()
@@ -41,6 +43,10 @@ describe('when a PDF is loaded', () => {
 
     it('should reject with a SlideRenderError', () => {
       expect(error).toBeInstanceOf(SlideRenderError)
+    })
+
+    it('should still release the page', () => {
+      expect(cleanupPage).toHaveBeenCalled()
     })
   })
 

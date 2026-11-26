@@ -70,8 +70,9 @@ function createRenderer(): IRenderer {
     async renderSlide(index: number): Promise<RenderResult> {
       if (!doc) throw new Error('PDF not initialized')
 
+      let page: PDFPageProxy | null = null
       try {
-        const page = await doc.getPage(index + 1)
+        page = await doc.getPage(index + 1)
         const baseViewport = page.getViewport({ scale: 1 })
         const { scale, width, height } = fitRenderSize(baseViewport.width, baseViewport.height)
         const viewport = page.getViewport({ scale })
@@ -112,6 +113,8 @@ function createRenderer(): IRenderer {
         return { buffer: Buffer.from(imageData.data.buffer), width, height }
       } catch (err) {
         throw new SlideRenderError(index, err)
+      } finally {
+        page?.cleanup()
       }
     },
 

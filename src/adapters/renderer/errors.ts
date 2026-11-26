@@ -12,3 +12,11 @@ export class SlideRenderError extends Error {
     this.cause = cause
   }
 }
+
+/** Thrown when a presentation has more slides than the render process accepts. */
+export class TooManySlidesError extends Error {
+  constructor(slideCount: number, maxSlides: number) {
+    super(`Presentation has too many slides (${slideCount}, max ${maxSlides})`)
+    this.name = 'TooManySlidesError'
+  }
+}

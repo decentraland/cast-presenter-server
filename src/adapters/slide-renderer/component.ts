@@ -1,87 +1,171 @@
 import { fork } from 'child_process'
-import { rmSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
+import { readFile } from 'fs/promises'
+import os from 'os'
 import path from 'path'
-import { SlideRenderError } from '../renderer/errors'
+import { errorMessage } from '../../logic/error-message'
+import { SlideRenderError, TooManySlidesError } from '../renderer/errors'
 import type { ISlideRenderer, ISlideRendererComponent } from './types'
-import type { WorkerResponse, WorkerResults } from './worker'
+import type { SlideReport, WorkerMessage, WorkerRequest } from './worker'
 import type { FileType } from '../../logic/file-validator'
 import type { SlideImage } from '../../logic/slide-image'
+import type { AppComponents } from '../../types'
 import type { SlideVideoInfo } from '../renderer/types'
 
-const DESTROY_GRACE_MS = 2_000
+/** PNG bytes the live renderers of one component may hold on disk together. */
+export const MAX_SERVER_PNG_BYTES = 4 * 1024 * 1024 * 1024
 
-interface PendingCall {
-  index: number
-  resolve(result: unknown): void
-  reject(error: Error): void
+interface Settleable<T> {
+  promise: Promise<T>
+  settle(result: T | Error): void
+}
+
+function settleable<T>(): Settleable<T> {
+  let settle: (result: T | Error) => void = () => undefined
+  const promise = new Promise<T>((resolve, reject) => {
+    settle = (result) => (result instanceof Error ? reject(result) : resolve(result))
+  })
+  promise.catch(() => undefined)
+  return { promise, settle }
 }
 
 /**
- * Creates the slide renderer component. Each renderer it creates forks its own
- * render process, so a native crash while rendering ends only that renderer.
+ * Creates the slide renderer component. Each renderer forks a render process that
+ * writes every slide of its deck to a directory the renderer owns, then exits, so a
+ * native crash while rendering ends only that renderer and a live session holds no process.
  *
+ * Every renderer of the component shares one budget of PNG bytes on disk; the renderer whose
+ * report pushes it past `MAX_SERVER_PNG_BYTES` stops its render process.
+ *
+ * @param components.logs - Logger factory; warns when a render process exits before finishing its deck or exceeds the shared budget
  * @param options.workerPath - Entry point of the render process; defaults to the sibling `worker` module
  * @returns The slide renderer factory component
  */
-export function createSlideRendererComponent(options: { workerPath?: string } = {}): ISlideRendererComponent {
+export function createSlideRendererComponent(
+  components: Pick<AppComponents, 'logs'>,
+  options: { workerPath?: string } = {}
+): ISlideRendererComponent {
+  const logger = components.logs.getLogger('slide-renderer')
   const workerPath = options.workerPath ?? path.join(__dirname, `worker${path.extname(__filename)}`)
   const execArgv = workerPath.endsWith('.ts') ? ['-r', 'ts-node/register/transpile-only'] : []
+  let serverPngBytes = 0
 
   function createRenderer(fileType: FileType): ISlideRenderer {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'cast-slides-'))
     const child = fork(workerPath, [], {
       serialization: 'advanced',
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      execArgv
+      execArgv,
+      env: { ...process.env, TMPDIR: dir }
     })
-    const pending = new Map<number, PendingCall>()
-    let nextId = 0
-    let exitCause: Error | null = null
+    const deck = settleable<number>()
+    let slides: Array<Settleable<SlideReport>> = []
     let slideCount: number | null = null
+    let reportedSlides = 0
+    let deckFailed = false
     let embeddedMediaDir: string | null = null
+    let destroyed = false
+    let pngBytes = 0
+    let stopCause: Error | null = null
 
-    function markDead(cause: Error): void {
-      exitCause ??= cause
-      for (const call of pending.values()) call.reject(new SlideRenderError(call.index, exitCause))
-      pending.clear()
+    function removeDir(): void {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch (error) {
+        logger.warn(`Failed to remove slide render directory: ${errorMessage(error)}`, { dir })
+      }
     }
 
-    child.on('message', (response: WorkerResponse) => {
-      const call = pending.get(response.id)
-      if (!call) return
-      pending.delete(response.id)
-      if ('error' in response) call.reject(new Error(response.error))
-      else call.resolve(response.result)
-    })
-    child.on('error', markDead)
-    child.on('exit', (code, signal) => markDead(new Error(`Slide render process exited with ${signal ?? code}`)))
+    function fail(cause: Error): void {
+      deck.settle(new SlideRenderError(0, cause))
+      slides.forEach((slide, index) => slide.settle(new SlideRenderError(index, cause)))
+    }
 
-    function call<Op extends keyof WorkerResults>(op: Op, index: number, fields = {}): Promise<WorkerResults[Op]> {
-      return new Promise((resolve, reject) => {
-        if (exitCause) return reject(new SlideRenderError(index, exitCause))
-        const id = nextId++
-        pending.set(id, { index, resolve, reject })
-        child.send({ ...fields, id, op, index })
+    function slideAt(index: number): Promise<SlideReport> {
+      return slides[index]?.promise ?? Promise.reject(new SlideRenderError(index, new Error('Slide is out of range')))
+    }
+
+    function addPngBytes({ index, image }: SlideReport): void {
+      if (destroyed || 'error' in image) return
+      pngBytes += image.bytes
+      serverPngBytes += image.bytes
+      if (serverPngBytes <= MAX_SERVER_PNG_BYTES || stopCause || child.exitCode !== null || child.signalCode !== null) {
+        return
+      }
+      logger.warn('Deck exceeded the server-wide slide image budget', {
+        index,
+        slideCount: slideCount ?? 'unknown'
       })
+      stopCause = new Error("The server's slide image budget was exceeded")
+      child.kill('SIGKILL')
+      fail(stopCause)
     }
+
+    function send(request: WorkerRequest): void {
+      child.send(request)
+    }
+
+    child.on('message', (message: WorkerMessage) => {
+      switch (message.type) {
+        case 'deck':
+          slideCount = message.slideCount
+          slides = Array.from({ length: message.slideCount }, () => settleable<SlideReport>())
+          deck.settle(message.slideCount)
+          break
+        case 'deckFailed':
+          deckFailed = true
+          deck.settle(new Error(message.error))
+          break
+        case 'tooManySlides':
+          deckFailed = true
+          deck.settle(new TooManySlidesError(message.slideCount, message.maxSlides))
+          break
+        case 'imageBudgetExceeded':
+          logger.warn('Deck exceeded its slide image budget', {
+            index: message.index,
+            slideCount: slideCount ?? 'unknown'
+          })
+          break
+        case 'slide':
+          reportedSlides++
+          embeddedMediaDir = message.embeddedMediaDir
+          slides[message.index]?.settle(message)
+          addPngBytes(message)
+          break
+      }
+    })
+    child.on('error', fail)
+    child.on('close', (code, signal) => {
+      const exit = signal ?? code ?? 'unknown'
+      const unrenderedSlides = slideCount === null ? 'unknown' : slideCount - reportedSlides
+      if (!destroyed && !deckFailed && !stopCause && unrenderedSlides !== 0) {
+        logger.warn(`Slide render process exited with ${exit} before finishing the deck`, { exit, unrenderedSlides })
+      }
+      fail(stopCause ?? new Error(`Slide render process exited with ${exit}`))
+      if (destroyed) removeDir()
+    })
 
     return {
       async initialize(fileBuffer: Buffer): Promise<void> {
-        ;({ slideCount } = await call('initialize', 0, { fileType, buffer: fileBuffer }))
+        send({ fileType, buffer: fileBuffer, outputDir: dir })
+        await deck.promise
       },
 
       async renderSlide(index: number): Promise<SlideImage> {
+        const { image } = await slideAt(index)
+        if ('error' in image) throw new SlideRenderError(index, new Error(image.error))
+        const { hash, width, height } = image
         try {
-          const image = await call('renderSlide', index)
-          return { ...image, png: Buffer.from(image.png) }
+          return { hash, width, height, png: await readFile(path.join(dir, `${index}.png`)) }
         } catch (err) {
-          throw err instanceof SlideRenderError ? err : new SlideRenderError(index, err)
+          throw new SlideRenderError(index, err)
         }
       },
 
       async getSlideVideos(index: number): Promise<SlideVideoInfo[]> {
-        const reply = await call('getSlideVideos', index)
-        embeddedMediaDir = reply.embeddedMediaDir
-        return reply.videos
+        const { videos } = await slideAt(index)
+        if ('error' in videos) throw new Error(videos.error)
+        return videos
       },
 
       getEmbeddedMediaDir(): string | null {
@@ -94,9 +178,10 @@ export function createSlideRendererComponent(options: { workerPath?: string } = 
       },
 
       destroy(): void {
-        if (child.connected) child.send({ op: 'destroy' })
-        setTimeout(() => child.kill('SIGKILL'), DESTROY_GRACE_MS).unref()
-        if (embeddedMediaDir) rmSync(embeddedMediaDir, { recursive: true, force: true })
+        if (!destroyed) serverPngBytes -= pngBytes
+        destroyed = true
+        child.kill('SIGKILL')
+        removeDir()
       }
     }
   }
