@@ -12,7 +12,7 @@ import type { IRendererComponent, SlideVideoInfo } from '../renderer/types'
 export const MAX_SLIDES = 500
 
 /** Total PNG bytes one deck may write. */
-export const MAX_DECK_PNG_BYTES = 500 * 1024 * 1024
+export const MAX_DECK_PNG_BYTES = 2 * 1024 * 1024 * 1024
 
 /** The single request the server sends its render process. */
 export interface WorkerRequest {
@@ -41,11 +41,15 @@ export interface SlideReport {
   embeddedMediaDir: string | null
 }
 
-/** Messages the render process streams back: the slide count, then one report per slide in order. */
+/**
+ * Messages the render process streams back: the slide count, then one report per slide in order,
+ * preceded once by `imageBudgetExceeded` at the first slide whose image did not fit the deck budget.
+ */
 export type WorkerMessage =
   | { type: 'deck'; slideCount: number }
   | { type: 'deckFailed'; error: string }
   | { type: 'tooManySlides'; slideCount: number; maxSlides: number }
+  | { type: 'imageBudgetExceeded'; index: number }
   | SlideReport
 
 const RENDERER_FACTORIES: Record<FileType, () => IRendererComponent> = {
@@ -81,16 +85,18 @@ export async function renderDeck(
   if (slideCount > MAX_SLIDES) return send({ type: 'tooManySlides', slideCount, maxSlides: MAX_SLIDES })
   await send({ type: 'deck', slideCount })
 
-  const overBudget = new Error(`Deck exceeds ${maxPngBytes} bytes of slide images`)
+  const overBudget = new Error(`Deck exceeded its image budget of ${maxPngBytes} bytes`)
   let pngBytes = 0
-  let budgetExceeded = false
+  let firstSlideOverBudget: number | null = null
 
   async function writeImage(index: number): Promise<SlideImageInfo> {
-    if (budgetExceeded) throw overBudget
+    if (firstSlideOverBudget !== null) throw overBudget
     const { buffer: rgba, width, height } = await renderer.renderSlide(index)
     const { png, hash } = await encodeSlidePng(rgba, width, height)
-    budgetExceeded = pngBytes + png.length > maxPngBytes
-    if (budgetExceeded) throw overBudget
+    if (pngBytes + png.length > maxPngBytes) {
+      firstSlideOverBudget = index
+      throw overBudget
+    }
     pngBytes += png.length
     await writeFile(path.join(outputDir, `${index}.png`), png)
     return { hash, width, height }
@@ -98,6 +104,7 @@ export async function renderDeck(
 
   for (let index = 0; index < slideCount; index++) {
     const image = await writeImage(index).catch(failure)
+    if (firstSlideOverBudget === index) await send({ type: 'imageBudgetExceeded', index })
     const videos = await renderer.getSlideVideos(index).catch(failure)
     await send({ type: 'slide', index, image, videos, embeddedMediaDir: renderer.getEmbeddedMediaDir() })
   }

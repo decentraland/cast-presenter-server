@@ -95,6 +95,12 @@ export function createSlideRendererComponent(
           deckFailed = true
           deck.settle(new TooManySlidesError(message.slideCount, message.maxSlides))
           break
+        case 'imageBudgetExceeded':
+          logger.warn('Deck exceeded its slide image budget', {
+            index: message.index,
+            slideCount: slideCount ?? 'unknown'
+          })
+          break
         case 'slide':
           reportedSlides++
           embeddedMediaDir = message.embeddedMediaDir

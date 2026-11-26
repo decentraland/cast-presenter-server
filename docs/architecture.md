@@ -142,9 +142,11 @@ slide. A slide requested before the child reaches it waits its turn.
 
 The child bounds what one deck can write. A deck with more than 500
 slides is rejected before any slide renders, and the create endpoint
-returns 400. A deck may write up to 500 MB of PNGs: once the next
-image would exceed that, it and every later slide image fail with
-`SlideRenderError`, and the slides already written keep working.
+returns 400. A deck may write up to 2 GiB of PNGs: once the next
+image would exceed that, it and every later slide image fail with a
+`SlideRenderError` that names the deck's image budget, and the slides
+already written keep working. The renderer logs one warning with the
+index of the first slide that didn't fit and the slide count.
 
 If the child exits before reporting a slide, that slide and every
 later unreported one fail with `SlideRenderError`, which the create

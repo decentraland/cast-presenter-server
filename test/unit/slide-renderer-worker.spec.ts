@@ -60,7 +60,19 @@ describe('when the slide images exceed the deck budget', () => {
     const onePngBytes = statSync(path.join(probeDir, '0.png')).size
     rmSync(probeDir, { recursive: true, force: true })
     await renderDeck({ fileType: 'pptx', buffer: deck, outputDir }, send, onePngBytes)
-    slideReports = messages.slice(1)
+    slideReports = messages.filter((message) => message.type === 'slide')
+  })
+
+  it('should report the exhausted budget once with the first slide that did not fit', () => {
+    expect(messages.filter((message) => message.type === 'imageBudgetExceeded')).toEqual([
+      { type: 'imageBudgetExceeded', index: 1 }
+    ])
+  })
+
+  it('should fail the slide images past the budget with an image budget error', () => {
+    expect(slideReports[1]).toEqual(
+      expect.objectContaining({ image: { error: expect.stringContaining('image budget') } })
+    )
   })
 
   it('should report the first slide image and fail the slides past the budget', () => {

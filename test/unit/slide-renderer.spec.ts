@@ -198,6 +198,33 @@ describe('when the first slide image fails to render', () => {
   })
 })
 
+describe('when the deck exceeds its slide image budget', () => {
+  let renderProcess: RenderProcess
+  let secondError: unknown
+
+  beforeEach(async () => {
+    renderProcess = startRenderer('pptx', SCRIPTED_WORKER)
+    const { renderer } = renderProcess
+    await renderer.initialize(Buffer.from('exceed-image-budget'))
+    secondError = await renderer.renderSlide(1).catch((error: unknown) => error)
+    await renderProcess.closed
+  })
+
+  afterEach(() => {
+    renderProcess.renderer.destroy()
+  })
+
+  it('should warn once with the first slide that did not fit and the slide count', () => {
+    expect(logger.warn.mock.calls).toEqual([[expect.any(String), { index: 1, slideCount: 2 }]])
+  })
+
+  it('should reject the slide past the budget with a SlideRenderError naming the image budget', () => {
+    expect(secondError).toEqual(
+      expect.objectContaining({ name: 'SlideRenderError', message: expect.stringContaining('image budget') })
+    )
+  })
+})
+
 describe('when the renderer is destroyed while the deck is rendering', () => {
   let renderProcess: RenderProcess
   let embeddedMediaDir: string | null

@@ -36,6 +36,17 @@ process.once('message', async ({ buffer, outputDir }: WorkerRequest) => {
       : renderedSlide(0, outputDir)
   )
   if (scenario === 'kill-after-first') killSelf()
+  if (scenario === 'exceed-image-budget') {
+    await send({ type: 'imageBudgetExceeded', index: 1 })
+    await send({
+      type: 'slide',
+      index: 1,
+      image: { error: 'Deck exceeded its image budget of 1 bytes' },
+      videos: [],
+      embeddedMediaDir: null
+    })
+    process.exit()
+  }
   await send(renderedSlide(1, outputDir))
   process.exit()
 })
